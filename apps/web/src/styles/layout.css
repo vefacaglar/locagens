@@ -404,16 +404,39 @@
    controls inside them opt back out of dragging. These rules are scoped to
    .is-desktop and have no effect in the plain browser build. */
 .is-desktop .sidebar-header,
-.is-desktop .chat-header {
+.is-desktop .chat-header,
+.is-desktop .workspace-panel-header {
   -webkit-app-region: drag;
 }
+
+/* Full-width draggable strip pinned to the top edge of the window. It sits
+   above every column (sidebar + chat + side panel) so the whole window width
+   is double-click-to-zoom target area, including the dead zone above the
+   header bars. Transparent + non-interactive so it never blocks clicks that
+   pass through to controls underneath; it only claims dragging. */
+.is-desktop .window-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--shell-inset);
+  -webkit-app-region: drag;
+  z-index: 50;
+  pointer-events: auto;
+}
+
+/* The sidebar's top control row now matches the chat header height so its
+   draggable area is as tall and comfortable to grab as the main header. */
 
 .is-desktop .sidebar-header button,
 .is-desktop .sidebar-header a,
 .is-desktop .sidebar-header input,
 .is-desktop .chat-header button,
 .is-desktop .chat-header a,
-.is-desktop .chat-header input {
+.is-desktop .chat-header input,
+.is-desktop .workspace-panel-header button,
+.is-desktop .workspace-panel-header a,
+.is-desktop .workspace-panel-header input {
   -webkit-app-region: no-drag;
 }
 

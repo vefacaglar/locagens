@@ -12,7 +12,7 @@ if (navigator.userAgent.includes('Electron') || (window as any).__LOCAGENS_DESKT
   // behavior), and again restores it. Ignore double-clicks on actual controls.
   document.addEventListener('dblclick', (e) => {
     const target = e.target as HTMLElement
-    if (!target.closest('.chat-header, .sidebar-header')) return
+    if (!target.closest('.chat-header, .sidebar-header, .workspace-panel-header, .window-drag-strip')) return
     if (target.closest('button, a, input, textarea, select, [role="button"]')) return
     ;(window as any).__LOCAGENS_DESKTOP__?.toggleMaximize?.()
   })

@@ -63,7 +63,7 @@
      the same inset, and every header band is --top-bar-h tall. This puts all
      three control rows on one baseline and all dividers at the same y. */
   --shell-inset: 12px;
-  --top-bar-h: 44px;
+  --top-bar-h: 52px;
   /* One gutter for the floating cards' interiors (sidebar + side panel) so
      their content edges share a vertical line. The middle reading column keeps
      its own wider gutter on purpose. */

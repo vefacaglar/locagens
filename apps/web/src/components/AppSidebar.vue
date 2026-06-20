@@ -452,7 +452,7 @@ function formatRunAge(run: Run): string {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  height: 32px;
+  height: var(--top-bar-h);
   flex: 0 0 auto;
   padding: 0;
   background: transparent;

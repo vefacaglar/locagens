@@ -401,6 +401,10 @@ onUnmounted(() => {
     }"
     :style="{ '--side-panel-w': `${sidePanelWidth}px` }"
   >
+    <!-- Full-width draggable strip across the very top of the window (desktop
+         only). Fills the dead zone above the header bars so double-click-to-
+         zoom works across the entire window width, not just the header areas. -->
+    <div class="window-drag-strip"></div>
     <AppSidebar
       :project-options="projects.projectOptions.value"
       :active-project-path="projects.activeProjectPath.value"
