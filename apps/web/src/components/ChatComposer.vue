@@ -997,6 +997,7 @@ onBeforeUnmount(() => {
 
 .composer-input-box {
   position: relative;
+  flex-shrink: 0;
   background: var(--control-bg);
   border: 1px solid var(--control-border);
   border-radius: 14px;
@@ -1017,6 +1018,7 @@ onBeforeUnmount(() => {
 
 .composer-token-info {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   align-items: center;
   margin-bottom: 8px;
@@ -1222,6 +1224,7 @@ onBeforeUnmount(() => {
 
 .composer-menu-row {
   display: flex;
+  flex-shrink: 0;
   justify-content: space-between;
   align-items: center;
   margin-top: 11px;

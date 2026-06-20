@@ -191,6 +191,7 @@
   height: 100%;
   flex-direction: column;
   background: transparent;
+  container-type: inline-size;
 }
 
 .sidebar-backdrop,
@@ -372,32 +373,6 @@
     max-width: 180px;
   }
 
-  .composer-wrap {
-    padding: 10px 16px 14px;
-    margin-right: 0;
-  }
-
-  .composer-menu-row {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .composer-status-section {
-    width: 100%;
-    justify-content: space-between;
-    margin-top: 4px;
-    padding-top: 6px;
-    border-top: 1px solid var(--composer-status-border);
-  }
-
-  .composer-input-box {
-    padding: 10px 54px 10px 12px;
-  }
-
-  .composer-send-btn {
-    bottom: 6px;
-    right: 8px;
-  }
 
   /* Backdrop overlays for mobile drawers */
   .sidebar-backdrop {
@@ -447,4 +422,35 @@
    button and breadcrumb clear them. */
 .is-desktop .app-shell.sidebar-collapsed .thread-title {
   padding-left: 72px;
+}
+
+@container (max-width: 700px) {
+  .composer-wrap {
+    padding: 10px 16px 14px;
+    margin-right: 0;
+  }
+
+  .composer-input-box {
+    padding: 10px 54px 10px 12px;
+  }
+
+  .composer-send-btn {
+    bottom: 6px;
+    right: 8px;
+  }
+}
+
+@container (max-width: 500px) {
+  .composer-wrap {
+    padding: 8px 12px;
+    margin-right: 0;
+  }
+
+  .composer-menu-row {
+    display: none !important;
+  }
+
+  .composer-token-info {
+    display: none !important;
+  }
 }
