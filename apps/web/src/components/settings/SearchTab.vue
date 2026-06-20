@@ -80,6 +80,20 @@ async function clearStoredKey(clear: () => void) {
   clear();
   await handleSave();
 }
+
+function clearBraveKey() {
+  clearStoredKey(() => {
+    braveApiKey.value = '';
+    hasBraveApiKey.value = false;
+  });
+}
+
+function clearGoogleKey() {
+  clearStoredKey(() => {
+    googleApiKey.value = '';
+    hasGoogleApiKey.value = false;
+  });
+}
 </script>
 
 <template>
@@ -124,7 +138,7 @@ async function clearStoredKey(clear: () => void) {
                 v-if="hasBraveApiKey"
                 variant="danger"
                 size="sm"
-                @click="clearStoredKey(() => { braveApiKey.value = ''; hasBraveApiKey.value = false; })"
+                @click="clearBraveKey"
               >
                 Clear
               </ThemedButton>
@@ -149,7 +163,7 @@ async function clearStoredKey(clear: () => void) {
                 v-if="hasGoogleApiKey"
                 variant="danger"
                 size="sm"
-                @click="clearStoredKey(() => { googleApiKey.value = ''; hasGoogleApiKey.value = false; })"
+                @click="clearGoogleKey"
               >
                 Clear
               </ThemedButton>
