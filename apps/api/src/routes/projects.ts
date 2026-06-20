@@ -198,8 +198,14 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
     const projectPath = run.projectPath || ctx.defaultProjectPath;
 
     try {
-      // Get the git diff.
-      const { stdout: diff } = await execAsync("git diff HEAD", { cwd: projectPath });
+      // Get compact change summary: file stats + truncated diff.
+      // A full diff can be enormous; for commit-message generation we only
+      // need to know *what* changed, not every line.
+      const [{ stdout: stat }, { stdout: diff }] = await Promise.all([
+        execAsync("git diff --stat HEAD", { cwd: projectPath }),
+        execAsync("git diff HEAD", { cwd: projectPath })
+      ]);
+
       if (!diff.trim()) {
         // Fallback to checking if there are untracked files
         const { stdout: status } = await execAsync("git status --porcelain", { cwd: projectPath });
@@ -208,19 +214,25 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
         }
       }
 
-      // Truncate the diff if it is too large (e.g. limit to 12000 chars to avoid model context blow up)
-      const maxDiffLen = 12000;
-      const truncatedDiff = diff.length > maxDiffLen ? diff.slice(0, maxDiffLen) + "\n... [diff truncated] ..." : diff;
+      // Keep only the first 3000 chars of the actual diff -- enough for the
+      // model to understand the nature of the changes without bloating context.
+      const maxDiffLen = 3000;
+      const truncatedDiff = diff.length > maxDiffLen
+        ? diff.slice(0, maxDiffLen) + "\n... [diff truncated] ..."
+        : diff;
 
       const providerId = run.coderProviderId || run.providerId;
       const model = run.coderModel || run.model;
 
       const provider = ctx.registry.getProvider(providerId);
-      const prompt = `Write a concise, professional Git commit message based on the following diff.
+      const prompt = `Write a concise, professional Git commit message based on the following changes.
 Use the conventional commits format (e.g., feat: ..., fix: ..., chore: ..., docs: ..., refactor: ..., style: ...).
 The message should be short (50-72 characters for the subject line) and summarize the key changes. Do not include markdown formatting or backticks around the message. Just output the message itself.
 
-Diff:
+Changed files (${stat.trim().split("\n").length - 1} files):
+${stat.trim()}
+
+Diff (partial):
 ${truncatedDiff}`;
 
       const result = await provider.complete({

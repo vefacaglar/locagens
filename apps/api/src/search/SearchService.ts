@@ -144,12 +144,6 @@ function parseDuckDuckGoResults(html: string): SearchResult[] {
   return results;
 }
 
-interface BraveSearchResult {
-  title: string;
-  url: string;
-  description: string;
-}
-
 interface BraveSearchPayload {
   web?: { results?: unknown[] };
 }
@@ -180,7 +174,7 @@ async function searchBrave(query: string, maxResults: number, apiKey: string): P
     const rawResults = data.web?.results ?? [];
     const results = rawResults
       .map(toBraveSearchResult)
-      .filter((r): r is SearchResult => Boolean(r.title && r.url));
+      .filter((r) => Boolean(r.title && r.url));
 
     return { success: true, source: "brave", query, status: response.status, results: results.slice(0, maxResults) };
   } catch (err) {
@@ -188,19 +182,13 @@ async function searchBrave(query: string, maxResults: number, apiKey: string): P
   }
 }
 
-function toBraveSearchResult(raw: unknown): BraveSearchResult {
+function toBraveSearchResult(raw: unknown): SearchResult {
   const r = raw as Record<string, unknown>;
   return {
     title: String(r.title ?? ""),
     url: String(r.url ?? ""),
-    description: String(r.description ?? "")
+    snippet: String(r.description ?? "")
   };
-}
-
-interface GoogleSearchResult {
-  title: string;
-  link: string;
-  snippet: string;
 }
 
 interface GoogleSearchPayload {
@@ -230,7 +218,7 @@ async function searchGoogle(query: string, maxResults: number, apiKey: string, s
     const rawResults = data.items ?? [];
     const results = rawResults
       .map(toGoogleSearchResult)
-      .filter((r): r is SearchResult => Boolean(r.title && r.url));
+      .filter((r) => Boolean(r.title && r.url));
 
     return { success: true, source: "google", query, status: response.status, results: results.slice(0, maxResults) };
   } catch (err) {
@@ -238,11 +226,11 @@ async function searchGoogle(query: string, maxResults: number, apiKey: string, s
   }
 }
 
-function toGoogleSearchResult(raw: unknown): GoogleSearchResult {
+function toGoogleSearchResult(raw: unknown): SearchResult {
   const r = raw as Record<string, unknown>;
   return {
     title: String(r.title ?? ""),
-    link: String(r.link ?? ""),
+    url: String(r.link ?? ""),
     snippet: String(r.snippet ?? "")
   };
 }

@@ -104,6 +104,7 @@
         "minimax-m2.5",
         "kimi-k2.6",
         "kimi-k2.5",
+        "glm-5.2",
         "glm-5.1",
         "glm-5",
         "deepseek-v4-pro",
@@ -206,6 +207,40 @@
             ]
           },
           "contextLimit": 256000
+        },
+        "glm-5.2": {
+          "reasoning": {
+            "style": "openai-chat",
+            "options": [
+              {
+                "id": "low",
+                "value": "low"
+              },
+              {
+                "id": "medium",
+                "value": "medium"
+              },
+              {
+                "id": "high",
+                "value": "high"
+              }
+            ]
+          },
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "pricing": {
+            "tiers": [
+              {
+                "inputRate": 1.4,
+                "outputRate": 4.4,
+                "cacheReadRate": 0.26
+              }
+            ]
+          },
+          "contextLimit": 1000000
         },
         "glm-5.1": {
           "reasoning": {
@@ -376,6 +411,7 @@
       "baseUrl": "https://api.commandcode.ai/provider/v1",
       "models": [
         "moonshotai/Kimi-K2.6",
+        "zai-org/GLM-5.2",
         "zai-org/GLM-5.1",
         "MiniMaxAI/MiniMax-M3",
         "deepseek/deepseek-v4-pro",
@@ -414,6 +450,40 @@
             ]
           },
           "contextLimit": 256000
+        },
+        "zai-org/GLM-5.2": {
+          "reasoning": {
+            "style": "openai-chat",
+            "options": [
+              {
+                "id": "low",
+                "value": "low"
+              },
+              {
+                "id": "medium",
+                "value": "medium"
+              },
+              {
+                "id": "high",
+                "value": "high"
+              }
+            ]
+          },
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "pricing": {
+            "tiers": [
+              {
+                "inputRate": 1.4,
+                "outputRate": 4.4,
+                "cacheReadRate": 0.26
+              }
+            ]
+          },
+          "contextLimit": 1000000
         },
         "zai-org/GLM-5.1": {
           "reasoning": {

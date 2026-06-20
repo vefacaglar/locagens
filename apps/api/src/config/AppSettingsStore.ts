@@ -151,7 +151,7 @@ export class AppSettingsStore {
     if (!raw || typeof raw !== "object") {
       return { engine: "duckduckgo" };
     }
-    const cast = raw as Record<string, unknown>;
+    const cast = raw as unknown as Record<string, unknown>;
     return {
       engine: SEARCH_ENGINE_OPTIONS.includes(cast.engine as any) ? (cast.engine as any) : "duckduckgo",
       braveApiKeyRef: typeof cast.braveApiKeyRef === "string" ? cast.braveApiKeyRef : undefined,
@@ -200,7 +200,7 @@ export class AppSettingsStore {
 
   private toPersistedRefs(existing?: SearchSettings): Pick<PersistedSearchSettings, "braveApiKeyRef" | "googleApiKeyRef"> {
     if (!existing || typeof existing !== "object") return {};
-    const cast = existing as Record<string, unknown>;
+    const cast = existing as unknown as Record<string, unknown>;
     return {
       braveApiKeyRef: typeof cast.braveApiKeyRef === "string" ? cast.braveApiKeyRef : undefined,
       googleApiKeyRef: typeof cast.googleApiKeyRef === "string" ? cast.googleApiKeyRef : undefined
