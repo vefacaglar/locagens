@@ -131,7 +131,8 @@ function selectGitAction(action: GitAction) {
 
 async function fetchGitDiffDetails() {
   if (!props.projectPath) return;
-  isLoadingDiffs.value = true;
+  const isFirstLoad = gitDiffFiles.value.length === 0;
+  if (isFirstLoad) isLoadingDiffs.value = true;
   try {
     const res = await fetch(`${API_BASE}/api/projects/git/diff-details?path=${encodeURIComponent(props.projectPath)}`);
     if (!res.ok) throw new Error('Failed to fetch diff details');
@@ -153,7 +154,7 @@ async function fetchGitDiffDetails() {
   } catch (err) {
     console.error('Error fetching diff details:', err);
   } finally {
-    isLoadingDiffs.value = false;
+    if (isFirstLoad) isLoadingDiffs.value = false;
   }
 }
 
