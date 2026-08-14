@@ -18,6 +18,7 @@ interface DesktopBridge {
   subscribeRunEvents(input: { subscriptionId: string; runId: string }): Promise<unknown>;
   unsubscribeRunEvents(subscriptionId: string): Promise<unknown>;
   onRunEvent(listener: (event: DesktopRunEvent) => void): () => void;
+  selectDirectory?: () => Promise<{ path: string; name: string } | null>;
   restartBackend?: () => Promise<unknown>;
   toggleMaximize?: () => Promise<unknown>;
 }
@@ -239,8 +240,14 @@ export const api = {
   createProject: (path: string, name: string) =>
     requestJson<Project>('/api/projects', { method: 'POST', body: { path, name }, errorFallback: 'Failed to add project.' }),
   deleteProject: (path: string) => deleteQuiet(`/api/projects?path=${encodeURIComponent(path)}`),
-  browseFolder: () =>
-    requestJson<{ path: string; name: string }>('/api/projects/select-dir', { method: 'POST', errorFallback: 'Failed to select folder.' }),
+  browseFolder: async () => {
+    const desktop = desktopBridge();
+    if (desktop) {
+      if (desktop.selectDirectory) return desktop.selectDirectory();
+      throw new Error('The desktop shell is out of date. Fully quit and reopen Locagens.');
+    }
+    return requestJson<{ path: string; name: string }>('/api/projects/select-dir', { method: 'POST', errorFallback: 'Failed to select folder.' });
+  },
 
   getGitStatus: (path: string) =>
     requestJson<{ isGit: boolean; branch?: string; hasChanges?: boolean }>(

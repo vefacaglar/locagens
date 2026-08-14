@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -115,6 +115,18 @@ ipcMain.handle("locagens:toggle-maximize", (event) => {
   if (!target) return;
   if (target.isMaximized()) target.unmaximize();
   else target.maximize();
+});
+
+ipcMain.handle("locagens:select-directory", async (event) => {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  if (!target) throw new Error("Folder picker is not attached to a Locagens window.");
+  const result = await dialog.showOpenDialog(target, {
+    title: "Select a project folder",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const selectedPath = result.filePaths[0];
+  return { path: selectedPath, name: path.basename(selectedPath) || "Workspace" };
 });
 
 function validateApiPath(value: unknown): string {
