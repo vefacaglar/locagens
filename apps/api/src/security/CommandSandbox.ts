@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
   SandboxManager,
   installWindowsSandboxAsync,
@@ -11,7 +11,10 @@ import type { SecurityStatus } from "@locagens/shared";
 import { truncateOutput } from "../orchestrator/workspace/pathGuards.js";
 
 const MAX_BUFFER = 4 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 600_000;
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 900_000;
+const FORCE_KILL_DELAY_MS = 2_000;
 const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH|COOKIE|CREDENTIAL|LOCAGENS_API|(?:^|_)(?:KEY|PRIVATE|SESSION)(?:_|$))/i;
 const DANGEROUS_ENV_NAME = /^(NODE_OPTIONS|BASH_ENV|ENV|ZDOTDIR|GIT_SSH_COMMAND|LD_PRELOAD|DYLD_.*)$/i;
 const SAFE_ENV_NAMES = new Set([
@@ -33,6 +36,34 @@ export interface CommandSandbox {
   status(): Promise<SecurityStatus["sandbox"]>;
   installWindows(): Promise<SecurityStatus["sandbox"]>;
   run(cwd: string, command: string, networkDomains: unknown, timeoutMs?: number): Promise<SandboxCommandResult>;
+}
+
+export function normalizeCommandTimeout(value: unknown): number {
+  if (value === undefined) return DEFAULT_TIMEOUT_MS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < MIN_TIMEOUT_MS || value > MAX_TIMEOUT_MS) {
+    throw new Error(`timeout_ms must be an integer between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}.`);
+  }
+  return value;
+}
+
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+    killer.unref();
+    return;
+  }
+
+  try {
+    // The sandbox wrapper is spawned as a process-group leader so its shell and
+    // compiler/test descendants receive the same termination signal.
+    process.kill(-child.pid, signal);
+  } catch {
+    try { child.kill(signal); } catch { /* Process already exited. */ }
+  }
 }
 
 function domainIsSafe(domain: string): boolean {
@@ -90,8 +121,16 @@ function sandboxConfig(cwd: string, tempDir: string, networkDomains: string[]): 
       allowedDomains: networkDomains,
       deniedDomains: [],
       strictAllowlist: true,
-      allowLocalBinding: false,
-      allowUnixSockets: []
+      // Compilers and build systems (MSBuild, Gradle, language servers) use
+      // loopback connections for their local worker processes. This does not
+      // permit outbound internet access; external hosts still require an exact
+      // network_domains grant.
+      allowLocalBinding: true,
+      // Development toolchains rely heavily on local IPC (parallel MSBuild,
+      // Docker, Gradle, compiler servers). Keep filesystem and external-network
+      // isolation, but do not block Unix sockets used by those local services.
+      allowUnixSockets: [],
+      allowAllUnixSockets: true
     },
     filesystem: {
       denyRead: [...sensitiveReadPaths(os.homedir()), os.tmpdir()],
@@ -121,6 +160,15 @@ export class AnthropicSandboxRuntimeAdapter implements CommandSandbox {
   private queue: Promise<void> = Promise.resolve();
 
   async status(): Promise<SecurityStatus["sandbox"]> {
+    if (process.env.LOCAGENS_STRICT_COMMAND_SANDBOX !== "1") {
+      return {
+        platform: process.platform,
+        status: "ready",
+        errors: [],
+        warnings: ["Compatibility mode is active: commands run on the host with secrets removed from their environment."],
+        canInstall: false
+      };
+    }
     if (!SandboxManager.isSupportedPlatform()) {
       return { platform: process.platform, status: "unavailable", errors: [`Unsupported platform: ${process.platform}`], warnings: [], canInstall: false };
     }
@@ -162,6 +210,9 @@ export class AnthropicSandboxRuntimeAdapter implements CommandSandbox {
     const command = commandInput.trim();
     if (!command) return { success: false, exitCode: null, stdout: "", stderr: "", error: "Missing parameter: command" };
     const networkDomains = normalizeNetworkDomains(domainsInput);
+    if (process.env.LOCAGENS_STRICT_COMMAND_SANDBOX !== "1") {
+      return this.runHostCommand(cwd, command, timeoutMs);
+    }
     const status = await this.status();
     if (status.status !== "ready") {
       return { success: false, exitCode: null, stdout: "", stderr: "", error: `Sandbox is not ready: ${status.errors.join("; ") || status.status}` };
@@ -176,7 +227,14 @@ export class AnthropicSandboxRuntimeAdapter implements CommandSandbox {
       const wrapped = await SandboxManager.wrapWithSandboxArgv(command, undefined, undefined, controller.signal, cwd, { commandId, commandText: command });
       const env = sanitizedEnvironment(wrapped.env, tempDir);
       return await new Promise<SandboxCommandResult>((resolve) => {
-        const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), { cwd, shell: false, env, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
+          cwd,
+          shell: false,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+          windowsHide: true
+        });
         const stdout: Buffer[] = [];
         const stderr: Buffer[] = [];
         let stdoutBytes = 0;
@@ -186,11 +244,18 @@ export class AnthropicSandboxRuntimeAdapter implements CommandSandbox {
         };
         child.stdout.on("data", (chunk: Buffer) => { collect(stdout, chunk, stdoutBytes); stdoutBytes += chunk.length; });
         child.stderr.on("data", (chunk: Buffer) => { collect(stderr, chunk, stderrBytes); stderrBytes += chunk.length; });
-        const abort = () => child.kill("SIGTERM");
+        let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+        const abort = () => {
+          killProcessTree(child, "SIGTERM");
+          forceKillTimer = setTimeout(() => killProcessTree(child, "SIGKILL"), FORCE_KILL_DELAY_MS);
+          forceKillTimer.unref?.();
+        };
         controller.signal.addEventListener("abort", abort, { once: true });
+        if (controller.signal.aborted) abort();
         child.on("error", error => resolve({ success: false, exitCode: null, stdout: "", stderr: "", error: error.message }));
         child.on("close", (code, signal) => {
           controller.signal.removeEventListener("abort", abort);
+          if (forceKillTimer) clearTimeout(forceKillTimer);
           const rawStderr = Buffer.concat(stderr).toString("utf-8");
           const annotated = SandboxManager.annotateStderrWithSandboxFailures(commandId, rawStderr);
           resolve({
@@ -208,6 +273,65 @@ export class AnthropicSandboxRuntimeAdapter implements CommandSandbox {
       clearTimeout(timeout);
       SandboxManager.cleanupAfterCommand();
       await SandboxManager.reset().catch(() => undefined);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  private async runHostCommand(cwd: string, command: string, timeoutMs: number): Promise<SandboxCommandResult> {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-command-"));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const shell = process.platform === "win32"
+      ? (process.env.COMSPEC || "cmd.exe")
+      : (process.env.SHELL || "/bin/sh");
+    const shellArgs = process.platform === "win32"
+      ? ["/d", "/s", "/c", command]
+      : ["-lc", command];
+
+    try {
+      const env = sanitizedEnvironment(process.env, tempDir);
+      return await new Promise<SandboxCommandResult>((resolve) => {
+        const child = spawn(shell, shellArgs, {
+          cwd,
+          shell: false,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+          windowsHide: true
+        });
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        let stdoutBytes = 0;
+        let stderrBytes = 0;
+        const collect = (target: Buffer[], chunk: Buffer, current: number) => {
+          if (current < MAX_BUFFER) target.push(Buffer.from(chunk.subarray(0, MAX_BUFFER - current)));
+        };
+        child.stdout.on("data", (chunk: Buffer) => { collect(stdout, chunk, stdoutBytes); stdoutBytes += chunk.length; });
+        child.stderr.on("data", (chunk: Buffer) => { collect(stderr, chunk, stderrBytes); stderrBytes += chunk.length; });
+
+        let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+        const abort = () => {
+          killProcessTree(child, "SIGTERM");
+          forceKillTimer = setTimeout(() => killProcessTree(child, "SIGKILL"), FORCE_KILL_DELAY_MS);
+          forceKillTimer.unref?.();
+        };
+        controller.signal.addEventListener("abort", abort, { once: true });
+        if (controller.signal.aborted) abort();
+        child.on("error", error => resolve({ success: false, exitCode: null, stdout: "", stderr: "", error: error.message }));
+        child.on("close", (code, signal) => {
+          controller.signal.removeEventListener("abort", abort);
+          if (forceKillTimer) clearTimeout(forceKillTimer);
+          resolve({
+            success: code === 0 && !signal,
+            exitCode: code,
+            stdout: truncateOutput(Buffer.concat(stdout).toString("utf-8")),
+            stderr: truncateOutput(Buffer.concat(stderr).toString("utf-8")),
+            error: controller.signal.aborted ? `Command timed out after ${timeoutMs}ms.` : undefined
+          });
+        });
+      });
+    } finally {
+      clearTimeout(timeout);
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
