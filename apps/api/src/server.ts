@@ -32,6 +32,7 @@ async function start() {
     // source of truth for the port; PORT env is only a fallback default.
     const port = ctx.settingsStore.resolvePort();
     await server.listen({ port, host: "127.0.0.1" });
+    (process as any).parentPort?.postMessage({ type: "locagens:backend-ready", port });
     console.log(`Server is running on http://127.0.0.1:${port}`);
   } catch (err) {
     server.log.error(err);

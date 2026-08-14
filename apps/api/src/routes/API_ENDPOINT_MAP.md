@@ -29,6 +29,7 @@ every `/api/*` route requires the process-local bearer token._
 | GET | `/api/runs/:id/plan` | Active plan for a single run (drives plan side panel) | `ctx.planRepo.getActive(id)` |
 | GET | `/api/runs/:id/pending` | Pending user-facing request (permission / question) | `ctx.orchestrator.getPendingPermission(id)`, `ctx.orchestrator.getPendingQuestion(id)` |
 | GET | `/api/runs/:id/events` | SSE event stream for a specific run | event bus: `eventBus.on(\`run:${id}\`, listener)` |
+| GET | `/api/usage-logs` | Paginated/filterable usage log history | `ctx.usageLogRepo.listPaginated(...)` |
 
 ---
 
@@ -53,7 +54,11 @@ every `/api/*` route requires the process-local bearer token._
 | GET | `/api/projects` | List all projects | `ctx.projectRepo.list()` |
 | POST | `/api/projects` | Create/add a project manually | `ctx.projectRepo.create(project)` |
 | DELETE | `/api/projects` | Remove a project from the list | `ctx.projectRepo.delete(projectPath)` |
-| POST | `/api/projects/select-dir` | Trigger macOS native folder picker (returns path + name) | `execAsync` (osascript), no repo call |
+| POST | `/api/projects/select-dir` | Trigger macOS native folder picker (returns canonical path + name) | `execFile` (osascript), no repo call |
+| GET | `/api/projects/git/status` | Git branch and dirty-state for a registered canonical project | `execFile("git", args)` |
+| GET | `/api/projects/git/diff-details` | File-level diff details without mutating the Git index | `execFile("git", args)`, guarded disk reads |
+| POST | `/api/projects/git/generate-message` | Generate a commit message for a run's registered project | provider completion + `execFile("git", args)` |
+| POST | `/api/projects/git/commit` | Commit and optionally push using literal argument arrays; repository hooks are disabled | `execFile("git", args)` |
 
 ---
 

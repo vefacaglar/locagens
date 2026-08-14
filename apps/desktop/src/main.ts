@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { dataDir, isDev, resolvePort, webIndex } from "./paths";
-import { startBackend, stopBackend, waitForBackend } from "./backend";
+import { startBackend, stopBackend } from "./backend";
 
 const DEV_URL = "http://localhost:5173";
 const DEV_API_TOKEN = "locagens-development-token-not-for-production-0000000000000000";
@@ -33,8 +33,7 @@ async function ensureBackend(): Promise<number> {
   fs.mkdirSync(dataDir(), { recursive: true });
   const port = resolvePort();
   if (!isDev) {
-    startBackend(port, apiToken);
-    await waitForBackend(port);
+    await startBackend(port, apiToken);
   }
   return port;
 }
@@ -131,12 +130,11 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 ipcMain.handle("locagens:api-request", async (_event, input: {
-  port?: number;
   path?: string;
   method?: string;
   body?: unknown;
 }) => {
-  const port = Number(input?.port) || resolvePort();
+  const port = resolvePort();
   const apiPath = validateApiPath(input?.path);
   const method = String(input?.method || "GET").toUpperCase();
   if (!["GET", "POST", "PUT", "DELETE"].includes(method)) throw new Error("Invalid API method.");
@@ -159,7 +157,7 @@ function emitRunStream(subscriptionId: string, payload: { type: "message" | "err
   }
 }
 
-ipcMain.handle("locagens:subscribe-run-events", async (_event, input: { subscriptionId?: string; runId?: string; port?: number }) => {
+ipcMain.handle("locagens:subscribe-run-events", async (_event, input: { subscriptionId?: string; runId?: string }) => {
   const subscriptionId = String(input?.subscriptionId || "");
   const runId = String(input?.runId || "");
   if (!/^[A-Za-z0-9_-]{1,160}$/.test(subscriptionId) || !/^[A-Za-z0-9_-]{1,160}$/.test(runId)) {
@@ -168,7 +166,7 @@ ipcMain.handle("locagens:subscribe-run-events", async (_event, input: { subscrip
   eventStreams.get(subscriptionId)?.abort();
   const controller = new AbortController();
   eventStreams.set(subscriptionId, controller);
-  const port = Number(input?.port) || resolvePort();
+  const port = resolvePort();
 
   void (async () => {
     try {
@@ -220,8 +218,7 @@ ipcMain.handle("locagens:restart-backend", async () => {
   const port = resolvePort();
   if (!isDev) {
     await stopBackend();
-    startBackend(port, apiToken);
-    await waitForBackend(port);
+    await startBackend(port, apiToken);
   }
   const old = win;
   createWindow(port);

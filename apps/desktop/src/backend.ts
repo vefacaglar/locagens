@@ -10,6 +10,7 @@ import {
 } from "./paths";
 
 let child: UtilityProcess | null = null;
+let readyPromise: Promise<void> | null = null;
 
 /**
  * Env passed to the forked backend. The settings file is the source of truth
@@ -34,17 +35,48 @@ function backendEnv(port: number, apiToken: string): Record<string, string> {
 }
 
 /** Forks the bundled backend as a child process (prod). */
-export function startBackend(port: number, apiToken: string): void {
-  if (child) return;
+export function startBackend(port: number, apiToken: string): Promise<void> {
+  if (child) return readyPromise ?? Promise.resolve();
   child = utilityProcess.fork(backendScript(), [], {
     env: backendEnv(port, apiToken),
     stdio: "pipe",
   });
-  child.stdout?.on("data", (d) => process.stdout.write(`[backend] ${d}`));
-  child.stderr?.on("data", (d) => process.stderr.write(`[backend] ${d}`));
-  child.once("exit", () => {
-    child = null;
+  const current = child;
+  current.stdout?.on("data", (d) => process.stdout.write(`[backend] ${d}`));
+  current.stderr?.on("data", (d) => process.stderr.write(`[backend] ${d}`));
+  readyPromise = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      current.removeListener("message", onMessage);
+      current.removeListener("exit", onEarlyExit);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (message: unknown) => {
+      if ((message as any)?.type !== "locagens:backend-ready" || (message as any)?.port !== port) return;
+      finish();
+    };
+    const onEarlyExit = (code: number) => {
+      finish(new Error(`Backend exited before readiness (code ${code}).`));
+    };
+    const timeout = setTimeout(() => {
+      current.kill();
+      finish(new Error("Backend readiness timed out."));
+    }, 15_000);
+    current.on("message", onMessage);
+    current.once("exit", onEarlyExit);
   });
+  current.once("exit", () => {
+    child = null;
+    readyPromise = null;
+  });
+  return readyPromise;
 }
 
 /** Stops the running backend child, resolving once it has exited. */
@@ -53,22 +85,8 @@ export function stopBackend(): Promise<void> {
     if (!child) return resolve();
     const current = child;
     child = null;
+    readyPromise = null;
     current.once("exit", () => resolve());
     current.kill();
   });
-}
-
-/** Polls /ping until the backend answers or the timeout elapses. */
-export async function waitForBackend(port: number, timeoutMs = 15000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/ping`);
-      if (res.ok) return;
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`Backend did not become ready on port ${port}`);
 }

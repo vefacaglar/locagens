@@ -47,7 +47,7 @@ hide tool failures
 
 Before making changes, consult these reference documents to minimize token usage:
 
-- **`apps/api/src/routes/API_ENDPOINT_MAP.md`** — HTTP API reference (30 endpoints, route handlers, repository calls)
+- **`apps/api/src/routes/API_ENDPOINT_MAP.md`** — HTTP API reference (41 endpoints, route handlers, repository calls)
 - **`docs/database-schema.md`** — SQLite schema (7 tables, columns, indexes, migrations)
 
 These maps show file locations and dependencies without reading source code.

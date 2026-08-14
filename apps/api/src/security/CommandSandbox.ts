@@ -12,7 +12,7 @@ import { truncateOutput } from "../orchestrator/workspace/pathGuards.js";
 
 const MAX_BUFFER = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
-const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH|COOKIE|CREDENTIAL|LOCAGENS_API)/i;
+const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH|COOKIE|CREDENTIAL|LOCAGENS_API|(?:^|_)(?:KEY|PRIVATE|SESSION)(?:_|$))/i;
 const DANGEROUS_ENV_NAME = /^(NODE_OPTIONS|BASH_ENV|ENV|ZDOTDIR|GIT_SSH_COMMAND|LD_PRELOAD|DYLD_.*)$/i;
 const SAFE_ENV_NAMES = new Set([
   "PATH", "HOME", "SHELL", "USER", "LOGNAME", "LANG", "TERM", "COLORTERM",
@@ -36,9 +36,15 @@ export interface CommandSandbox {
 }
 
 function domainIsSafe(domain: string): boolean {
-  if (!/^(\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i.test(domain)) return false;
-  const host = domain.replace(/^\*\./, "").split(":", 1)[0].toLowerCase();
-  return host !== "localhost" && !host.endsWith(".localhost") && !/^\d+(?:\.\d+){3}$/.test(host) && !host.includes(":");
+  const match = domain.match(/^(?:\*\.)?([^:]+)(?::(\d{1,5}))?$/i);
+  if (!match) return false;
+  const host = match[1].toLowerCase();
+  const labels = host.split(".");
+  const validLabels = labels.every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+  const port = match[2] ? Number(match[2]) : undefined;
+  return host.length <= 253 && host.includes(".") && validLabels && /[a-z]/i.test(host) &&
+    host !== "localhost" && !host.endsWith(".localhost") &&
+    (port === undefined || (port >= 1 && port <= 65535));
 }
 
 export function normalizeNetworkDomains(value: unknown): string[] {
@@ -67,6 +73,15 @@ function sanitizedEnvironment(runtimeEnv: NodeJS.ProcessEnv, sandboxTemp: string
   return safe;
 }
 
+function sensitiveReadPaths(home: string): string[] {
+  return [
+    ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker", ".netrc", ".npmrc", ".pypirc",
+    path.join(".config", "gcloud"), path.join(".config", "gh"), path.join(".config", "locagens"),
+    path.join("Library", "Keychains"), path.join("Library", "Application Support", "Locagens"),
+    path.join("AppData", "Roaming", "Locagens")
+  ].map(item => path.join(home, item));
+}
+
 function sandboxConfig(cwd: string, tempDir: string, networkDomains: string[]): SandboxRuntimeConfig {
   const runtimeDir = process.env.LOCAGENS_SANDBOX_RUNTIME_DIR;
   const architecture = process.arch === "arm64" ? "arm64" : "x64";
@@ -79,7 +94,7 @@ function sandboxConfig(cwd: string, tempDir: string, networkDomains: string[]): 
       allowUnixSockets: []
     },
     filesystem: {
-      denyRead: [os.homedir(), os.tmpdir()],
+      denyRead: [...sensitiveReadPaths(os.homedir()), os.tmpdir()],
       allowRead: [cwd, tempDir],
       allowWrite: [cwd, tempDir],
       denyWrite: [

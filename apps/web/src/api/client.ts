@@ -14,8 +14,8 @@ interface DesktopRunEvent {
 }
 
 interface DesktopBridge {
-  apiRequest(input: { port: number; path: string; method: string; body?: unknown }): Promise<DesktopApiResponse>;
-  subscribeRunEvents(input: { subscriptionId: string; runId: string; port: number }): Promise<unknown>;
+  apiRequest(input: { path: string; method: string; body?: unknown }): Promise<DesktopApiResponse>;
+  subscribeRunEvents(input: { subscriptionId: string; runId: string }): Promise<unknown>;
   unsubscribeRunEvents(subscriptionId: string): Promise<unknown>;
   onRunEvent(listener: (event: DesktopRunEvent) => void): () => void;
   restartBackend?: () => Promise<unknown>;
@@ -49,15 +49,6 @@ export const API_BASE = resolveApiBase();
 
 function desktopBridge(): DesktopBridge | undefined {
   return (globalThis as any).__LOCAGENS_DESKTOP__ as DesktopBridge | undefined;
-}
-
-function apiPort(): number {
-  try {
-    if (!API_BASE) return 4321;
-    return Number(new URL(API_BASE).port) || 4321;
-  } catch {
-    return 4321;
-  }
 }
 
 export type PermissionDecision = 'allow_once' | 'allow_project' | 'allow_always' | 'allow_run' | 'deny';
@@ -112,7 +103,7 @@ async function request(path: string, init: RequestInitJson = {}): Promise<Respon
   const { method = 'GET', body, errorFallback = 'Request failed.' } = init;
   const desktop = desktopBridge();
   const response = desktop?.apiRequest
-    ? await desktop.apiRequest({ port: apiPort(), path, method, ...(body !== undefined ? { body } : {}) })
+      ? await desktop.apiRequest({ path, method, ...(body !== undefined ? { body } : {}) })
       .then(result => new Response(result.body, {
         status: result.status,
         headers: result.contentType ? { 'content-type': result.contentType } : undefined
@@ -171,7 +162,7 @@ function openDesktopEventStream(runId: string, desktop: DesktopBridge): RunEvent
       if (event.type === 'closed') stream.close();
     }
   });
-  void desktop.subscribeRunEvents({ subscriptionId, runId, port: apiPort() }).catch(() => stream.onerror?.(new Event('error')));
+  void desktop.subscribeRunEvents({ subscriptionId, runId }).catch(() => stream.onerror?.(new Event('error')));
   return stream;
 }
 

@@ -7,7 +7,7 @@ import Fastify from "fastify";
 import { registerApiAuthentication } from "./apiAuth.js";
 import { registerOriginPolicy } from "./originPolicy.js";
 import { isPrivateAddress, safeFetchText, selectPublicAddress, validateAgentUrl } from "./SafeHttpClient.js";
-import { normalizeNetworkDomains } from "./CommandSandbox.js";
+import { commandSandbox, normalizeNetworkDomains } from "./CommandSandbox.js";
 import { canonicalProjectPath, requireRegisteredProject } from "./projectPaths.js";
 import { resolveInsideForMutation, resolveInsideForRead } from "../orchestrator/workspace/pathGuards.js";
 
@@ -75,6 +75,16 @@ test("network domains are normalized and local/IP targets are refused", () => {
   assert.deepEqual(normalizeNetworkDomains(["API.Example.com", "api.example.com", "*.NPMJS.org"]), ["*.npmjs.org", "api.example.com"]);
   assert.throws(() => normalizeNetworkDomains(["localhost"]));
   assert.throws(() => normalizeNetworkDomains(["127.0.0.1"]));
+  assert.throws(() => normalizeNetworkDomains(["2130706433"]));
+  assert.throws(() => normalizeNetworkDomains(["example.com:99999"]));
+});
+
+test("sandbox adapter probes the current platform without assuming readiness", async () => {
+  const status = await commandSandbox.status();
+  assert.equal(status.platform, process.platform);
+  assert.ok(["ready", "unavailable", "setup_required"].includes(status.status));
+  assert.ok(Array.isArray(status.errors));
+  assert.ok(Array.isArray(status.warnings));
 });
 
 test("workspace guards block symlink escapes and mutation through links", () => {
