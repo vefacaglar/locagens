@@ -314,7 +314,12 @@ watch(
 watch(
   () => props.agents,
   (newAgents) => {
-    agents.value = newAgents ?? [];
+    const next = newAgents ?? [];
+    // The parent rebuilds this array on every side-panel snapshot; skip the
+    // empty→empty case so runs without sub-agents don't churn identity and
+    // retrigger every watcher downstream (tab reset, auto-scroll) at 5Hz.
+    if (next.length === 0 && agents.value.length === 0) return;
+    agents.value = next;
   },
   { immediate: true }
 );
@@ -351,6 +356,24 @@ function diffRowsForChange(change: WorkspaceChange): DiffRow[] {
   const rows = changeDiffRows(change);
   changeDiffCache.set(change.id, { oldText: change.oldText, newText: change.newText, rows });
   return rows;
+}
+
+// Collapse/expand all review accordions (works on whichever list is active:
+// git files or the non-git workspace changes).
+const anyReviewAccordionOpen = computed(() => {
+  if (isGitRepo.value) return gitDiffFiles.value.some(file => file.isOpen);
+  return changes.value.some(change => isChangeOpen(change.id));
+});
+
+function toggleAllReviewAccordions() {
+  const open = !anyReviewAccordionOpen.value;
+  if (isGitRepo.value) {
+    for (const file of gitDiffFiles.value) file.isOpen = open;
+    return;
+  }
+  const next: Record<string, boolean> = {};
+  for (const change of changes.value) next[change.id] = open;
+  openChangeAccordions.value = next;
 }
 
 const doneCount = computed(() => plan.value?.tasks.filter(t => t.status === 'completed').length ?? 0);
@@ -435,17 +458,13 @@ function shortPath(path: string): string {
   return parts[parts.length - 1] || path || 'File';
 }
 
-function compactReviewPath(path: string): string {
+/** Review header label: basename only (both sides for renames); the full path
+ *  lives in the header's hover tooltip. */
+function reviewFileName(path: string): string {
   if (path.includes(' -> ')) {
-    return path
-      .split(' -> ')
-      .map(part => compactReviewPath(part))
-      .join(' -> ');
+    return path.split(' -> ').map(part => shortPath(part)).join(' -> ');
   }
-  const normalized = path.replace(/\\/g, '/');
-  const parts = normalized.split('/').filter(Boolean);
-  if (parts.length <= 2) return normalized;
-  return `.../${parts.slice(-2).join('/')}`;
+  return shortPath(path);
 }
 
 function statusLabel(status: string): string {
@@ -623,6 +642,10 @@ function latestReasoningBody(root: HTMLElement | null): HTMLElement | undefined 
 watch(
   agents,
   () => {
+    // This auto-scroll only concerns the Agents tab's streaming transcripts.
+    // Without the tab guard it force-scrolled the whole panel body on every
+    // 200ms snapshot, making the Review tab visibly jump while code streamed.
+    if (activeTab.value !== 'agents') return;
     const el = panelBody.value;
     if (!el) return;
 
@@ -915,6 +938,21 @@ defineExpose({
           </div>
           
           <div class="review-header-actions">
+            <button
+              v-if="isGitRepo ? gitDiffFiles.length : changes.length"
+              type="button"
+              class="review-fold-all-btn"
+              :title="anyReviewAccordionOpen ? 'Collapse all' : 'Expand all'"
+              @click="toggleAllReviewAccordions"
+            >
+              <svg v-if="anyReviewAccordionOpen" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m4.5 2.5 3.5 3 3.5-3M4.5 13.5l3.5-3 3.5 3" />
+              </svg>
+              <svg v-else viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m4.5 5.5 3.5-3 3.5 3M4.5 10.5l3.5 3 3.5-3" />
+              </svg>
+            </button>
+
             <!-- Commit Popup Trigger Wrapper -->
             <div v-if="isGitRepo" class="commit-popup-wrapper">
               <button
@@ -1056,6 +1094,7 @@ defineExpose({
               <button
                 type="button"
                 class="git-file-header"
+                :data-path="file.path"
                 @click="file.isOpen = !file.isOpen"
               >
                 <span class="git-file-chevron" :class="{ rotated: !file.isOpen }">
@@ -1064,7 +1103,7 @@ defineExpose({
                   </svg>
                 </span>
                 <span class="git-file-title">
-                  <span class="git-file-path" :title="file.path">{{ file.path }}</span>
+                  <span class="git-file-path">{{ reviewFileName(file.path) }}</span>
                   <span class="git-file-meta">
                     <span v-if="file.added || file.deleted" class="git-file-stats">
                       <span v-if="file.added" class="add">+{{ file.added }}</span>
@@ -1100,6 +1139,7 @@ defineExpose({
             <button
               type="button"
               class="git-file-header"
+              :data-path="change.displayPath"
               @click="toggleChangeAccordion(change.id)"
             >
               <span class="git-file-chevron" :class="{ rotated: !isChangeOpen(change.id) }">
@@ -1108,7 +1148,7 @@ defineExpose({
                 </svg>
               </span>
               <span class="git-file-title">
-                <span class="git-file-path" :title="change.displayPath">{{ compactReviewPath(change.displayPath) }}</span>
+                <span class="git-file-path">{{ reviewFileName(change.displayPath) }}</span>
                 <span class="git-file-meta">
                   <span v-if="change.added || change.deleted" class="git-file-stats">
                     <span v-if="change.added" class="add">+{{ change.added }}</span>
@@ -2362,6 +2402,38 @@ defineExpose({
   background: var(--control-bg-hover) !important;
 }
 
+/* Full-path tooltip: headers show only the file name; hovering reveals the
+   complete workspace-relative location (Claude-Desktop-style). */
+.git-file-header::after {
+  content: attr(data-path);
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 28px;
+  z-index: 30;
+  max-width: min(440px, calc(100% - 40px));
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  transition-delay: 0s;
+}
+
+.git-file-header:hover::after {
+  opacity: 1;
+  transition-delay: 0.35s;
+}
+
 .git-file-chevron {
   display: inline-flex;
   align-items: center;
@@ -2473,6 +2545,24 @@ defineExpose({
 }
 
 .git-file-open-tab:hover {
+  color: var(--text);
+}
+
+.review-fold-all-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.review-fold-all-btn:hover {
+  background: var(--control-bg-hover);
   color: var(--text);
 }
 </style>
