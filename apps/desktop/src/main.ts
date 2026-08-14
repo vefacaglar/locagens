@@ -122,6 +122,18 @@ function validateApiPath(value: unknown): string {
   if (!apiPath.startsWith("/api/") || /[\r\n\\]/.test(apiPath) || apiPath.includes("://")) {
     throw new Error("Invalid API path.");
   }
+  const rawPathname = apiPath.split(/[?#]/, 1)[0];
+  let decodedPathname: string;
+  try {
+    decodedPathname = decodeURIComponent(rawPathname);
+  } catch {
+    throw new Error("Invalid API path encoding.");
+  }
+  if (decodedPathname.split("/").some(segment => segment === "." || segment === ".." || segment.includes("\\"))) {
+    throw new Error("Invalid API path traversal.");
+  }
+  const normalized = new URL(apiPath, "http://127.0.0.1");
+  if (!normalized.pathname.startsWith("/api/")) throw new Error("Invalid API path.");
   return apiPath;
 }
 

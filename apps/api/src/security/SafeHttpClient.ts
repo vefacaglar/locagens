@@ -107,7 +107,8 @@ function withinDeadline<T>(operation: Promise<T>, timeoutMs: number, signal?: Ab
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Request timed out after ${timeoutMs}ms.`)), timeoutMs);
     const abort = () => reject(signal?.reason instanceof Error ? signal.reason : new Error("Request aborted."));
-    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
     operation.then(resolve, reject).finally(() => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
@@ -116,39 +117,49 @@ function withinDeadline<T>(operation: Promise<T>, timeoutMs: number, signal?: Ab
 }
 
 async function requestOnce(url: URL, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
-  const resolved = await withinDeadline(resolvePublicAddress(url.hostname.replace(/^\[|\]$/g, "")), timeoutMs, signal);
-  return new Promise((resolve, reject) => {
-    const transport = url.protocol === "https:" ? https : http;
-    const request = transport.request(url, {
-      method: "GET",
-      headers: { "user-agent": "Locagens/1.0 (+local workspace assistant)", accept: "text/*,application/json" },
-      lookup(_hostname, _options, callback) {
-        callback(null, resolved.address, resolved.family);
-      },
-      signal,
-      timeout: timeoutMs
-    }, response => {
-      const chunks: Buffer[] = [];
-      let total = 0;
-      response.on("data", (chunk: Buffer) => {
-        total += chunk.length;
-        if (total > MAX_BODY_BYTES) {
-          response.destroy(new Error(`Response exceeded ${MAX_BODY_BYTES} bytes.`));
-          return;
-        }
-        chunks.push(Buffer.from(chunk));
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms.`)), timeoutMs);
+  try {
+    const resolved = await withinDeadline(resolvePublicAddress(url.hostname.replace(/^\[|\]$/g, "")), timeoutMs, controller.signal);
+    return await new Promise((resolve, reject) => {
+      const transport = url.protocol === "https:" ? https : http;
+      const request = transport.request(url, {
+        method: "GET",
+        headers: { "user-agent": "Locagens/1.0 (+local workspace assistant)", accept: "text/*,application/json" },
+        lookup(_hostname, _options, callback) {
+          callback(null, resolved.address, resolved.family);
+        },
+        signal: controller.signal,
+        timeout: timeoutMs
+      }, response => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        response.on("data", (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > MAX_BODY_BYTES) {
+            response.destroy(new Error(`Response exceeded ${MAX_BODY_BYTES} bytes.`));
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        });
+        response.on("end", () => resolve({
+          status: response.statusCode || 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks).toString("utf-8")
+        }));
+        response.on("error", reject);
       });
-      response.on("end", () => resolve({
-        status: response.statusCode || 0,
-        headers: response.headers,
-        body: Buffer.concat(chunks).toString("utf-8")
-      }));
-      response.on("error", reject);
+      request.on("timeout", () => request.destroy(new Error(`Request timed out after ${timeoutMs}ms.`)));
+      request.on("error", reject);
+      request.end();
     });
-    request.on("timeout", () => request.destroy(new Error(`Request timed out after ${timeoutMs}ms.`)));
-    request.on("error", reject);
-    request.end();
-  });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 export async function safeFetchText(rawUrl: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<SafeHttpResponse> {

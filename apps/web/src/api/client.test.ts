@@ -20,7 +20,7 @@ describe('desktop API transport', () => {
     };
     const { api } = await import('./client');
     await expect(api.getSettings()).resolves.toEqual({ port: 4321 });
-    expect(apiRequest).toHaveBeenCalledWith({ port: 4321, path: '/api/settings', method: 'GET' });
+    expect(apiRequest).toHaveBeenCalledWith({ path: '/api/settings', method: 'GET' });
     expect(JSON.stringify(apiRequest.mock.calls)).not.toContain('Bearer');
     expect((globalThis as any).__LOCAGENS_API_TOKEN__).toBeUndefined();
   });
@@ -43,10 +43,10 @@ describe('desktop API transport', () => {
     stream.onmessage = event => received.push(event.data);
 
     const subscriptionId = (globalThis as any).__LOCAGENS_DESKTOP__.subscribeRunEvents.mock.calls[0][0].subscriptionId;
+    expect((globalThis as any).__LOCAGENS_DESKTOP__.subscribeRunEvents.mock.calls[0][0]).toEqual({ subscriptionId, runId: 'run-safe' });
     listener?.({ subscriptionId, type: 'message', data: '{"type":"connected"}' });
     expect(received).toEqual(['{"type":"connected"}']);
     stream.close();
     expect(unsubscribeRunEvents).toHaveBeenCalledWith(subscriptionId);
   });
 });
-
