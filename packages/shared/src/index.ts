@@ -288,6 +288,7 @@ export interface PermissionPreview {
   newContent: string | null;
   // Extra display context for tools that are not plain file edits.
   command?: string;   // run_command: the shell command to execute
+  networkDomains?: string[]; // run_command: explicitly requested outbound hosts
   destPath?: string;  // move_file: the destination path
   query?: string;     // search_files/search_web: the search query
   url?: string;       // fetch_url: the URL to request
@@ -315,7 +316,26 @@ export interface PermissionRule {
   projectPath: string;
   tool: string;
   command: string;
+  networkDomains: string[];
   status: string;
+}
+
+export interface SecurityStatus {
+  api: {
+    bindAddress: string;
+    authenticated: boolean;
+  };
+  sandbox: {
+    platform: string;
+    status: "ready" | "setup_required" | "unavailable";
+    errors: string[];
+    warnings: string[];
+    canInstall: boolean;
+  };
+  policy: {
+    commandNetwork: "deny_by_default";
+    workspaceWritesOnly: true;
+  };
 }
 
 // "global" memories apply to every project; "project" memories only to one path.
@@ -389,4 +409,3 @@ export interface RunUsageSummary {
     outputTokens: number;
   }>;
 }
-

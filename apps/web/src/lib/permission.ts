@@ -13,7 +13,7 @@ export const PERMISSION_OPTIONS: PermissionOption[] = [
   { decision: 'allow_once', label: 'Yes' },
   { decision: 'allow_project', label: "Yes, don't ask again in this project" },
   { decision: 'allow_always', label: 'Yes, allow always (global)' },
-  { decision: 'allow_run', label: 'Yes, and stop asking for the rest of this run' },
+  { decision: 'allow_run', label: 'Yes, and allow this exact action for this run' },
   { decision: 'deny', label: 'No, tell Locagens what to do differently', hint: 'esc' }
 ];
 

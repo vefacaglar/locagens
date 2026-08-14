@@ -5,14 +5,15 @@
   "main": "./dist/server.js",
   "type": "module",
   "scripts": {
-    "dev": "LOCAGENS_SETTINGS_PATH=../../.locagens-dev/settings.json LOCAGENS_DB_PATH=../../.locagens-dev/locagens.db tsx watch src/server.ts",
+    "dev": "node scripts/dev.mjs",
     "build": "tsc",
-    "build:bundle": "esbuild src/server.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/server.bundle.cjs",
-    "test": "NODE_ENV=test node --import tsx --test src/**/*.test.ts"
+    "build:bundle": "node scripts/build-bundle.mjs",
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
-    "@locagens/shared": "workspace:*",
+    "@anthropic-ai/sandbox-runtime": "0.0.73",
     "@fastify/cors": "^9.0.1",
+    "@locagens/shared": "workspace:*",
     "fastify": "^4.26.2"
   },
   "devDependencies": {

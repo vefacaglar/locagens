@@ -1,4 +1,33 @@
-import type { ProviderMetadata, Run, RunMessage, Project, PermissionRule, Plan, AgentPreset, Memory, MemoryCategory, MemoryScope, AppSettings, PaginatedUsageLogs, RunUsageSummary } from '@locagens/shared';
+import type { ProviderMetadata, Run, RunMessage, Project, PermissionRule, Plan, AgentPreset, Memory, MemoryCategory, MemoryScope, AppSettings, PaginatedUsageLogs, RunUsageSummary, SecurityStatus } from '@locagens/shared';
+
+interface DesktopApiResponse {
+  status: number;
+  contentType: string;
+  body: string;
+}
+
+interface DesktopRunEvent {
+  subscriptionId: string;
+  type: 'message' | 'error' | 'closed';
+  data?: string;
+  error?: string;
+}
+
+interface DesktopBridge {
+  apiRequest(input: { path: string; method: string; body?: unknown }): Promise<DesktopApiResponse>;
+  subscribeRunEvents(input: { subscriptionId: string; runId: string }): Promise<unknown>;
+  unsubscribeRunEvents(subscriptionId: string): Promise<unknown>;
+  onRunEvent(listener: (event: DesktopRunEvent) => void): () => void;
+  selectDirectory?: () => Promise<{ path: string; name: string } | null>;
+  restartBackend?: () => Promise<unknown>;
+  toggleMaximize?: () => Promise<unknown>;
+}
+
+export interface RunEventStream {
+  onmessage: ((event: MessageEvent<string>) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  close(): void;
+}
 
 /**
  * Resolves the backend base URL. The config file (settings.json) is the single
@@ -13,10 +42,15 @@ function resolveApiBase(): string {
   if (typeof injected === 'string' && injected) return injected;
   const fromEnv = import.meta.env.VITE_API_BASE;
   if (typeof fromEnv === 'string' && fromEnv) return fromEnv;
+  if (import.meta.env.DEV) return '';
   return 'http://localhost:4321';
 }
 
 export const API_BASE = resolveApiBase();
+
+function desktopBridge(): DesktopBridge | undefined {
+  return (globalThis as any).__LOCAGENS_DESKTOP__ as DesktopBridge | undefined;
+}
 
 export type PermissionDecision = 'allow_once' | 'allow_project' | 'allow_always' | 'allow_run' | 'deny';
 
@@ -68,12 +102,19 @@ interface RequestInitJson {
 /** Core fetch wrapper: throws Error(`{ error }` body or fallback) on !ok. */
 async function request(path: string, init: RequestInitJson = {}): Promise<Response> {
   const { method = 'GET', body, errorFallback = 'Request failed.' } = init;
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    ...(body !== undefined
-      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-      : {})
-  });
+  const desktop = desktopBridge();
+  const response = desktop?.apiRequest
+      ? await desktop.apiRequest({ path, method, ...(body !== undefined ? { body } : {}) })
+      .then(result => new Response(result.body, {
+        status: result.status,
+        headers: result.contentType ? { 'content-type': result.contentType } : undefined
+      }))
+    : await fetch(`${API_BASE}${path}`, {
+      method,
+      ...(body !== undefined
+        ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+        : {})
+    });
   if (!response.ok) throw new Error(await errorMessage(response, errorFallback));
   return response;
 }
@@ -88,14 +129,42 @@ async function requestVoid(path: string, init: RequestInitJson = {}): Promise<vo
 
 /** GETs that report failure as null so callers can `if (data)` instead of try/catch. */
 async function getJson<T>(path: string): Promise<T | null> {
-  const response = await fetch(`${API_BASE}${path}`);
-  if (!response.ok) return null;
-  return response.json() as Promise<T>;
+  try {
+    return (await request(path)).json() as Promise<T>;
+  } catch {
+    return null;
+  }
 }
 
 /** DELETEs whose failures are intentionally ignored (existing behavior). */
 async function deleteQuiet(path: string): Promise<void> {
-  await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
+  await request(path, { method: 'DELETE' }).catch(() => undefined);
+}
+
+function openDesktopEventStream(runId: string, desktop: DesktopBridge): RunEventStream {
+  const subscriptionId = `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let closed = false;
+  const stream: RunEventStream = {
+    onmessage: null,
+    onerror: null,
+    close() {
+      if (closed) return;
+      closed = true;
+      removeListener();
+      void desktop.unsubscribeRunEvents(subscriptionId);
+    }
+  };
+  const removeListener = desktop.onRunEvent((event) => {
+    if (closed || event.subscriptionId !== subscriptionId) return;
+    if (event.type === 'message' && event.data !== undefined) {
+      stream.onmessage?.(new MessageEvent('message', { data: event.data }));
+    } else {
+      stream.onerror?.(new Event(event.type));
+      if (event.type === 'closed') stream.close();
+    }
+  });
+  void desktop.subscribeRunEvents({ subscriptionId, runId }).catch(() => stream.onerror?.(new Event('error')));
+  return stream;
 }
 
 export const api = {
@@ -135,7 +204,12 @@ export const api = {
     return getJson<PaginatedUsageLogs>(`/api/usage-logs${queryStr ? '?' + queryStr : ''}`);
   },
 
-  eventsUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/events`,
+  openEvents(runId: string): RunEventStream {
+    const desktop = desktopBridge();
+    return desktop?.subscribeRunEvents
+      ? openDesktopEventStream(runId, desktop)
+      : new EventSource(`${API_BASE}/api/runs/${encodeURIComponent(runId)}/events`);
+  },
 
   revokePermission: (id: number) => deleteQuiet(`/api/permissions/${id}`),
   clearPermissions: () => deleteQuiet('/api/permissions'),
@@ -155,7 +229,7 @@ export const api = {
 
   // TODO: should return a typed result instead of leaking the raw Response.
   async cancelRun(runId: string): Promise<Response> {
-    return fetch(`${API_BASE}/api/runs/${runId}/cancel`, { method: 'POST' });
+    return request(`/api/runs/${runId}/cancel`, { method: 'POST' });
   },
 
   sendPermissionDecision: (runId: string, decision: PermissionDecision) =>
@@ -166,8 +240,14 @@ export const api = {
   createProject: (path: string, name: string) =>
     requestJson<Project>('/api/projects', { method: 'POST', body: { path, name }, errorFallback: 'Failed to add project.' }),
   deleteProject: (path: string) => deleteQuiet(`/api/projects?path=${encodeURIComponent(path)}`),
-  browseFolder: () =>
-    requestJson<{ path: string; name: string }>('/api/projects/select-dir', { method: 'POST', errorFallback: 'Failed to select folder.' }),
+  browseFolder: async () => {
+    const desktop = desktopBridge();
+    if (desktop) {
+      if (desktop.selectDirectory) return desktop.selectDirectory();
+      throw new Error('The desktop shell is out of date. Fully quit and reopen Locagens.');
+    }
+    return requestJson<{ path: string; name: string }>('/api/projects/select-dir', { method: 'POST', errorFallback: 'Failed to select folder.' });
+  },
 
   getGitStatus: (path: string) =>
     requestJson<{ isGit: boolean; branch?: string; hasChanges?: boolean }>(
@@ -187,14 +267,12 @@ export const api = {
   async fetchModels(payload: { type: string; baseUrl: string; apiKey?: string; providerId?: string }): Promise<{ success: boolean; models?: string[]; error?: string }> {
     // HTTP failures come back as { success: false } (callers branch on it);
     // network errors still throw, matching the callers' try/catch path.
-    const response = await fetch(`${API_BASE}/api/providers/fetch-models`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const response = await request('/api/providers/fetch-models', { method: 'POST', body: payload, errorFallback: 'Failed to fetch models.' });
     if (!response.ok) {
       return { success: false, error: await errorMessage(response, 'Failed to fetch models.') };
     }
     return response.json() as Promise<{ success: boolean; models?: string[]; error?: string }>;
-  }
+  },
+  getSecurityStatus: () => getJson<SecurityStatus>('/api/security/status'),
+  installWindowsSandbox: () => requestJson<SecurityStatus>('/api/security/sandbox/setup', { method: 'POST', body: { confirmed: true }, errorFallback: 'Sandbox setup failed.' })
 };

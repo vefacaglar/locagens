@@ -1,11 +1,46 @@
 import path from "node:path";
 import fs from "node:fs";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../context.js";
+import { canonicalProjectPath, requireRegisteredProject } from "../security/projectPaths.js";
+import { resolveInsideForRead } from "../orchestrator/workspace/pathGuards.js";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+async function git(projectPath: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd: projectPath,
+    encoding: "utf-8",
+    maxBuffer: 8 * 1024 * 1024
+  });
+  return stdout;
+}
+
+interface GitStatusEntry {
+  xy: string;
+  path: string;
+  oldPath?: string;
+}
+
+export function parsePorcelainZ(output: string): GitStatusEntry[] {
+  const records = output.split("\0");
+  const entries: GitStatusEntry[] = [];
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (!record || record.length < 4) continue;
+    const xy = record.slice(0, 2);
+    const filePath = record.slice(3);
+    if (xy.includes("R") || xy.includes("C")) {
+      const oldPath = records[++index] || "";
+      entries.push({ xy, path: filePath, oldPath });
+    } else {
+      entries.push({ xy, path: filePath });
+    }
+  }
+  return entries;
+}
 
 export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) {
   // List all projects.
@@ -25,7 +60,13 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
       return { error: "Missing required field: path" };
     }
 
-    const resolvedPath = projectPath.trim();
+    let resolvedPath: string;
+    try {
+      resolvedPath = canonicalProjectPath(projectPath);
+    } catch (error: any) {
+      reply.status(400);
+      return { error: error.message };
+    }
     const resolvedName = projectName?.trim() || path.basename(resolvedPath) || "Workspace";
 
     const project = {
@@ -59,10 +100,8 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
     }
 
     try {
-      const { stdout } = await execAsync(
-        `osascript -e 'POSIX path of (choose folder with prompt "Select a project folder:")'`
-      );
-      const selectedPath = stdout.trim();
+      const { stdout } = await execFileAsync("osascript", ["-e", "POSIX path of (choose folder with prompt \"Select a project folder:\")"]);
+      const selectedPath = canonicalProjectPath(stdout.trim());
       if (!selectedPath) {
         reply.status(400);
         return { error: "No folder selected" };
@@ -88,10 +127,11 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
     }
 
     try {
+      const canonicalPath = requireRegisteredProject(ctx.projectRepo, projectPath);
       // Check if git is initialized.
-      await execAsync("git rev-parse --is-inside-work-tree", { cwd: projectPath });
-      const { stdout: branch } = await execAsync("git branch --show-current", { cwd: projectPath });
-      const { stdout: status } = await execAsync("git status --porcelain", { cwd: projectPath });
+      await git(canonicalPath, ["rev-parse", "--is-inside-work-tree"]);
+      const branch = await git(canonicalPath, ["branch", "--show-current"]);
+      const status = await git(canonicalPath, ["status", "--porcelain"]);
       
       return {
         isGit: true,
@@ -113,29 +153,22 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
     }
 
     try {
-      // Intent-to-add untracked files so they show up in status and git diff commands
-      try {
-        await execAsync("git add -N .", { cwd: projectPath });
-      } catch {}
-
-      const { stdout: status } = await execAsync("git status --porcelain", { cwd: projectPath });
-      const lines = status.split("\n").filter(line => line.trim());
+      const canonicalPath = requireRegisteredProject(ctx.projectRepo, projectPath);
+      const status = await git(canonicalPath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+      const entries = parsePorcelainZ(status);
 
       const results = [];
-      for (const line of lines) {
-        const xy = line.slice(0, 2);
-        let fileSpec = line.slice(3).trim();
+      for (const entry of entries) {
+        const { xy } = entry;
+        let fileSpec = entry.path;
         let kind: "created" | "edited" | "deleted" | "moved" = "edited";
 
         // Handle rename formatting: "R  old -> new"
-        let oldPath = fileSpec;
+        let oldPath = entry.oldPath || fileSpec;
         let newPath = fileSpec;
         if (xy.startsWith("R")) {
           kind = "moved";
-          const parts = fileSpec.split(" -> ");
-          oldPath = parts[0].trim();
-          newPath = parts[1].trim();
-          fileSpec = newPath;
+          newPath = entry.path;
         } else if (xy.includes("A") || xy.includes("?")) {
           kind = "created";
         } else if (xy.includes("D")) {
@@ -148,8 +181,7 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
         // Read old content from Git
         if (kind !== "created") {
           try {
-            const { stdout } = await execAsync(`git show HEAD:"${oldPath}"`, { cwd: projectPath });
-            oldText = stdout;
+            oldText = await git(canonicalPath, ["show", `HEAD:${oldPath}`]);
           } catch {
             // HEAD might not exist yet (e.g. initial commit)
             oldText = "";
@@ -159,7 +191,7 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
         // Read new content from disk
         if (kind !== "deleted") {
           try {
-            const fullPath = path.resolve(projectPath, newPath);
+            const fullPath = resolveInsideForRead(canonicalPath, newPath);
             newText = await fs.promises.readFile(fullPath, "utf-8");
           } catch {
             newText = "";
@@ -195,14 +227,20 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
       return { error: "Run not found" };
     }
 
-    const projectPath = run.projectPath || ctx.defaultProjectPath;
+    let projectPath: string;
+    try {
+      projectPath = requireRegisteredProject(ctx.projectRepo, run.projectPath || ctx.defaultProjectPath);
+    } catch (error: any) {
+      reply.status(400);
+      return { error: error.message };
+    }
 
     try {
       // Get the git diff.
-      const { stdout: diff } = await execAsync("git diff HEAD", { cwd: projectPath });
+      const diff = await git(projectPath, ["diff", "HEAD"]);
       if (!diff.trim()) {
         // Fallback to checking if there are untracked files
-        const { stdout: status } = await execAsync("git status --porcelain", { cwd: projectPath });
+        const status = await git(projectPath, ["status", "--porcelain"]);
         if (!status.trim()) {
           return { message: "chore: update workspace" };
         }
@@ -265,18 +303,16 @@ ${truncatedDiff}`;
     }
 
     try {
+      const canonicalPath = requireRegisteredProject(ctx.projectRepo, projectPath);
       if (action === "commit" || action === "commit-push") {
         // Stage files
-        await execAsync("git add .", { cwd: projectPath });
-        // Commit
-        // Escape quotes in commit message
-        const escapedMsg = message!.replace(/"/g, '\\"');
-        await execAsync(`git commit -m "${escapedMsg}"`, { cwd: projectPath });
+        await git(canonicalPath, ["add", "--all", "--", "."]);
+        // Do not execute repository-controlled hooks from the desktop API.
+        await git(canonicalPath, ["-c", "core.hooksPath=/dev/null", "commit", "-m", message!.trim()]);
       }
 
       if (action === "commit-push" || action === "push") {
-        // Push
-        await execAsync("git push", { cwd: projectPath });
+        await git(canonicalPath, ["push"]);
       }
 
       return { success: true };

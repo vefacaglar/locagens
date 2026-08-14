@@ -6,3 +6,5 @@ allowBuilds:
   electron: true
   electron-winstaller: false
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/sandbox-runtime@0.0.73'

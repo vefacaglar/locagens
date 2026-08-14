@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import type { SecurityStatus } from '@locagens/shared';
 import { api, API_BASE } from '../../api/client';
 import ThemedButton from '../ui/ThemedButton.vue';
+import { useCustomDialog } from '../../composables/useCustomDialog';
+
+const { showConfirm } = useCustomDialog();
 
 const port = ref<number | null>(null);
 const initialPort = ref<number | null>(null);
@@ -9,11 +13,14 @@ const isLoading = ref(true);
 const isSaving = ref(false);
 const error = ref('');
 const savedRestartRequired = ref(false);
+const security = ref<SecurityStatus | null>(null);
+const isInstallingSandbox = ref(false);
 
 async function load() {
   isLoading.value = true;
   error.value = '';
-  const settings = await api.getSettings();
+  const [settings, securityStatus] = await Promise.all([api.getSettings(), api.getSecurityStatus()]);
+  security.value = securityStatus;
   if (settings) {
     port.value = settings.port;
     initialPort.value = settings.port;
@@ -21,6 +28,19 @@ async function load() {
     error.value = 'Could not load server settings.';
   }
   isLoading.value = false;
+}
+
+async function installSandbox() {
+  if (!(await showConfirm('Install the Windows sandbox? This creates an isolated local account and Windows Filtering Platform rules.'))) return;
+  isInstallingSandbox.value = true;
+  error.value = '';
+  try {
+    security.value = await api.installWindowsSandbox();
+  } catch (err: any) {
+    error.value = err?.message || 'Sandbox setup failed.';
+  } finally {
+    isInstallingSandbox.value = false;
+  }
 }
 
 function isValidPort(value: number | null): value is number {
@@ -87,6 +107,27 @@ onMounted(load);
           @keydown.enter="save"
         />
         <p class="server-hint">Currently connected to <code>{{ API_BASE }}</code></p>
+      </div>
+
+      <div class="security-status">
+        <div class="security-status-head">
+          <span>Command sandbox</span>
+          <span class="security-badge" :class="`security-badge--${security?.sandbox.status || 'unavailable'}`">
+            {{ security?.sandbox.status || 'unavailable' }}
+          </span>
+        </div>
+        <p>Platform: <code>{{ security?.sandbox.platform || 'unknown' }}</code>. Command network access is denied unless exact domains are approved.</p>
+        <p v-for="item in security?.sandbox.errors || []" :key="item" class="server-msg-error">{{ item }}</p>
+        <p v-for="item in security?.sandbox.warnings || []" :key="item">{{ item }}</p>
+        <ThemedButton
+          v-if="security?.sandbox.canInstall"
+          variant="secondary"
+          size="sm"
+          :disabled="isInstallingSandbox"
+          @click="installSandbox"
+        >
+          {{ isInstallingSandbox ? 'Installing…' : 'Install Windows sandbox' }}
+        </ThemedButton>
       </div>
 
       <p v-if="error" class="server-msg server-msg-error">{{ error }}</p>
@@ -160,4 +201,31 @@ onMounted(load);
 .server-actions {
   margin-top: 20px;
 }
+
+.security-status {
+  margin-top: 22px;
+  max-width: 620px;
+  padding: 14px;
+  border: 1px solid var(--settings-card-border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.security-status-head {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.security-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-strong);
+}
+
+.security-badge--ready { color: #4fb477; }
+.security-badge--setup_required,
+.security-badge--unavailable { color: var(--danger, #e5534b); }
 </style>

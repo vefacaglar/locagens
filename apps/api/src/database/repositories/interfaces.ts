@@ -48,9 +48,9 @@ export interface IProjectRepository {
 
 export interface IPermissionRepository {
   list(): PermissionRule[];
-  isAllowed(projectPath: string | undefined, tool: string, command: string): boolean;
-  allowProject(projectPath: string, tool: string, command: string): Promise<void>;
-  allowGlobal(tool: string, command: string): Promise<void>;
+  isAllowed(projectPath: string | undefined, tool: string, command: string, networkDomains?: string[]): boolean;
+  allowProject(projectPath: string, tool: string, command: string, networkDomains?: string[]): Promise<void>;
+  allowGlobal(tool: string, command: string, networkDomains?: string[]): Promise<void>;
   deleteById(id: number): Promise<boolean>;
   clear(): Promise<void>;
 }

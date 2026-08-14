@@ -53,7 +53,13 @@ export function registerRunRoutes(server: FastifyInstance, ctx: AppContext) {
         title = firstLine.length > 40 ? firstLine.substring(0, 40).trim() + "…" : firstLine;
       }
     }
-    const project = normalizeProject(ctx, projectPath, projectName);
+    let project: ReturnType<typeof normalizeProject>;
+    try {
+      project = normalizeProject(ctx, projectPath, projectName);
+    } catch (error: any) {
+      reply.status(400);
+      return { error: error.message };
+    }
 
     const run = {
       id: runId,
@@ -131,8 +137,18 @@ export function registerRunRoutes(server: FastifyInstance, ctx: AppContext) {
       return { error: `Run with id "${id}" not found` };
     }
 
+    let canonicalProject: ReturnType<typeof normalizeProject>;
+    try {
+      canonicalProject = normalizeProject(ctx, run.projectPath, run.projectName);
+    } catch (error: any) {
+      reply.status(400);
+      return { error: error.message };
+    }
+
     // Update model or mode if changed mid-conversation.
-    const updates: Partial<Run> = {};
+    const updates: Partial<Run> = canonicalProject.projectPath === run.projectPath
+      ? {}
+      : canonicalProject;
     if (providerId && model) {
       const providerMeta = ctx.registry.getSafeMetadata().find(p => p.id === providerId);
       updates.providerId = providerId;
@@ -206,33 +222,23 @@ export function registerRunRoutes(server: FastifyInstance, ctx: AppContext) {
       return { error: `Run with id "${id}" not found` };
     }
 
-    // Persist the grant scoped to the tool/command being approved, so it never
-    // leaks to a different tool. run_command grants are keyed to the command
-    // string and matched by prefix, so they cover the whole command family.
+    // Persist only an exact tool/command/domain key, so an approved command
+    // cannot be extended with a suffix or broader network access later.
     const pending = ctx.orchestrator.getPendingPermission(id);
     try {
       if (pending?.toolCall && decision !== "deny") {
-        const { tool, command } = permissionKey(pending.toolCall);
+        const { tool, command, networkDomains } = permissionKey(pending.toolCall);
         // Never remember a grant for a run_command that escapes the workspace
         // (cd .., absolute/home paths) — those keep prompting on every call.
         // search_web/fetch_url ARE persistable, scoped by query/host (command holds that scope).
         const neverPersist = tool === "run_command" && commandEscapesWorkspace(command);
 
-        // In Full Access mode, ANY approved (persistable) run_command is saved —
-        // even a plain "Yes"/allow_once — so the command family is never asked
-        // again. The first run of a command is still gated.
-        const fullAccessAutoGrant =
-          !neverPersist && run.mode === "full_access" && tool === "run_command" && !!command;
-
         if (neverPersist) {
           // no-op: keep asking every time
         } else if (decision === "allow_always") {
-          await ctx.permissionRepo.allowGlobal(tool, command);
+          await ctx.permissionRepo.allowGlobal(tool, command, networkDomains);
         } else if (decision === "allow_project" && run.projectPath) {
-          await ctx.permissionRepo.allowProject(run.projectPath, tool, command);
-        } else if (fullAccessAutoGrant) {
-          if (run.projectPath) await ctx.permissionRepo.allowProject(run.projectPath, tool, command);
-          else await ctx.permissionRepo.allowGlobal(tool, command);
+          await ctx.permissionRepo.allowProject(run.projectPath, tool, command, networkDomains);
         }
       }
     } catch (err: any) {
@@ -367,8 +373,7 @@ export function registerRunRoutes(server: FastifyInstance, ctx: AppContext) {
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*"
+      "Connection": "keep-alive"
     });
 
     reply.raw.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);

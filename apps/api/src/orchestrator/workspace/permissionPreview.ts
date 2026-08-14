@@ -2,6 +2,15 @@ import path from "node:path";
 import type { Run, ToolCall, PermissionPreview } from "@locagens/shared";
 import { resolveInside, readExistingFile } from "./pathGuards.js";
 import { applyEdit } from "./fileToolExecutor.js";
+import { normalizeNetworkDomains } from "../../security/CommandSandbox.js";
+
+function safeNetworkDomains(value: unknown): string[] {
+  try {
+    return normalizeNetworkDomains(value);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * The permission-flow side of the workspace tools: grant scoping, the
@@ -14,7 +23,7 @@ import { applyEdit } from "./fileToolExecutor.js";
  * is per exact command string, so approving "dotnet build" does not approve
  * "dotnet build -f". Other tools are scoped per tool name (command is empty).
  */
-export function permissionKey(toolCall: ToolCall): { tool: string; command: string } {
+export function permissionKey(toolCall: ToolCall): { tool: string; command: string; networkDomains: string[] } {
   const tool = toolCall.function.name;
   if (tool === "run_command") {
     let command = "";
@@ -23,7 +32,13 @@ export function permissionKey(toolCall: ToolCall): { tool: string; command: stri
     } catch {
       command = "";
     }
-    return { tool, command };
+    let networkDomains: string[] = [];
+    try {
+      networkDomains = safeNetworkDomains(JSON.parse(toolCall.function.arguments || "{}").network_domains);
+    } catch {
+      networkDomains = [];
+    }
+    return { tool, command, networkDomains };
   }
   if (tool === "search_web") {
     let query = "";
@@ -32,7 +47,7 @@ export function permissionKey(toolCall: ToolCall): { tool: string; command: stri
     } catch {
       query = "";
     }
-    return { tool, command: query };
+    return { tool, command: query, networkDomains: [] };
   }
   if (tool === "fetch_url") {
     // Scope the grant to the host, so approving one site does not approve the
@@ -44,9 +59,9 @@ export function permissionKey(toolCall: ToolCall): { tool: string; command: stri
     } catch {
       host = "";
     }
-    return { tool, command: host };
+    return { tool, command: host.toLowerCase(), networkDomains: [] };
   }
-  return { tool, command: "" };
+  return { tool, command: "", networkDomains: [] };
 }
 
 /**
@@ -167,7 +182,8 @@ export function buildPermissionPreview(run: Run, toolCall: ToolCall): Permission
         absolutePath: baseDir,
         oldContent: null,
         newContent: null,
-        command: typeof args.command === "string" ? args.command : ""
+        command: typeof args.command === "string" ? args.command : "",
+        networkDomains: safeNetworkDomains(args.network_domains)
       };
     case "search_web":
       return {

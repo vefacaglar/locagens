@@ -45,6 +45,7 @@ export function useProjects(runs: Ref<Run[]>) {
   async function browseFolder() {
     try {
       const data = await api.browseFolder();
+      if (!data) return;
       newProjectPath.value = data.path;
       newProjectName.value = data.name;
     } catch (err: any) {

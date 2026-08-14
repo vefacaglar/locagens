@@ -23,14 +23,12 @@ const selected = ref(0);
 const preview = computed<PermissionPreview | null>(() => props.request?.preview ?? null);
 const toolName = computed<string>(() => props.request?.toolCall?.function?.name ?? 'tool');
 
-// For run_command, a grant matches by prefix: approving this command also covers
-// any command that starts with it (e.g. "go build ./x/" -> "go build ./x/...").
-// Relabel the "don't ask again" options to make that scope clear.
+// run_command grants are exact and include the requested network-domain set.
 const options = computed(() => {
   if (toolName.value === 'run_command') {
     return PERMISSION_OPTIONS.map((o) => {
-      if (o.decision === 'allow_project') return { ...o, label: 'Yes, and allow commands starting with this in this project' };
-      if (o.decision === 'allow_always') return { ...o, label: 'Yes, and allow commands starting with this globally' };
+      if (o.decision === 'allow_project') return { ...o, label: 'Yes, and allow this exact command and network scope in this project' };
+      if (o.decision === 'allow_always') return { ...o, label: 'Yes, and allow this exact command and network scope globally' };
       return o;
     });
   }
@@ -131,6 +129,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
       <!-- Detail preview (read / list / mkdir / move / search / command) -->
       <div v-else-if="preview" class="cc-perm-pathbox">
         <code>{{ previewDetail }}</code>
+        <div v-if="preview.action === 'command'" class="cc-network-scope">
+          Network: {{ preview.networkDomains?.length ? preview.networkDomains.join(', ') : 'blocked' }}
+        </div>
       </div>
 
       <!-- Fallback for tools without a structured preview -->
@@ -210,6 +211,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
      instead of stretching the whole card and pushing the options off-screen. */
   max-height: 180px;
   overflow: auto;
+}
+
+.cc-network-scope {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .cc-perm-pathbox code {

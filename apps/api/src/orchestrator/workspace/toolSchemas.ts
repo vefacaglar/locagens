@@ -183,6 +183,11 @@ export const WORKSPACE_TOOLS = [
           command: {
             type: "string",
             description: "Command to execute."
+          },
+          network_domains: {
+            type: "array",
+            items: { type: "string" },
+            description: "Exact outbound host names required by this command. Omit for a network-isolated command. New domains always require approval."
           }
         },
         required: ["command"]

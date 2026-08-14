@@ -1,9 +1,10 @@
 import path from "node:path";
-import { exec } from "node:child_process";
 import type { Run, ToolCall } from "@locagens/shared";
 import { truncateOutput } from "./pathGuards.js";
 import { commandScansOutsideWorkspace } from "./permissionPreview.js";
 import { executeWorkspaceTool } from "./fileToolExecutor.js";
+import { safeFetchText } from "../../security/SafeHttpClient.js";
+import { commandSandbox, normalizeNetworkDomains } from "../../security/CommandSandbox.js";
 
 /**
  * The async tools (shell + network) and the orchestrator's execution entry
@@ -22,7 +23,7 @@ export async function executeWorkspaceToolAsync(run: Run, toolCall: ToolCall): P
     try {
       const args = JSON.parse(toolCall.function.arguments);
       const baseDir = path.resolve(run.projectPath || process.cwd());
-      return await runShellCommand(baseDir, typeof args.command === "string" ? args.command : "");
+      return await runShellCommand(baseDir, typeof args.command === "string" ? args.command : "", args.network_domains);
     } catch (err: any) {
       return JSON.stringify({ success: false, error: err.message });
     }
@@ -50,44 +51,19 @@ export async function executeWorkspaceToolAsync(run: Run, toolCall: ToolCall): P
 }
 
 /** Runs shell commands without blocking the orchestrator's event loop. */
-function runShellCommand(baseDir: string, rawCommand: string): Promise<string> {
+async function runShellCommand(baseDir: string, rawCommand: string, rawDomains: unknown): Promise<string> {
   const command = rawCommand.trim();
   if (command === "") {
-    return Promise.resolve(JSON.stringify({ success: false, error: "Missing parameter: command" }));
+    return JSON.stringify({ success: false, error: "Missing parameter: command" });
   }
   if (commandScansOutsideWorkspace(command)) {
-    return Promise.resolve(JSON.stringify({
+    return JSON.stringify({
       success: false,
       error: "Refusing to scan outside the workspace. Search project-relative paths, or check installed tools with direct version/path commands."
-    }));
-  }
-
-  return new Promise((resolve) => {
-    exec(command, {
-      cwd: baseDir,
-      encoding: "utf-8",
-      timeout: 120_000,
-      maxBuffer: 4 * 1024 * 1024
-    }, (cmdErr, stdout, stderr) => {
-      if (!cmdErr) {
-        resolve(JSON.stringify({
-          success: true,
-          exitCode: 0,
-          stdout: truncateOutput(stdout?.toString?.() ?? ""),
-          stderr: truncateOutput(stderr?.toString?.() ?? "")
-        }));
-        return;
-      }
-
-      resolve(JSON.stringify({
-        success: false,
-        exitCode: typeof cmdErr.code === "number" ? cmdErr.code : null,
-        stdout: truncateOutput(stdout?.toString?.() ?? ""),
-        stderr: truncateOutput(stderr?.toString?.() ?? cmdErr.message ?? ""),
-        error: cmdErr.signal === "SIGTERM" ? "Command timed out after 120s." : undefined
-      }));
     });
-  });
+  }
+  const domains = normalizeNetworkDomains(rawDomains);
+  return JSON.stringify(await commandSandbox.run(baseDir, command, domains));
 }
 
 /** Fetches an http(s) URL and returns its text body (truncated). */
@@ -106,29 +82,17 @@ async function fetchUrl(rawUrl: string): Promise<string> {
     return JSON.stringify({ success: false, error: "Only http and https URLs are allowed." });
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const response = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { "User-Agent": "Locagens/1.0 (+local workspace assistant)" }
-    });
-    const contentType = response.headers.get("content-type") ?? "";
-    const body = await response.text();
+    const response = await safeFetchText(url);
     return JSON.stringify({
       success: response.ok,
       status: response.status,
-      contentType,
-      finalUrl: response.url,
-      content: truncateOutput(body)
+      contentType: response.contentType,
+      finalUrl: response.finalUrl,
+      content: truncateOutput(response.body)
     });
   } catch (err: any) {
-    const aborted = err?.name === "AbortError";
-    return JSON.stringify({ success: false, error: aborted ? "Request timed out after 30s." : (err?.message ?? "Fetch failed.") });
-  } finally {
-    clearTimeout(timeout);
+    return JSON.stringify({ success: false, error: err?.message ?? "Fetch failed." });
   }
 }
 
@@ -140,17 +104,9 @@ async function searchWeb(rawQuery: string, rawMaxResults?: number): Promise<stri
   const maxResults = Math.min(Math.max(Math.floor(rawMaxResults ?? 5), 1), 10);
   const searchUrl = `https://html.duckduckgo.com/html/?${new URLSearchParams({ q: query }).toString()}`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const response = await fetch(searchUrl, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: { "User-Agent": "Locagens/1.0 (+local workspace assistant)" }
-    });
-    const body = await response.text();
-    const results = parseDuckDuckGoResults(body).slice(0, maxResults);
+    const response = await safeFetchText(searchUrl);
+    const results = parseDuckDuckGoResults(response.body).slice(0, maxResults);
     return JSON.stringify({
       success: response.ok,
       status: response.status,
@@ -159,10 +115,7 @@ async function searchWeb(rawQuery: string, rawMaxResults?: number): Promise<stri
       results
     });
   } catch (err: any) {
-    const aborted = err?.name === "AbortError";
-    return JSON.stringify({ success: false, error: aborted ? "Search timed out after 30s." : (err?.message ?? "Search failed.") });
-  } finally {
-    clearTimeout(timeout);
+    return JSON.stringify({ success: false, error: err?.message ?? "Search failed." });
   }
 }
 

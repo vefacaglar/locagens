@@ -63,8 +63,9 @@ export function setupSchema(db: DatabaseSync, wsRoot: string, defaultProjectName
       project_path TEXT NOT NULL DEFAULT '',
       tool TEXT NOT NULL DEFAULT '',
       command TEXT NOT NULL DEFAULT '',
+      network_domains TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL,
-      UNIQUE(scope, project_path, tool, command)
+      UNIQUE(scope, project_path, tool, command, network_domains)
     );
   `);
 
