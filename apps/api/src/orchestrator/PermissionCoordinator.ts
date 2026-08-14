@@ -24,10 +24,8 @@ export class PermissionCoordinator {
   // sub-agents share one runId and the pending slot is single, so their approval
   // prompts must be shown one at a time, not overwrite each other.
   private chain = new Map<string, Promise<void>>();
-  // Runs the user chose to stop gating entirely (the "allow_run" decision): every
-  // subsequent tool call in the run runs without a prompt. In-memory and run-scoped
-  // — cleared when the run finishes. The user's mid-run escape from prompt fatigue.
-  private bypassRuns = new Set<string>();
+  // Exact tool/command/domain grants approved for the lifetime of one run.
+  private runGrants = new Map<string, Set<string>>();
 
   constructor(
     private activeRuns: Set<string>,
@@ -36,10 +34,13 @@ export class PermissionCoordinator {
 
   /** Resolves a pending request with the user's decision. Returns false if none. */
   resolve(runId: string, decision: PermissionDecision): boolean {
-    // "allow_run" approves this call AND silences every later prompt in the run.
-    if (decision === "allow_run") this.bypassRuns.add(runId);
     const pending = this.pending.get(runId);
     if (pending) {
+      if (decision === "allow_run") {
+        const grants = this.runGrants.get(runId) ?? new Set<string>();
+        grants.add(this.identity(pending.toolCall));
+        this.runGrants.set(runId, grants);
+      }
       pending.resolve(decision);
       this.pending.delete(runId);
       return true;
@@ -63,42 +64,37 @@ export class PermissionCoordinator {
   /** Drops any chain bookkeeping for a finished run. */
   clear(runId: string) {
     this.chain.delete(runId);
-    this.bypassRuns.delete(runId);
+    this.runGrants.delete(runId);
   }
 
   /**
    * Whether a standing grant covers this tool call. Grants are scoped per tool.
-   * For run_command the match is by PREFIX: approving "go build ./internal/config/"
-   * also covers "go build ./internal/config/..." (the new command starts with the
-   * granted one). This lets one approval cover closely-related invocations without
-   * re-prompting. Other tools (e.g. search_web query or fetch_url host) still
-   * match exactly.
+   * run_command grants match the exact command and normalized network-domain
+   * set. A command suffix can therefore never inherit a broader earlier grant.
    */
   check(run: Run, toolCall: any): boolean {
-    // The user chose "allow everything for this run" — skip all gating for it.
-    if (this.bypassRuns.has(run.id)) return true;
     try {
-      const { tool, command } = permissionKey(toolCall);
+      const { tool, command, networkDomains } = permissionKey(toolCall);
+      if (this.runGrants.get(run.id)?.has(this.identity(toolCall))) return true;
 
       if (tool === "run_command") {
         // Commands that navigate outside the workspace always ask, regardless of
         // any grant — so a folder-escaping command can never run silently.
         if (commandEscapesWorkspace(command)) return false;
-        return this.hasRunCommandPrefixGrant(run, command);
       }
 
       // search_web/fetch_url fall through to the exact match below: grants are
       // scoped per query/host (a new query/host still asks; an approved one runs silently).
 
       const globalPerm = db
-        .prepare("SELECT 1 FROM permissions WHERE scope = 'global' AND tool = ? AND command = ? AND status = 'allowed'")
-        .get(tool, command);
+        .prepare("SELECT 1 FROM permissions WHERE scope = 'global' AND tool = ? AND command = ? AND network_domains = ? AND status = 'allowed'")
+        .get(tool, command, JSON.stringify(networkDomains));
       if (globalPerm) return true;
 
       if (run.projectPath) {
         const projectPerm = db
-          .prepare("SELECT 1 FROM permissions WHERE scope = 'project' AND project_path = ? AND tool = ? AND command = ? AND status = 'allowed'")
-          .get(run.projectPath, tool, command);
+          .prepare("SELECT 1 FROM permissions WHERE scope = 'project' AND project_path = ? AND tool = ? AND command = ? AND network_domains = ? AND status = 'allowed'")
+          .get(run.projectPath, tool, command, JSON.stringify(networkDomains));
         if (projectPerm) return true;
       }
     } catch (err) {
@@ -107,28 +103,9 @@ export class PermissionCoordinator {
     return false;
   }
 
-  /**
-   * A run_command grant covers the current command when the command starts with
-   * a granted command string. Empty grants are ignored so a blank grant can never
-   * match everything.
-   */
-  private hasRunCommandPrefixGrant(run: Run, command: string): boolean {
-    if (!command) return false;
-    const covers = (rows: { command: string }[]) =>
-      rows.some(r => r.command && command.startsWith(r.command));
-
-    const globalGrants = db
-      .prepare("SELECT command FROM permissions WHERE scope = 'global' AND tool = 'run_command' AND status = 'allowed'")
-      .all() as { command: string }[];
-    if (covers(globalGrants)) return true;
-
-    if (run.projectPath) {
-      const projectGrants = db
-        .prepare("SELECT command FROM permissions WHERE scope = 'project' AND project_path = ? AND tool = 'run_command' AND status = 'allowed'")
-        .all(run.projectPath) as { command: string }[];
-      if (covers(projectGrants)) return true;
-    }
-    return false;
+  private identity(toolCall: any): string {
+    const key = permissionKey(toolCall);
+    return JSON.stringify([key.tool, key.command, key.networkDomains]);
   }
 
   /** Prompts the user for a decision, serialized behind any in-flight prompt. */

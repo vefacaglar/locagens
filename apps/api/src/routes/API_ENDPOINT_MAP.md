@@ -1,6 +1,7 @@
 # API Endpoint Map
 
-_Generated from `apps/api/src/routes/` — grouped by route file._
+_Generated from `apps/api/src/routes/` — grouped by route file. `/ping` is public;
+every `/api/*` route requires the process-local bearer token._
 
 ---
 
@@ -84,3 +85,12 @@ _Generated from `apps/api/src/routes/` — grouped by route file._
 |--------|------|-------------|--------------------------|
 | GET | `/api/settings` | Current local app settings (backend port) | `ctx.settingsStore.read()` |
 | PUT | `/api/settings` | Update app settings (port change requires restart) | `ctx.settingsStore.save({port})` |
+
+---
+
+## `security.ts` — `registerSecurityRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/security/status` | Report local API and command-sandbox readiness | `commandSandbox.status()` |
+| POST | `/api/security/sandbox/setup` | Install the Windows sandbox runtime after explicit UI confirmation | `commandSandbox.installWindows()` |

@@ -54,6 +54,10 @@ export function dbWriterBinary(): string {
   return path.join(process.resourcesPath, "db-writer", "db-writer");
 }
 
+export function sandboxRuntimeDir(): string {
+  return path.join(process.resourcesPath, "sandbox-runtime", "vendor");
+}
+
 /** Built web app entry (prod only). */
 export function webIndex(): string {
   return path.join(process.resourcesPath, "web", "index.html");

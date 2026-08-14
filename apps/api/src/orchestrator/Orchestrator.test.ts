@@ -427,7 +427,7 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.ok(fs.existsSync(createdFilePath));
   });
 
-  await t.test("Orchestrator - allow_run stops gating every later tool call in the run", async () => {
+  await t.test("Orchestrator - allow_run reuses only the same permission identity", async () => {
     const registry = new ProviderRegistry(testConfigPath);
     const runRepo = new RunRepository(db);
     const messageRepo = new MessageRepository(db);
@@ -480,13 +480,13 @@ test("Orchestrator Integration Tests", async (t) => {
 
     const runPromise = orchestrator.run(runId);
 
-    // Wait for the first permission prompt, then choose "allow everything for this run".
+    // Wait for the first permission prompt, then grant this tool identity for the run.
     await new Promise(r => setTimeout(r, 100));
     assert.strictEqual(runRepo.getById(runId)?.status, "awaiting_permission");
     assert.ok(orchestrator.resolvePermission(runId, "allow_run"));
 
-    // If the second write still gated, the run would hang awaiting a prompt that
-    // never comes; reaching "done" proves the bypass silenced it.
+    // Both calls share the write_file permission identity. A different tool (or
+    // a different command/domain key) would still create another prompt.
     await runPromise;
 
     assert.strictEqual(runRepo.getById(runId)?.status, "done");
@@ -1456,4 +1456,3 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.strictEqual(logs[0].cost, 0.012);
   });
 });
-

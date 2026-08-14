@@ -19,6 +19,7 @@ import {
 } from "./database/repositories.js";
 import { Orchestrator } from "./orchestrator/Orchestrator.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
+import { requireRegisteredProject } from "./security/projectPaths.js";
 
 /**
  * Shared application dependencies, instantiated once and passed to every
@@ -67,7 +68,7 @@ export function createAppContext(): AppContext {
 
 /** Normalizes an optional project path/name pair to concrete values. */
 export function normalizeProject(ctx: AppContext, projectPath?: string, projectName?: string) {
-  const normalizedPath = projectPath?.trim() || ctx.defaultProjectPath;
+  const normalizedPath = requireRegisteredProject(ctx.projectRepo, projectPath?.trim() || ctx.defaultProjectPath);
   return {
     projectPath: normalizedPath,
     projectName: projectName?.trim() || path.basename(normalizedPath) || "Workspace"

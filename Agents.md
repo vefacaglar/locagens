@@ -103,7 +103,7 @@ list_directory(path)
 create_directory(path)
 move_file(source_path, destination_path)
 search_files(query, path?)
-run_command(command)
+run_command(command, network_domains?)
 fetch_url(url)
 update_plan(title, tasks, body?, start_new?)   plan mode only
 set_chat_title(title)
@@ -127,6 +127,10 @@ internal bookkeeping only; it does not touch files or network and runs without a
 permission prompt. `set_chat_title` also runs silently because it only renames
 the run.
 
+Commands run through the platform sandbox with workspace-only writes and no
+network by default. A networked command must declare its domains in advance;
+standing grants match the exact command and exact normalized domain set.
+
 In preset runs, the architect cannot mutate files or run commands directly. It
 delegates code-writing to coder sub-agents. Utility sub-agents receive read,
 list, search, and move tools only.
@@ -146,7 +150,9 @@ When a gated tool call needs approval, the orchestrator pauses:
 ```
 
 Standing grants are scoped by tool. `run_command` grants are scoped to the exact
-command string; `fetch_url` grants are scoped to the host.
+command string and exact normalized network-domain set; `fetch_url` grants are
+scoped to the host. `allow_run` approves only the same permission identity for
+the remainder of that run.
 
 ---
 
@@ -180,7 +186,10 @@ The orchestrator enforces:
 
 ```txt
 workspace path containment
+canonical registered-project validation and symlink boundary checks
 permission gating for dangerous tools and ask_permissions mode
+fail-closed command sandboxing with deny-by-default network access
+SSRF-safe agent HTTP with redirect, DNS, timeout, and body limits
 cooperative cancellation between steps
 provider timeout per request
 startup cleanup for runs left in active states

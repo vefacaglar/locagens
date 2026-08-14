@@ -66,9 +66,21 @@ export function runMigrations(db: DatabaseSync) {
   // semantics conflicts with per-command approval, so the legacy table is dropped
   // and rebuilt; the user simply re-approves on next use.
   const permCols = db.prepare("PRAGMA table_info(permissions)").all() as { name: string }[];
-  if (permCols.length > 0 && !permCols.some((c) => c.name === "tool")) {
-    console.log("[Database] Migrating permissions table to per-tool/command grants (clearing legacy blanket grants).");
+  if (permCols.length > 0 && (!permCols.some((c) => c.name === "tool") || !permCols.some((c) => c.name === "network_domains"))) {
+    console.log("[Database] Migrating permissions to exact command/domain grants (clearing legacy grants).");
     db.exec("DROP TABLE permissions");
+    db.exec(`
+      CREATE TABLE permissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL,
+        project_path TEXT NOT NULL DEFAULT '',
+        tool TEXT NOT NULL DEFAULT '',
+        command TEXT NOT NULL DEFAULT '',
+        network_domains TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL,
+        UNIQUE(scope, project_path, tool, command, network_domains)
+      )
+    `);
   }
 
   // Migration: Add duration_ms column to usage_logs if missing.

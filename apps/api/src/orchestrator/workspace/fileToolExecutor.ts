@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Run, ToolCall } from "@locagens/shared";
 import { WORKSPACE_TOOLS } from "./toolSchemas.js";
-import { resolveInside, requirePath } from "./pathGuards.js";
+import { resolveInsideForMutation, resolveInsideForRead, requirePath } from "./pathGuards.js";
 
 /**
  * Synchronous execution of the filesystem workspace tools. Network/shell tools
@@ -80,6 +80,17 @@ function searchWorkspace(rootDir: string, baseDir: string, query: string): Array
 const READ_FILE_MAX_LINES = 2_000;
 const READ_FILE_MAX_CHARS = 60_000;
 
+function writeTextNoFollow(filePath: string, content: string): void {
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC |
+    (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(filePath, flags, 0o644);
+  try {
+    fs.writeFileSync(fd, content, "utf-8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * Slices a file's content to the requested offset/limit window, capped at
  * READ_FILE_MAX_LINES / READ_FILE_MAX_CHARS. When the window does not cover the
@@ -134,23 +145,23 @@ export function executeWorkspaceTool(run: Run, toolCall: ToolCall): string {
 
     switch (toolCall.function.name) {
       case "write_file": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForMutation(baseDir, requirePath(args.path));
         fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-        fs.writeFileSync(absolutePath, args.content || "", "utf-8");
+        writeTextNoFollow(absolutePath, args.content || "");
         return JSON.stringify({ success: true, message: `File written successfully at ${args.path}` });
       }
       case "edit_file": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForMutation(baseDir, requirePath(args.path));
         if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
           return JSON.stringify({ success: false, error: `File not found at ${args.path}` });
         }
         const current = fs.readFileSync(absolutePath, "utf-8");
         const updated = applyEdit(current, args.old_string ?? "", args.new_string ?? "", !!args.replace_all);
-        fs.writeFileSync(absolutePath, updated, "utf-8");
+        writeTextNoFollow(absolutePath, updated);
         return JSON.stringify({ success: true, message: `File edited successfully at ${args.path}` });
       }
       case "delete_file": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForMutation(baseDir, requirePath(args.path));
         if (fs.existsSync(absolutePath)) {
           fs.unlinkSync(absolutePath);
           return JSON.stringify({ success: true, message: `File deleted successfully at ${args.path}` });
@@ -158,7 +169,7 @@ export function executeWorkspaceTool(run: Run, toolCall: ToolCall): string {
         return JSON.stringify({ success: false, message: `File not found at ${args.path}` });
       }
       case "read_file": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForRead(baseDir, requirePath(args.path));
         if (!fs.existsSync(absolutePath)) {
           return JSON.stringify({ success: false, error: `File not found at ${args.path}` });
         }
@@ -168,7 +179,7 @@ export function executeWorkspaceTool(run: Run, toolCall: ToolCall): string {
         return JSON.stringify(readFileWindow(fs.readFileSync(absolutePath, "utf-8"), args));
       }
       case "list_directory": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForRead(baseDir, requirePath(args.path));
         if (!fs.existsSync(absolutePath)) {
           return JSON.stringify({ success: false, error: `Directory not found at ${args.path}` });
         }
@@ -176,19 +187,19 @@ export function executeWorkspaceTool(run: Run, toolCall: ToolCall): string {
           throw new Error(`Path '${args.path}' is a file, not a directory. Use read_file instead.`);
         }
         const files = fs.readdirSync(absolutePath).map(file => {
-          const fileStat = fs.statSync(path.join(absolutePath, file));
-          return { name: file, isDirectory: fileStat.isDirectory(), size: fileStat.size };
+          const fileStat = fs.lstatSync(path.join(absolutePath, file));
+          return { name: file, isDirectory: fileStat.isDirectory(), isSymbolicLink: fileStat.isSymbolicLink(), size: fileStat.size };
         });
         return JSON.stringify({ success: true, files });
       }
       case "create_directory": {
-        const absolutePath = resolveInside(baseDir, requirePath(args.path));
+        const absolutePath = resolveInsideForMutation(baseDir, requirePath(args.path));
         fs.mkdirSync(absolutePath, { recursive: true });
         return JSON.stringify({ success: true, message: `Directory created at ${args.path}` });
       }
       case "move_file": {
-        const sourceAbs = resolveInside(baseDir, requirePath(args.source_path, "source_path"));
-        const destAbs = resolveInside(baseDir, requirePath(args.destination_path, "destination_path"));
+        const sourceAbs = resolveInsideForMutation(baseDir, requirePath(args.source_path, "source_path"));
+        const destAbs = resolveInsideForMutation(baseDir, requirePath(args.destination_path, "destination_path"));
         if (!fs.existsSync(sourceAbs)) {
           return JSON.stringify({ success: false, error: `Source not found at ${args.source_path}` });
         }
@@ -201,7 +212,7 @@ export function executeWorkspaceTool(run: Run, toolCall: ToolCall): string {
         if (query === "") {
           throw new Error("Missing parameter: query");
         }
-        const rootAbs = resolveInside(baseDir, typeof args.path === "string" ? args.path : "");
+        const rootAbs = resolveInsideForRead(baseDir, typeof args.path === "string" ? args.path : "");
         if (!fs.existsSync(rootAbs)) {
           return JSON.stringify({ success: false, error: `Search path not found at ${args.path}` });
         }

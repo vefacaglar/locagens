@@ -145,8 +145,9 @@ func initDB(db *sql.DB) error {
 			project_path TEXT NOT NULL DEFAULT '',
 			tool TEXT NOT NULL DEFAULT '',
 			command TEXT NOT NULL DEFAULT '',
+			network_domains TEXT NOT NULL DEFAULT '[]',
 			status TEXT NOT NULL,
-			UNIQUE(scope, project_path, tool, command)
+			UNIQUE(scope, project_path, tool, command, network_domains)
 		)`,
 		`CREATE TABLE IF NOT EXISTS plans (
 			id TEXT PRIMARY KEY,
@@ -263,9 +264,9 @@ func execute(db *sql.DB, req request) (interface{}, error) {
 	case "project.delete":
 		return exec(db, "DELETE FROM projects WHERE path = ?", str(req.Args, "path"))
 	case "permission.allowProject":
-		return exec(db, "INSERT OR REPLACE INTO permissions (scope, project_path, tool, command, status) VALUES ('project', ?, ?, ?, 'allowed')", str(req.Args, "projectPath"), str(req.Args, "tool"), str(req.Args, "command"))
+		return exec(db, "INSERT OR REPLACE INTO permissions (scope, project_path, tool, command, network_domains, status) VALUES ('project', ?, ?, ?, ?, 'allowed')", str(req.Args, "projectPath"), str(req.Args, "tool"), str(req.Args, "command"), jsonValue(req.Args, "networkDomains", "[]"))
 	case "permission.allowGlobal":
-		return exec(db, "INSERT OR REPLACE INTO permissions (scope, project_path, tool, command, status) VALUES ('global', '', ?, ?, 'allowed')", str(req.Args, "tool"), str(req.Args, "command"))
+		return exec(db, "INSERT OR REPLACE INTO permissions (scope, project_path, tool, command, network_domains, status) VALUES ('global', '', ?, ?, ?, 'allowed')", str(req.Args, "tool"), str(req.Args, "command"), jsonValue(req.Args, "networkDomains", "[]"))
 	case "permission.deleteById":
 		return exec(db, "DELETE FROM permissions WHERE id = ?", intValue(req.Args, "id"))
 	case "permission.clear":
@@ -372,6 +373,18 @@ func strDefault(m map[string]interface{}, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func jsonValue(m map[string]interface{}, key, fallback string) string {
+	v, ok := m[key]
+	if !ok {
+		return fallback
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return fallback
+	}
+	return string(encoded)
 }
 
 func nullable(m map[string]interface{}, key string) interface{} {

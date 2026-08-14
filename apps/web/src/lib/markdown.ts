@@ -40,6 +40,27 @@ hljs.registerLanguage('markdown', markdown);
 
 const marked = new Marked({ gfm: true, breaks: true });
 
+marked.use({
+  walkTokens(token: any) {
+    if (token.type !== 'link' && token.type !== 'image') return;
+    try {
+      const protocol = new URL(String(token.href || '')).protocol;
+      if (protocol !== 'http:' && protocol !== 'https:') token.href = '';
+    } catch {
+      token.href = '';
+    }
+  }
+});
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 // highlightAuto tries every registered language, so it is by far the most
 // expensive path in rendering — and during streaming an unlabeled code block is
 // re-detected on every frame (the cache only hits once content stops changing).
@@ -56,6 +77,11 @@ let currentPrefix = '';
 
 marked.use({
   renderer: {
+    html(token: { text: string }) {
+      // Provider/model output is untrusted. Never let raw HTML create active
+      // renderer content or reach the privileged Electron preload bridge.
+      return escapeHtml(token.text);
+    },
     code(token: { text: string; lang?: string; escaped?: boolean }) {
       const code = token.text;
       const lang = token.lang || '';
@@ -97,30 +123,21 @@ marked.use({
           .replace(/'/g, '&#039;');
       }
 
-      const displayLang = lang || 'code';
-      const blockId = currentPrefix ? `${currentPrefix}-code-${codeBlockCounter++}` : `code-block-${codeBlockCounter++}`;
+      const displayLang = escapeHtml(lang || 'code');
+      const languageClass = (lang || 'code').replace(/[^a-z0-9_-]/gi, '-');
+      const safePrefix = currentPrefix.replace(/[^a-z0-9_-]/gi, '-');
+      const blockId = safePrefix ? `${safePrefix}-code-${codeBlockCounter++}` : `code-block-${codeBlockCounter++}`;
 
       return `
         <div class="code-block-wrapper">
           <div class="code-block-header">
             <span class="code-block-lang">${displayLang}</span>
-            <button class="code-block-copy-btn" onclick="
-              const codeText = this.closest('.code-block-wrapper').querySelector('code').innerText;
-              navigator.clipboard.writeText(codeText);
-              this.classList.add('copied');
-              this.querySelector('.copy-icon').style.display = 'none';
-              this.querySelector('.check-icon').style.display = 'inline-block';
-              setTimeout(() => {
-                this.classList.remove('copied');
-                this.querySelector('.copy-icon').style.display = 'inline-block';
-                this.querySelector('.check-icon').style.display = 'none';
-              }, 2000);
-            " title="Copy code">
+            <button class="code-block-copy-btn" data-copy-code="true" title="Copy code">
               ${COPY_ICON_SVG}
               ${CHECK_ICON_SVG.replace('class="check-icon"', 'class="check-icon" style="display: none;"')}
             </button>
           </div>
-          <pre id="${blockId}"><code class="hljs language-${displayLang}">${highlightedCode}</code></pre>
+          <pre id="${blockId}"><code class="hljs language-${languageClass}">${highlightedCode}</code></pre>
         </div>
       `;
     }
@@ -161,7 +178,7 @@ export function renderMarkdown(content: string, idPrefix?: string): string {
     return rendered.trimEnd();
   } catch (err) {
     console.error('Markdown parsing error:', err);
-    return content;
+    return escapeHtml(content);
   }
 }
 
@@ -208,4 +225,3 @@ export function formatSystemErrorMessage(content: string): string {
   }
   return content;
 }
-

@@ -42,8 +42,22 @@ export default defineConfig(({ command }) => ({
     // Fixed port so the Electron dev window can rely on it (no fallback to 5174).
     port: 5173,
     strictPort: true,
+    proxy: {
+      '/api': {
+        target: `http://127.0.0.1:${resolveBackendPort()}`,
+        changeOrigin: false,
+        configure(proxy) {
+          proxy.on('proxyReq', (proxyReq) => {
+            const token = process.env.LOCAGENS_API_TOKEN || 'locagens-development-token-not-for-production-0000000000000000'
+            proxyReq.setHeader('authorization', `Bearer ${token}`)
+          })
+        }
+      }
+    },
   },
   define: {
-    'import.meta.env.VITE_API_BASE': JSON.stringify(`http://localhost:${resolveBackendPort()}`),
+    // Browser development uses the authenticated Vite proxy. Packaged Electron
+    // injects its loopback base and transports requests through main-process IPC.
+    'import.meta.env.VITE_API_BASE': JSON.stringify(''),
   },
 }))

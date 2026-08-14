@@ -6,6 +6,7 @@ import { registerRunRoutes } from "./runs.js";
 import { registerPermissionRoutes } from "./permissions.js";
 import { registerMemoryRoutes } from "./memory.js";
 import { registerSettingsRoutes } from "./settings.js";
+import { registerSecurityRoutes } from "./security.js";
 
 export function registerRoutes(server: FastifyInstance, ctx: AppContext) {
   server.get("/ping", async () => ({ status: "ok", timestamp: new Date().toISOString() }));
@@ -16,4 +17,5 @@ export function registerRoutes(server: FastifyInstance, ctx: AppContext) {
   registerPermissionRoutes(server, ctx);
   registerMemoryRoutes(server, ctx);
   registerSettingsRoutes(server, ctx);
+  registerSecurityRoutes(server);
 }

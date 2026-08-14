@@ -112,12 +112,13 @@ Per-tool and per-command grant records for security approval.
 | `project_path` | `TEXT` | `NOT NULL` `DEFAULT ''` | Project path (empty string = all projects) |
 | `tool` | `TEXT` | `NOT NULL` `DEFAULT ''` | Tool name (e.g. `run_command`, `write_file`, `search_files`) |
 | `command` | `TEXT` | `NOT NULL` `DEFAULT ''` | Exact command string (for `run_command`); empty for other tools |
+| `network_domains` | `TEXT` | `NOT NULL` `DEFAULT '[]'` | Sorted JSON array of exact network domains approved with the command |
 | `status` | `TEXT` | `NOT NULL` | e.g. `'approved'`, `'denied'` |
-| | | `UNIQUE(scope, project_path, tool, command)` | Prevents duplicate grant rows |
+| | | `UNIQUE(scope, project_path, tool, command, network_domains)` | Prevents duplicate exact command/domain grants |
 
 **Indexes:** none declared explicitly.
 
-**Migration note:** A legacy version of this table had only `UNIQUE(scope, project_path)` and no `tool`/`command` columns (a single grant meant "allow every tool"). If the migration detects the old schema (no `tool` column), the table is **dropped and recreated**, clearing all existing grants.
+**Migration note:** Legacy tables without `tool` or `network_domains` allowed overly broad grants. If either column is missing, the table is **dropped and recreated**, clearing all existing grants.
 
 ---
 

@@ -1,7 +1,7 @@
 import { computed, ref, shallowRef, type ComputedRef, type Ref } from 'vue';
 import { tryOnScopeDispose } from '@vueuse/core';
 import type { ProviderMetadata, Run, RunMessage, RunStatus, Plan, RunUsageSummary } from '@locagens/shared';
-import { api, type PermissionDecision } from '../api/client';
+import { api, type PermissionDecision, type RunEventStream } from '../api/client';
 import { ACTIVE_STATUSES } from '../lib/format';
 import { STORAGE_KEYS } from '../lib/storageKeys';
 import { groupMessages, type MessageGroup } from '../lib/messageGroups';
@@ -73,7 +73,7 @@ export function useChatSession(options: ChatSessionOptions) {
   // The active ask_user_question request (questions to render), or null.
   const pendingQuestionRequest = ref<any>(null);
 
-  let eventSource: EventSource | null = null;
+  let eventSource: RunEventStream | null = null;
   let pendingPermissionPollTimer: ReturnType<typeof setTimeout> | null = null;
   let isDisposed = false;
   let liveMessageFlushFrame: number | null = null;
@@ -404,7 +404,7 @@ export function useChatSession(options: ChatSessionOptions) {
     flushAllMessageSurfaces();
     eventSource?.close();
     clearPendingMessageUpdates();
-    eventSource = new EventSource(api.eventsUrl(runId));
+    eventSource = api.openEvents(runId);
 
     eventSource.onmessage = (event) => {
       const data = JSON.parse(event.data);

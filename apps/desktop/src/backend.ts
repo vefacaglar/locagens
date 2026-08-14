@@ -5,6 +5,7 @@ import {
   dbPath,
   dbWriterBinary,
   settingsPath,
+  sandboxRuntimeDir,
   userProviderConfig,
 } from "./paths";
 
@@ -18,23 +19,25 @@ let child: UtilityProcess | null = null;
  * on every app update), while the user's own providers/edits go to a writable
  * overlay in the data dir that updates never touch.
  */
-function backendEnv(port: number): Record<string, string> {
+function backendEnv(port: number, apiToken: string): Record<string, string> {
   return {
     ...(process.env as Record<string, string>),
     PORT: String(port),
+    LOCAGENS_API_TOKEN: apiToken,
     LOCAGENS_SETTINGS_PATH: settingsPath(),
     LOCAGENS_DB_PATH: dbPath(),
     LOCAGENS_DB_WRITER_PATH: dbWriterBinary(),
+    LOCAGENS_SANDBOX_RUNTIME_DIR: sandboxRuntimeDir(),
     LOCAGENS_PROVIDER_CONFIG_PATH: bundledProviderConfig(),
     LOCAGENS_PROVIDER_USER_CONFIG_PATH: userProviderConfig(),
   };
 }
 
 /** Forks the bundled backend as a child process (prod). */
-export function startBackend(port: number): void {
+export function startBackend(port: number, apiToken: string): void {
   if (child) return;
   child = utilityProcess.fork(backendScript(), [], {
-    env: backendEnv(port),
+    env: backendEnv(port, apiToken),
     stdio: "pipe",
   });
   child.stdout?.on("data", (d) => process.stdout.write(`[backend] ${d}`));
@@ -60,7 +63,7 @@ export async function waitForBackend(port: number, timeoutMs = 15000): Promise<v
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://localhost:${port}/ping`);
+      const res = await fetch(`http://127.0.0.1:${port}/ping`);
       if (res.ok) return;
     } catch {
       // not up yet

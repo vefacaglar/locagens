@@ -2,13 +2,27 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { createAppContext } from "./context.js";
 import { registerRoutes } from "./routes/index.js";
+import { registerApiAuthentication, requireApiToken } from "./security/apiAuth.js";
+import { isAllowedControlPlaneOrigin, registerOriginPolicy } from "./security/originPolicy.js";
 
 async function start() {
-  const server = Fastify({ logger: true });
+  const apiToken = requireApiToken();
+  const server = Fastify({
+    logger: {
+      redact: ["req.headers.authorization"]
+    }
+  });
 
   await server.register(cors, {
-    origin: "*" // allow all origins for local development
+    origin(origin, callback) {
+      callback(null, isAllowedControlPlaneOrigin(origin));
+    },
+    allowedHeaders: ["authorization", "content-type"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   });
+
+  registerOriginPolicy(server);
+  registerApiAuthentication(server, apiToken);
 
   const ctx = createAppContext();
   registerRoutes(server, ctx);
@@ -17,8 +31,8 @@ async function start() {
     // The settings file (editable from the app's Settings screen) is the
     // source of truth for the port; PORT env is only a fallback default.
     const port = ctx.settingsStore.resolvePort();
-    await server.listen({ port, host: "0.0.0.0" });
-    console.log(`Server is running on http://localhost:${port}`);
+    await server.listen({ port, host: "127.0.0.1" });
+    console.log(`Server is running on http://127.0.0.1:${port}`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);

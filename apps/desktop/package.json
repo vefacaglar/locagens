@@ -4,6 +4,7 @@
   "private": true,
   "main": "./dist/main.js",
   "scripts": {
+    "build": "pnpm run build:main",
     "build:main": "tsc -p tsconfig.json",
     "start": "pnpm run build:main && electron .",
     "dist": "pnpm run build:main && electron-builder --publish never"
@@ -49,6 +50,10 @@
       {
         "from": "../../config/providers.json",
         "to": "config/providers.json"
+      },
+      {
+        "from": "../api/node_modules/@anthropic-ai/sandbox-runtime/vendor",
+        "to": "sandbox-runtime/vendor"
       }
     ],
     "mac": {

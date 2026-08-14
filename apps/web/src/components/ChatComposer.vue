@@ -651,12 +651,8 @@ onBeforeUnmount(() => {
                   <span class="mode-item-name">{{ modeItem.label }}</span>
                   <span class="mode-item-shortcut">{{ modeItem.shortcut }}</span>
                 </li>
-                <li class="mode-popup-divider"></li>
-                <li @click.stop="emit('update:bypassPermissions', !bypassPermissions)">
-                  <span class="mode-item-name">Bypass permissions</span>
-                  <span class="bypass-toggle-badge" :class="{ enabled: bypassPermissions }">
-                    {{ bypassPermissions ? 'Disable' : 'Enable' }}
-                  </span>
+                <li v-if="currentMode === 'full_access'" class="mode-security-note">
+                  Commands remain sandboxed. New network domains still require approval.
                 </li>
               </ul>
             </div>
@@ -1267,7 +1263,7 @@ onBeforeUnmount(() => {
   background: var(--nav-action-hover-bg);
 }
 
-/* Full Access is a no-confirmation mode — flag it red wherever it surfaces. */
+/* Full Access reduces prompts but never disables the OS sandbox or egress grants. */
 .mode-pill-btn.mode-pill-danger {
   color: var(--danger);
   border-color: var(--danger-border);
@@ -1356,6 +1352,23 @@ onBeforeUnmount(() => {
 
 .mode-popup-list li.mode-item-danger.active {
   background: var(--danger-soft);
+}
+
+.mode-popup-list li.mode-security-note {
+  display: block;
+  cursor: default;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--faint);
+  border-top: 1px solid var(--perm-code-border);
+  border-radius: 0;
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.mode-popup-list li.mode-security-note:hover {
+  background: transparent;
+  color: var(--faint);
 }
 
 .mode-item-name {

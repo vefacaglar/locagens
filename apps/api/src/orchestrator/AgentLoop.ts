@@ -586,7 +586,18 @@ export class AgentLoop {
     // Access mode, where the user has explicitly opted in to autonomous operation
     // with no interruptions. A matching standing grant also lets them run silently
     // in any mode. Other tools gate only in ask_permissions mode (gatesEveryTool).
-    const mustGate = !strategy.bypassDangerousGating && (isDangerous || strategy.gatesEveryTool);
+    let requestsCommandNetwork = false;
+    if (toolName === "run_command") {
+      try {
+        const args = JSON.parse(toolCall.function.arguments || "{}");
+        requestsCommandNetwork = Array.isArray(args.network_domains) && args.network_domains.length > 0;
+      } catch {
+        requestsCommandNetwork = false;
+      }
+    }
+    // Full Access skips ordinary command prompts, but never grants fresh
+    // outbound network access. Declared domains still require an exact grant.
+    const mustGate = requestsCommandNetwork || (!strategy.bypassDangerousGating && (isDangerous || strategy.gatesEveryTool));
     const needsPermission = mustGate && !this.permissions.check(run, toolCall);
 
     if (needsPermission) {

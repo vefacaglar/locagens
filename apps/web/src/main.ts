@@ -2,6 +2,39 @@ import { createApp } from 'vue'
 import './style.css'
 import App from './App.vue'
 
+const deferredFont = document.querySelector<HTMLLinkElement>('link[data-deferred-font]');
+deferredFont?.addEventListener('load', () => { deferredFont.media = 'all'; }, { once: true });
+
+document.addEventListener('click', (event) => {
+  const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>('a[href]');
+  if (anchor) {
+    event.preventDefault();
+    try {
+      const url = new URL(anchor.href);
+      if (url.protocol === 'https:' || url.protocol === 'http:') {
+        window.open(url.toString(), '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      // Invalid and non-web protocols remain inert.
+    }
+    return;
+  }
+  const button = (event.target as Element | null)?.closest<HTMLButtonElement>('[data-copy-code="true"]');
+  if (!button) return;
+  const code = button.closest('.code-block-wrapper')?.querySelector('code')?.textContent || '';
+  void navigator.clipboard.writeText(code);
+  button.classList.add('copied');
+  const copyIcon = button.querySelector<HTMLElement>('.copy-icon');
+  const checkIcon = button.querySelector<HTMLElement>('.check-icon');
+  if (copyIcon) copyIcon.style.display = 'none';
+  if (checkIcon) checkIcon.style.display = 'inline-block';
+  window.setTimeout(() => {
+    button.classList.remove('copied');
+    if (copyIcon) copyIcon.style.display = 'inline-block';
+    if (checkIcon) checkIcon.style.display = 'none';
+  }, 2000);
+});
+
 // Tag the root when running inside the Electron desktop shell so the app can
 // adapt its chrome (make header bars draggable, leave room for the macOS
 // traffic lights) without affecting the plain browser build.
