@@ -8,6 +8,7 @@ import {
   actionQuestion,
   previewDiff
 } from '../lib/permission';
+import DiffView from './DiffView.vue';
 
 const props = defineProps<{
   request: any;
@@ -115,26 +116,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
 
 <template>
   <transition name="slide-up">
-    <div v-if="request" class="cc-permission-card">
+    <div v-if="request" class="prompt-card prompt-card--floating cc-permission-card">
       <header class="cc-perm-header">
         <span class="cc-perm-action">{{ actionLabel(preview?.action) }}</span>
-        <span v-if="headerPath" class="cc-perm-path">{{ headerPath }}</span>
+        <span v-if="headerPath" class="cc-perm-path truncate">{{ headerPath }}</span>
         <span class="cc-perm-tool">{{ toolName }}</span>
       </header>
 
       <!-- File diff (edit / create / delete) -->
-      <div v-if="hasDiff" class="cc-diff">
-        <div
-          v-for="(row, idx) in diffRows"
-          :key="idx"
-          class="cc-diff-row"
-          :class="row.type"
-        >
-          <span class="cc-diff-gutter">{{ row.oldNo ?? '' }}</span>
-          <span class="cc-diff-gutter">{{ row.newNo ?? '' }}</span>
-          <span class="cc-diff-sign">{{ row.type === 'add' ? '+' : row.type === 'del' ? '-' : ' ' }}</span>
-          <span class="cc-diff-text">{{ row.text }}</span>
-        </div>
+      <div v-if="hasDiff" class="cc-diff-scroll">
+        <DiffView :rows="diffRows" />
       </div>
 
       <!-- Detail preview (read / list / mkdir / move / search / command) -->
@@ -168,21 +159,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
 </template>
 
 <style scoped>
+/* Shell + positioning come from the global .prompt-card / .prompt-card--floating;
+   this card keeps its slightly stronger shadow. */
 .cc-permission-card {
-  position: absolute;
-  bottom: calc(100% - 6px);
-  left: 12px;
-  right: 12px;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border);
-  border-radius: 12px;
   padding: 14px;
-  z-index: 1;
-  pointer-events: auto;
-  box-shadow: 0 14px 36px var(--permission-card-shadow);
-  display: flex;
-  flex-direction: column;
   gap: 10px;
+  box-shadow: 0 14px 36px var(--permission-card-shadow);
 }
 
 .cc-perm-header {
@@ -203,9 +185,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
 .cc-perm-path {
   font-family: monospace;
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .cc-perm-tool {
@@ -215,62 +194,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeyDown, true));
   color: var(--faint);
 }
 
-/* Diff view */
-.cc-diff {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem;
-  line-height: 1.5;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+/* Diff rendering is shared with the review panel (DiffView); this wrapper only
+   caps the height so long diffs scroll inside the card. */
+.cc-diff-scroll {
   max-height: 280px;
   overflow: auto;
-  padding: 4px 0;
-}
-
-.cc-diff-row {
-  display: flex;
-  white-space: pre;
-}
-
-.cc-diff-row.add {
-  background: var(--permission-card-allow-bg);
-}
-
-.cc-diff-row.del {
-  background: var(--permission-card-deny-bg);
-}
-
-.cc-diff-gutter {
-  flex: 0 0 auto;
-  width: 3ch;
-  padding: 0 6px;
-  text-align: right;
-  color: var(--faint);
-  user-select: none;
-}
-
-.cc-diff-sign {
-  flex: 0 0 auto;
-  width: 1.5ch;
-  text-align: center;
-  user-select: none;
-}
-
-.cc-diff-row.add .cc-diff-sign,
-.cc-diff-row.add .cc-diff-text {
-  color: var(--success);
-}
-
-.cc-diff-row.del .cc-diff-sign,
-.cc-diff-row.del .cc-diff-text {
-  color: var(--danger);
-}
-
-.cc-diff-text {
-  flex: 1 1 auto;
-  color: var(--text);
-  padding-right: 10px;
 }
 
 .cc-perm-pathbox {

@@ -2,6 +2,8 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import type { Run } from '@locagens/shared';
 import { ACTIVE_STATUSES, DEFAULT_PROJECT_PATH } from '../lib/format';
+import { STORAGE_KEYS } from '../lib/storageKeys';
+import Spinner from './ui/Spinner.vue';
 
 interface ProjectOption {
   path: string;
@@ -32,7 +34,7 @@ const emit = defineEmits<{
 
 const expandedProjects = ref<Record<string, boolean>>((() => {
   try {
-    const stored = localStorage.getItem('expandedProjects');
+    const stored = localStorage.getItem(STORAGE_KEYS.expandedProjects);
     return stored ? JSON.parse(stored) : {};
   } catch (e) {
     return {};
@@ -71,7 +73,7 @@ watch(
 watch(
   expandedProjects,
   (newVal) => {
-    localStorage.setItem('expandedProjects', JSON.stringify(newVal));
+    localStorage.setItem(STORAGE_KEYS.expandedProjects, JSON.stringify(newVal));
   },
   { deep: true }
 );
@@ -158,7 +160,7 @@ function selectSearchRun(run: Run) {
 
 function loadReadRunStamps(): Record<string, number> {
   try {
-    const stored = localStorage.getItem('sidebarReadRunStamps');
+    const stored = localStorage.getItem(STORAGE_KEYS.sidebarReadRunStamps);
     return stored ? JSON.parse(stored) : {};
   } catch {
     return {};
@@ -166,7 +168,7 @@ function loadReadRunStamps(): Record<string, number> {
 }
 
 function saveReadRunStamps() {
-  localStorage.setItem('sidebarReadRunStamps', JSON.stringify(readRunStamps.value));
+  localStorage.setItem(STORAGE_KEYS.sidebarReadRunStamps, JSON.stringify(readRunStamps.value));
 }
 
 function runActivityTime(run: Run): number {
@@ -328,7 +330,7 @@ function formatRunAge(run: Run): string {
               <svg v-else class="folder-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
               </svg>
-              <span class="project-name-text">{{ project.name }}</span>
+              <span class="project-name-text truncate">{{ project.name }}</span>
             </div>
             <div class="project-header-actions">
               <button class="new-chat-project-btn" title="New Session" @click="onNewChatForProject(project.path, $event)">
@@ -357,9 +359,9 @@ function formatRunAge(run: Run): string {
                 :class="{ active: run.id === activeRunId }"
                 @click="emit('select-run', run)"
               >
-                <span v-if="isRunActive(run)" class="session-state session-spinner" aria-label="Running"></span>
+                <span v-if="isRunActive(run)" class="session-state" aria-label="Running"><Spinner :size="12" /></span>
                 <span v-else-if="isRunUnread(run)" class="session-state session-unread-dot" aria-label="Unread"></span>
-                <span class="chat-title">{{ run.title }}</span>
+                <span class="chat-title truncate">{{ run.title }}</span>
                 <span class="chat-age">{{ formatRunAge(run) }}</span>
               </button>
               <button
@@ -412,8 +414,8 @@ function formatRunAge(run: Run): string {
           @mouseenter="selectedSearchIndex = idx"
           @click="selectSearchRun(run)"
         >
-          <span class="search-result-title">{{ searchRunTitle(run) }}</span>
-          <span class="search-result-project">{{ projectNameForRun(run) }}</span>
+          <span class="search-result-title truncate">{{ searchRunTitle(run) }}</span>
+          <span class="search-result-project truncate">{{ projectNameForRun(run) }}</span>
         </button>
         <div v-if="searchResults.length === 0" class="search-palette-empty">No matching chats.</div>
       </div>
@@ -611,9 +613,6 @@ function formatRunAge(run: Run): string {
 
 .project-name-text {
   flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: 0.9rem;
   line-height: 1.35;
   font-weight: inherit;
@@ -650,6 +649,8 @@ function formatRunAge(run: Run): string {
   top: 50%;
   transform: translateY(-50%);
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
 }
 
 .session-unread-dot {
@@ -658,21 +659,6 @@ function formatRunAge(run: Run): string {
   border-radius: 999px;
   background: var(--text);
   box-shadow: 0 0 0 1px var(--control-border);
-}
-
-.session-spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  border: 2px solid var(--border-soft);
-  border-top-color: var(--text);
-  animation: sidebar-session-spin 0.75s linear infinite;
-}
-
-@keyframes sidebar-session-spin {
-  to {
-    transform: translateY(-50%) rotate(360deg);
-  }
 }
 
 .chat-history-item:hover {
@@ -689,9 +675,6 @@ function formatRunAge(run: Run): string {
 
 .chat-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   line-height: 1.45;
   padding-bottom: 0;
 }
@@ -879,18 +862,12 @@ function formatRunAge(run: Run): string {
 
 .search-result-title {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-size: 0.98rem;
   line-height: 1.35;
 }
 
 .search-result-project {
   max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--faint);
   font-size: 0.9rem;
 }

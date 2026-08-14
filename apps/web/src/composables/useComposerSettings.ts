@@ -38,6 +38,60 @@ export const REASONING_EFFORTS = [
 
 const REASONING_EFFORT_IDS = new Set(REASONING_EFFORTS.map(x => x.id));
 
+// --- Persisted composer-settings storage -----------------------------------
+// The bm_run_* / bm_draft_* / bm_last_used_* localStorage namespace is owned by
+// this module. Other composables (useChatSession) persist through these helpers
+// instead of writing the raw keys, so the key scheme has a single owner.
+
+const COMPOSER_SETTING_SUFFIXES = [
+  'selected_model',
+  'reasoning_effort',
+  'selected_preset',
+  'current_mode',
+  'bypass_permissions'
+] as const;
+
+export interface PersistedComposerSettings {
+  selectedModel: string;
+  reasoningEffort: string;
+  selectedPreset: string;
+  mode: string;
+  bypassPermissions: boolean;
+}
+
+function settingValues(s: PersistedComposerSettings): Record<(typeof COMPOSER_SETTING_SUFFIXES)[number], string> {
+  return {
+    selected_model: s.selectedModel,
+    reasoning_effort: s.reasoningEffort,
+    selected_preset: s.selectedPreset,
+    current_mode: s.mode,
+    bypass_permissions: String(s.bypassPermissions)
+  };
+}
+
+/** Persists the "last sent with" settings used as defaults for fresh sessions. */
+export function saveLastUsedComposerSettings(s: PersistedComposerSettings) {
+  const values = settingValues(s);
+  for (const suffix of COMPOSER_SETTING_SUFFIXES) {
+    localStorage.setItem(`bm_last_used_${suffix}`, values[suffix]);
+  }
+}
+
+/** Persists the settings snapshot tied to a specific run. */
+export function saveRunComposerSettings(runId: string, s: PersistedComposerSettings) {
+  const values = settingValues(s);
+  for (const suffix of COMPOSER_SETTING_SUFFIXES) {
+    localStorage.setItem(`bm_run_${runId}_${suffix}`, values[suffix]);
+  }
+}
+
+/** Clears the draft (no-active-run) settings, e.g. once a draft becomes a run. */
+export function clearDraftComposerSettings() {
+  for (const suffix of COMPOSER_SETTING_SUFFIXES) {
+    localStorage.removeItem(`bm_draft_${suffix}`);
+  }
+}
+
 /**
  * Owns the composer's persisted settings: selected model, operational mode
  * and the bypass-permissions toggle, plus derived model option lists.

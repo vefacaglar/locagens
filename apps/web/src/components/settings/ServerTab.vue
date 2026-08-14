@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { api, API_BASE } from '../../api/client';
-import ThemedButton from '../ThemedButton.vue';
+import ThemedButton from '../ui/ThemedButton.vue';
 
 const port = ref<number | null>(null);
 const initialPort = ref<number | null>(null);

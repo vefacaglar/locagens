@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
 import type { MessageGroup } from '../lib/messageGroups';
-import { renderMarkdown, cleanMessageContent, capturePreScrollStates, restorePreScrollStates } from '../lib/markdown';
+import { renderMarkdown, cleanMessageContent } from '../lib/markdown';
+import { capturePreScrollStates, restorePreScrollStates } from '../lib/domScroll';
 import ToolGroup from './ToolGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
 
@@ -104,8 +105,8 @@ watch(expanded, (isExpanded) => {
     <header class="coder-group-header" @click="expanded = !expanded">
       <div class="coder-group-head-left">
         <span class="agent-badge coder-badge">{{ badgeLabel }}</span>
-        <span v-if="title" class="coder-group-title">{{ title }}</span>
-        <span v-if="model" class="coder-group-model">{{ model }}</span>
+        <span v-if="title" class="coder-group-title truncate">{{ title }}</span>
+        <span v-if="model" class="coder-group-model truncate">{{ model }}</span>
         <span v-if="active" class="coder-group-status">working…</span>
         <span v-else-if="stepCount" class="coder-group-steps">{{ stepCount }} step{{ stepCount === 1 ? '' : 's' }}</span>
       </div>
@@ -187,9 +188,6 @@ watch(expanded, (isExpanded) => {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
 }
 
@@ -197,9 +195,6 @@ watch(expanded, (isExpanded) => {
   font-size: 0.72rem;
   color: var(--faint);
   font-family: monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   flex-shrink: 0;
 }
 

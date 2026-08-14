@@ -7,9 +7,11 @@ import { cleanedMessageContent } from '../lib/messageDerived';
 import { changeDiffRows, type WorkspaceChange } from '../lib/workspaceChanges';
 import ToolGroup from './ToolGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
-import ThemedButton from './ThemedButton.vue';
+import ThemedButton from './ui/ThemedButton.vue';
 import DiffView from './DiffView.vue';
-import { API_BASE } from '../api/client';
+import Spinner from './ui/Spinner.vue';
+import { api } from '../api/client';
+import { runStorageKeys } from '../lib/storageKeys';
 import { lineDiff, type DiffRow } from '../lib/diff';
 
 const props = defineProps<{
@@ -142,9 +144,7 @@ async function fetchGitDiffDetails() {
   if (!props.projectPath) return;
   isLoadingDiffs.value = true;
   try {
-    const res = await fetch(`${API_BASE}/api/projects/git/diff-details?path=${encodeURIComponent(props.projectPath)}`);
-    if (!res.ok) throw new Error('Failed to fetch diff details');
-    const data = await res.json();
+    const data = await api.getGitDiffDetails(props.projectPath);
     if (data.files) {
       gitDiffFiles.value = data.files.map((file: any) => {
         const existing = gitDiffFiles.value.find(f => f.path === file.path);
@@ -203,9 +203,7 @@ function scheduleGitStatusRefresh() {
 async function checkGitStatus() {
   if (!props.projectPath) return;
   try {
-    const res = await fetch(`${API_BASE}/api/projects/git/status?path=${encodeURIComponent(props.projectPath)}`);
-    if (!res.ok) throw new Error('Failed to fetch status');
-    const data = await res.json();
+    const data = await api.getGitStatus(props.projectPath);
     if (data.isGit) {
       isGitRepo.value = true;
       gitBranch.value = data.branch || 'main';
@@ -229,13 +227,7 @@ async function generateCommitMessage() {
   isGenerating.value = true;
   gitError.value = null;
   try {
-    const res = await fetch(`${API_BASE}/api/projects/git/generate-message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId: props.runId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to generate message');
+    const data = await api.generateCommitMessage(props.runId);
     commitMessage.value = data.message;
   } catch (err: any) {
     gitError.value = err.message || 'Failed to generate commit message';
@@ -249,18 +241,8 @@ async function executeGitAction(action: GitAction) {
   commitStatus.value = 'processing';
   gitError.value = null;
   try {
-    const res = await fetch(`${API_BASE}/api/projects/git/commit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: props.projectPath,
-        message: commitMessage.value,
-        action
-      })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to execute git action');
-    
+    await api.gitCommit(props.projectPath, commitMessage.value, action);
+
     commitStatus.value = 'success';
     commitMessage.value = '';
     setTimeout(() => {
@@ -505,7 +487,7 @@ function saveCurrentState() {
     expandedTranscripts: expandedTranscripts.value,
     expandedReasoning: expandedReasoning.value
   };
-  localStorage.setItem(`runPanelState:${props.runId}`, JSON.stringify(state));
+  localStorage.setItem(runStorageKeys.panelState(props.runId), JSON.stringify(state));
 }
 
 function loadRunState(id: string | null | undefined) {
@@ -515,7 +497,7 @@ function loadRunState(id: string | null | undefined) {
   let loadedReasoning: Record<string, boolean> = {};
 
   if (id) {
-    const stored = localStorage.getItem(`runPanelState:${id}`);
+    const stored = localStorage.getItem(runStorageKeys.panelState(id));
     if (stored) {
       try {
         const state = JSON.parse(stored);
@@ -1001,7 +983,7 @@ defineExpose({
                           @click="generateCommitMessage"
                           title="AI Generate Message"
                         >
-                          <span v-if="isGenerating" class="spinner-small"></span>
+                          <Spinner v-if="isGenerating" :size="12" track="var(--control-border-focus)" />
                           <span v-else>Generate</span>
                         </button>
                       </div>
@@ -1033,7 +1015,7 @@ defineExpose({
                             :disabled="commitStatus === 'processing' || (!commitMessage.trim() && selectedGitAction !== 'push') || (!hasGitChanges && selectedGitAction !== 'push')"
                             @click="executeGitAction(selectedGitAction)"
                           >
-                            <span v-if="commitStatus === 'processing'" class="spinner-small inline"></span>
+                            <Spinner v-if="commitStatus === 'processing'" class="spinner-inline" :size="12" track="var(--control-border-focus)" />
                             <span v-else>{{ actionLabels[selectedGitAction] }}</span>
                           </button>
 
@@ -1103,7 +1085,7 @@ defineExpose({
                   </svg>
                 </span>
                 <span class="git-file-title">
-                  <span class="git-file-path">{{ reviewFileName(file.path) }}</span>
+                  <span class="git-file-path truncate">{{ reviewFileName(file.path) }}</span>
                   <span class="git-file-meta">
                     <span v-if="file.added || file.deleted" class="git-file-stats">
                       <span v-if="file.added" class="add">+{{ file.added }}</span>
@@ -1148,7 +1130,7 @@ defineExpose({
                 </svg>
               </span>
               <span class="git-file-title">
-                <span class="git-file-path">{{ reviewFileName(change.displayPath) }}</span>
+                <span class="git-file-path truncate">{{ reviewFileName(change.displayPath) }}</span>
                 <span class="git-file-meta">
                   <span v-if="change.added || change.deleted" class="git-file-stats">
                     <span v-if="change.added" class="add">+{{ change.added }}</span>
@@ -2017,11 +1999,6 @@ defineExpose({
   transform: rotate(180deg);
 }
 
-@keyframes commitFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
 @keyframes commitScaleUp {
   from { transform: scale(0.97); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
@@ -2040,7 +2017,8 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: commitFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  /* fadeIn comes from the global styles/modals.css keyframes. */
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 /* Git Commit Card Styling */
@@ -2317,23 +2295,8 @@ defineExpose({
   color: var(--success);
 }
 
-/* Small loading spinner */
-.spinner-small {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--control-border-focus);
-  border-radius: 50%;
-  border-top-color: var(--text);
-  animation: spin 0.8s linear infinite;
-}
-
-.spinner-small.inline {
+.spinner-inline {
   margin-right: 4px;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 .git-clean-msg {
@@ -2456,9 +2419,6 @@ defineExpose({
 }
 
 .git-file-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-weight: 500;
   line-height: 1.4;
   padding-bottom: 3px;

@@ -569,7 +569,7 @@ onBeforeUnmount(() => {
 
       <div v-if="hasQueuedMessage" class="queued-message-preview">
         <span class="queued-label">Queued</span>
-        <span class="queued-text">{{ queuedTaskInput }}</span>
+        <span class="queued-text truncate">{{ queuedTaskInput }}</span>
       </div>
 
       <div class="composer-input-box" style="position: relative; z-index: 2;">
@@ -591,7 +591,7 @@ onBeforeUnmount(() => {
               <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
               <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
             </svg>
-            <span class="attachment-name" :title="file.name">{{ file.name }}</span>
+            <span class="attachment-name truncate" :title="file.name">{{ file.name }}</span>
             <button class="remove-attachment-btn" @click="removeAttachment(idx)" title="Remove file">
               <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M18 6 6 18"/>
@@ -776,7 +776,7 @@ onBeforeUnmount(() => {
                       </svg>
                       {{ preset.displayName }}
                     </span>
-                    <span class="preset-flow-desc">
+                    <span class="preset-flow-desc truncate">
                       {{ formatModelName(preset.architect.model) }}
                       <span class="preset-flow-arrow">→</span>
                       {{ formatModelName(preset.coder.model) }}
@@ -896,7 +896,7 @@ onBeforeUnmount(() => {
                       @click.stop="selectModel(option.value)"
                       @mouseenter="setFocusedItem(option.value)"
                     >
-                      <span class="model-name-text">
+                      <span class="model-name-text truncate">
                         {{ formatModelName(option.model) }}
                         <span class="model-context-badge" v-if="option.contextLimit">
                           {{ formatContextLimit(option.contextLimit) }}
@@ -972,7 +972,7 @@ onBeforeUnmount(() => {
                       <span class="reasoning-dot" :class="option.id"></span>
                       {{ option.label }}
                     </span>
-                    <span class="preset-flow-desc" style="padding-left: 14px;">
+                    <span class="preset-flow-desc truncate" style="padding-left: 14px;">
                       {{ getReasoningDesc(option.id) }}
                     </span>
                   </div>
@@ -1143,9 +1143,6 @@ onBeforeUnmount(() => {
 
 .queued-text {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 @keyframes pulseDot {
@@ -1633,9 +1630,6 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   text-align: left;
 }
 
@@ -1815,9 +1809,6 @@ onBeforeUnmount(() => {
   font-size: 0.72rem;
   color: var(--faint);
   padding-left: 20px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   text-align: left;
 }
 
@@ -1898,9 +1889,6 @@ onBeforeUnmount(() => {
 
 .attachment-name {
   max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .remove-attachment-btn {

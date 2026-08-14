@@ -5,6 +5,8 @@ import { defineAsyncComponent } from 'vue';
 import AppSidebar from './components/AppSidebar.vue';
 import MessageThread from './components/MessageThread.vue';
 import ChatComposer from './components/ChatComposer.vue';
+import ChatHeader from './components/ChatHeader.vue';
+import AppDialog from './components/ui/AppDialog.vue';
 
 // Demand-only surfaces (modals, settings, side panel, usage page) load as
 // separate chunks so first paint only pays for the always-visible shell.
@@ -26,7 +28,9 @@ const {
   projects,
   permissions,
   memories,
+  showSettings,
   openSettings,
+  closeSettings,
   chat,
   isMac,
   selectProject,
@@ -61,8 +65,12 @@ const {
 
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useCustomDialog } from './composables/useCustomDialog';
+import { useIsMobile } from './composables/useIsMobile';
+import { usePlanApproval } from './composables/usePlanApproval';
+import { STORAGE_KEYS, runStorageKeys } from './lib/storageKeys';
 
 const { activeDialog } = useCustomDialog();
+const isMobile = useIsMobile();
 
 const settingsTab = ref<'permissions' | 'memory' | 'providers' | 'agents' | 'server'>('permissions');
 
@@ -96,7 +104,7 @@ function toggleSidebar() {
 function handleSelectRun(run: Run) {
   chat.selectRun(run);
   showUsageLogsPage.value = false;
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
     sidePanelCollapsed.value = true;
   }
@@ -105,7 +113,7 @@ function handleSelectRun(run: Run) {
 function handleNewChat() {
   chat.startNewRunSetup();
   showUsageLogsPage.value = false;
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
     sidePanelCollapsed.value = true;
   }
@@ -114,7 +122,7 @@ function handleNewChat() {
 function handleSelectProjectAndNewChat(path: string) {
   selectProjectAndNewChat(path);
   showUsageLogsPage.value = false;
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
     sidePanelCollapsed.value = true;
   }
@@ -130,12 +138,12 @@ function handleSelectRunFromLogs(runId: string) {
 }
 
 // Side panel resizable width logic
-const sidePanelWidth = ref(Number(localStorage.getItem('sidePanelWidth') || '480'));
+const sidePanelWidth = ref(Number(localStorage.getItem(STORAGE_KEYS.sidePanelWidth) || '480'));
 const isResizing = ref(false);
 function handleSidePanelResize(newWidth: number) {
   const clamped = Math.max(360, Math.min(800, newWidth));
   sidePanelWidth.value = clamped;
-  localStorage.setItem('sidePanelWidth', String(clamped));
+  localStorage.setItem(STORAGE_KEYS.sidePanelWidth, String(clamped));
 }
 
 const currentProjectName = computed(() => {
@@ -223,17 +231,17 @@ watch([hasSidePanelContent, sidePanelOpen], ([hasContent, isOpen]) => {
 
 // Watch and persist sidePanelCollapsed changes on desktop, keyed by activeRunId
 watch(sidePanelCollapsed, (val) => {
-  if (window.innerWidth > 760 && activeRunId.value) {
-    localStorage.setItem(`sidePanelCollapsed:${activeRunId.value}`, val ? 'true' : 'false');
+  if (!isMobile.value && activeRunId.value) {
+    localStorage.setItem(runStorageKeys.sidePanelCollapsed(activeRunId.value), val ? 'true' : 'false');
   }
 });
 
 // Reset the collapsed state when switching chats using the stored preference, but keep it collapsed on mobile.
 watch(activeRunId, (newId) => {
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     sidePanelCollapsed.value = true;
   } else if (newId) {
-    const stored = localStorage.getItem(`sidePanelCollapsed:${newId}`);
+    const stored = localStorage.getItem(runStorageKeys.sidePanelCollapsed(newId));
     if (stored !== null) {
       sidePanelCollapsed.value = stored === 'true';
     } else {
@@ -250,7 +258,7 @@ watch(
   () => currentPlan.value?.version,
   (newVer, oldVer) => {
     if (newVer !== undefined && oldVer !== undefined && newVer !== oldVer) {
-      if (window.innerWidth > 760) {
+      if (!isMobile.value) {
         sidePanelCollapsed.value = false;
       }
     }
@@ -283,81 +291,40 @@ async function openFileInReview(filePath: string) {
   planPanelRef.value?.openFileInReview?.(filePath);
 }
 
-// --- Plan approval actions (Start / Revise / Reject) ----------------------
-// While in plan mode, the panel offers three choices once a plan is presented.
-// The decision is tracked per plan version so the buttons reappear if the
-// assistant produces a revised plan.
-const isPlanMode = computed(() => settings.currentMode.value === 'plan');
-const planKey = computed(() =>
-  currentPlan.value ? `${currentPlan.value.id}:${currentPlan.value.version}` : ''
-);
-const decidedPlanKey = ref('');
+// Props + listeners shared by the two <ChatComposer> render branches (active
+// run vs landing). v-model bindings and branch-specific props stay inline so
+// the differences between the branches remain visible at the call sites.
+const composerBindings = computed(() => ({
+  isRunning: isRunning.value,
+  queuedTaskInput: queuedTaskInput.value,
+  modelOptions: settings.modelOptions.value,
+  reasoningEffortOptions: settings.reasoningEffortOptions.value,
+  activeModelDisplayName: settings.activeModelDisplayName.value,
+  agentPresets: agentPresets.value,
+  focusSignal: focusSignal.value,
+  confirmationGroup: activeConfirmationGroup.value,
+  showPermission: showPermissionModal.value,
+  permissionRequest: pendingPermissionRequest.value,
+  questionRequest: pendingQuestionRequest.value,
+  messages: messages.value,
+  onOpenSettings: handleOpenSettings,
+  onSend: chat.handleSendTask,
+  onQueue: chat.handleQueueTask,
+  onQuickReply: chat.sendQuickReply,
+  onPermissionDecision: chat.handlePermissionDecision,
+  onQuestionAnswer: chat.handleQuestionAnswer,
+  onCancel: chat.cancelActiveRun
+}));
 
-const latestPlanProposalMessageIndex = computed(() => {
-  const list = groupedMessages.value;
-  if (!list) return -1;
-  for (let i = list.length - 1; i >= 0; i--) {
-    const group = list[i];
-    if (group.type === 'tool_group') {
-      const hasUpdatePlan = group.toolCalls.some(tc => tc.function?.name === 'update_plan');
-      if (hasUpdatePlan) return i;
-    }
-  }
-  return -1;
+// Plan approval actions (Start / Revise / Reject) live in usePlanApproval.
+const { showPlanActions, startPlan, revisePlan, rejectPlan } = usePlanApproval({
+  currentMode: settings.currentMode,
+  currentPlan,
+  groupedMessages,
+  activeRunId,
+  focusSignal,
+  sendQuickReply: chat.sendQuickReply
 });
-
-const showPlanActions = computed(() => {
-  if (!isPlanMode.value || !currentPlan.value) return false;
-
-  const planIndex = latestPlanProposalMessageIndex.value;
-  if (planIndex === -1) return false;
-
-  // If there is any user message after the latest plan proposal, the user has already interacted with it
-  for (let i = planIndex + 1; i < groupedMessages.value.length; i++) {
-    if (groupedMessages.value[i].type === 'user') {
-      return false;
-    }
-  }
-
-  return decidedPlanKey.value !== planKey.value;
-});
-
-watch(activeRunId, () => { decidedPlanKey.value = ''; });
-
-// Start: approve the plan, switch to build (accept edits) mode, and kick off
-// implementation with a follow-up message. We flip the mode FIRST and wait a
-// tick so the continue request (and the system prompt it rebuilds) is already
-// in Build mode before the approval message is sent — otherwise the model can
-// reply as if it were still in Plan mode and ask to switch again.
-async function startPlan() {
-  decidedPlanKey.value = planKey.value;
-  settings.currentMode.value = 'accept_edits';
-  await nextTick();
-  chat.sendQuickReply(
-    "I approve this plan. We are now in Build mode — implement it step by step right away. Do not ask me to switch modes; you are already in Build mode."
-  );
-}
-
-// Revise: stay in plan mode and focus the composer so the user can describe the
-// changes they want to the plan.
-function revisePlan() {
-  decidedPlanKey.value = planKey.value;
-  focusSignal.value++;
-}
-
-// Reject: tell the model the plan is turned down so it does NOT implement it,
-// and stay in plan mode. Without sending this message the model never learns it
-// was rejected and may go ahead and build the plan anyway.
-async function rejectPlan() {
-  decidedPlanKey.value = planKey.value;
-  if (settings.currentMode.value !== 'plan') {
-    settings.currentMode.value = 'plan';
-    await nextTick();
-  }
-  chat.sendQuickReply(
-    "I reject this plan. Do NOT implement it or make any changes. Stay in Plan mode and wait for my further instructions."
-  );
-}
 
 // Automatically collapse left and right panels when screen is resized to mobile width (760px)
 const isWindowResizing = ref(false);
@@ -381,7 +348,7 @@ function handleWindowResize() {
 
 onMounted(() => {
   window.addEventListener('resize', handleWindowResize);
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
     sidePanelCollapsed.value = true;
   }
@@ -423,50 +390,16 @@ onUnmounted(() => {
     />
 
     <main class="chat-shell" :class="{ 'landing-mode': !activeRun && !showUsageLogsPage }">
-      <header class="chat-header">
-        <div class="chat-header-inner">
-          <div class="thread-title">
-            <button v-if="isSidebarCollapsed" class="panel-toggle-btn expand-sidebar-btn" @click="toggleSidebar" title="Expand Sidebar">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="18" height="18" x="3" y="3" rx="2" />
-                <path d="M9 3v18" />
-              </svg>
-            </button>
-            
-            <div v-if="showUsageLogsPage" class="project-breadcrumb">
-              <svg class="folder-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="18" y1="20" x2="18" y2="10"/>
-                <line x1="12" y1="20" x2="12" y2="4"/>
-                <line x1="6" y1="20" x2="6" y2="14"/>
-              </svg>
-              <span class="breadcrumb-project" style="font-weight: 500;">Usage Logs</span>
-            </div>
-            <div v-else-if="activeRun" class="project-breadcrumb">
-              <svg class="folder-icon open-folder" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2A2 2 0 0 0 12.07 6H20a2 2 0 0 1 2 2v2"/>
-              </svg>
-              <span class="breadcrumb-project">{{ currentProjectName }}</span>
-              <span class="breadcrumb-separator">/</span>
-              <span class="breadcrumb-chat-title">{{ visibleTitle }}</span>
-            </div>
-            
-          </div>
-          <div class="header-actions">
-            <button
-              v-if="showSidePanelToggle"
-              class="panel-toggle-btn"
-              type="button"
-              title="Open side panel"
-              @click="sidePanelCollapsed = false"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="18" height="18" x="3" y="3" rx="2" />
-                <path d="M15 3v18" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      </header>
+      <ChatHeader
+        :is-sidebar-collapsed="isSidebarCollapsed"
+        :show-usage-logs-page="showUsageLogsPage"
+        :has-active-run="!!activeRun"
+        :current-project-name="currentProjectName"
+        :visible-title="visibleTitle"
+        :show-side-panel-toggle="showSidePanelToggle"
+        @toggle-sidebar="toggleSidebar"
+        @open-side-panel="sidePanelCollapsed = false"
+      />
 
       <div v-if="activeRun" class="header-fade-overlay"></div>
 
@@ -497,68 +430,32 @@ onUnmounted(() => {
         </div>
 
         <ChatComposer
+          v-bind="composerBindings"
           v-model:task-input="taskInput"
           v-model:current-mode="settings.currentMode.value"
           v-model:bypass-permissions="settings.bypassPermissions.value"
           v-model:selected-model="settings.selectedModelCombined.value"
           v-model:selected-reasoning-effort="settings.selectedReasoningEffort.value"
           v-model:selected-preset-id="settings.selectedPresetId.value"
-          :is-running="isRunning"
-          :queued-task-input="queuedTaskInput"
-          :model-options="settings.modelOptions.value"
-          :reasoning-effort-options="settings.reasoningEffortOptions.value"
-          :active-model-display-name="settings.activeModelDisplayName.value"
-          :agent-presets="agentPresets"
-          :focus-signal="focusSignal"
-          :confirmation-group="activeConfirmationGroup"
-          :show-permission="showPermissionModal"
-          :permission-request="pendingPermissionRequest"
-          :question-request="pendingQuestionRequest"
-          :messages="messages"
           :run-usage-label="runUsageLabel"
           :run-usage-tooltip="runUsageTooltip"
-          @open-settings="handleOpenSettings"
-          @send="chat.handleSendTask"
-          @queue="chat.handleQueueTask"
-          @quick-reply="chat.sendQuickReply"
-          @permission-decision="chat.handlePermissionDecision"
-          @question-answer="chat.handleQuestionAnswer"
-          @cancel="chat.cancelActiveRun"
         />
       </template>
 
       <template v-else>
         <div class="landing-center-wrap">
           <ChatComposer
+            v-bind="composerBindings"
             v-model:task-input="taskInput"
             v-model:current-mode="settings.currentMode.value"
             v-model:bypass-permissions="settings.bypassPermissions.value"
-          v-model:selected-model="settings.selectedModelCombined.value"
-          v-model:selected-reasoning-effort="settings.selectedReasoningEffort.value"
-          v-model:selected-preset-id="settings.selectedPresetId.value"
-            :is-running="isRunning"
-            :queued-task-input="queuedTaskInput"
-          :model-options="settings.modelOptions.value"
-          :reasoning-effort-options="settings.reasoningEffortOptions.value"
-          :active-model-display-name="settings.activeModelDisplayName.value"
-            :agent-presets="agentPresets"
-            :focus-signal="focusSignal"
-            :confirmation-group="activeConfirmationGroup"
-            :show-permission="showPermissionModal"
-            :permission-request="pendingPermissionRequest"
-            :question-request="pendingQuestionRequest"
+            v-model:selected-model="settings.selectedModelCombined.value"
+            v-model:selected-reasoning-effort="settings.selectedReasoningEffort.value"
+            v-model:selected-preset-id="settings.selectedPresetId.value"
             :is-landing="true"
             :project-options="projects.projectOptions.value"
             :active-project-path="projects.activeProjectPath.value"
-            :messages="messages"
-            @open-settings="handleOpenSettings"
-            @send="chat.handleSendTask"
-            @queue="chat.handleQueueTask"
-            @quick-reply="chat.sendQuickReply"
-            @permission-decision="chat.handlePermissionDecision"
-            @question-answer="chat.handleQuestionAnswer"
             @select-project="selectProject"
-            @cancel="chat.cancelActiveRun"
           />
         </div>
       </template>
@@ -602,9 +499,9 @@ onUnmounted(() => {
     />
 
     <SettingsScreen
-      v-if="permissions.showSettings.value"
+      v-if="showSettings"
       v-model:active-tab="settingsTab"
-      :show="permissions.showSettings.value"
+      :show="showSettings"
       :permissions="permissions.permissions.value"
       :is-loading="permissions.isLoading.value"
       :providers="chat.providers.value"
@@ -615,7 +512,7 @@ onUnmounted(() => {
       :memories-loading="memories.isLoading.value"
       :active-project-path="projects.activeProjectPath.value"
       :active-project-name="projects.activeProject.value?.name || ''"
-      @close="permissions.closeSettings"
+      @close="closeSettings"
       @revoke="permissions.revokePermission"
       @clear-all="permissions.clearPermissions"
       @providers-saved="reloadProviders"
@@ -627,41 +524,7 @@ onUnmounted(() => {
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->
-    <Transition name="fade">
-      <div v-if="activeDialog" class="modal-overlay" @click="activeDialog.resolve(false)">
-        <div class="modal-card dialog-modal-card" @click.stop>
-          <header class="modal-header">
-            <h3>{{ activeDialog.title || (activeDialog.type === 'confirm' ? 'Confirmation' : 'Notification') }}</h3>
-            <button class="close-modal-btn" @click="activeDialog.resolve(false)">Close</button>
-          </header>
-          <div class="modal-body dialog-modal-body">
-            <div class="dialog-content-wrapper">
-              <div class="dialog-icon-wrap" :class="activeDialog.type">
-                <svg v-if="activeDialog.type === 'confirm'" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-                <svg v-else xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path>
-                  <line x1="12" y1="9" x2="12" y2="13"></line>
-                  <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                </svg>
-              </div>
-              <p class="dialog-message">{{ activeDialog.message }}</p>
-            </div>
-          </div>
-          <footer class="modal-footer">
-            <button v-if="activeDialog.type === 'confirm'" class="ghost-button" @click="activeDialog.resolve(false)">
-              Cancel
-            </button>
-            <button class="primary-button" @click="activeDialog.resolve(true)">
-              {{ activeDialog.type === 'confirm' ? 'Confirm' : 'OK' }}
-            </button>
-          </footer>
-        </div>
-      </div>
-    </Transition>
+    <AppDialog :dialog="activeDialog" />
   </div>
 </template>
 
@@ -706,115 +569,4 @@ onUnmounted(() => {
   z-index: 10;
 }
 
-.chat-header {
-  display: block;
-  /* Match the side cards' top inset so all three header rows share a baseline. */
-  margin-top: var(--shell-inset);
-  min-height: 0;
-  padding: 0;
-  border-bottom: none;
-}
-
-.chat-header-inner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: var(--top-bar-h);
-  width: 100%;
-  padding: 0 24px;
-  box-sizing: border-box;
-}
-
-.thread-title {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.project-breadcrumb {
-  display: flex;
-  align-items: center;
-  font-size: 0.93rem;
-  font-weight: 500;
-  color: var(--text);
-  min-width: 0;
-  flex: 1;
-}
-
-.project-breadcrumb .folder-icon {
-  margin-right: 8px;
-  color: var(--muted);
-  flex-shrink: 0;
-}
-
-.breadcrumb-project {
-  color: var(--breadcrumb-project-color);
-  font-weight: 400;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 180px;
-  flex-shrink: 0;
-}
-
-.breadcrumb-separator {
-  margin: 0 8px;
-  color: var(--faint);
-  user-select: none;
-  flex-shrink: 0;
-}
-
-.breadcrumb-chat-title {
-  color: var(--text);
-  font-weight: 650;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-
-/* Breadcrumb usage styling removed */
-
-/* Dialog Modal Custom Styling */
-.dialog-modal-card {
-  width: min(420px, 90%);
-}
-
-.dialog-content-wrapper {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 8px 0;
-}
-
-.dialog-icon-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.dialog-icon-wrap.confirm {
-  background: var(--dialog-confirm-icon-bg);
-  color: var(--dialog-confirm-icon-color);
-}
-
-.dialog-icon-wrap.alert {
-  background: var(--dialog-alert-icon-bg);
-  color: var(--dialog-alert-icon-color);
-}
-
-.dialog-message {
-  margin: 0;
-  font-size: 0.95rem;
-  line-height: 1.5;
-  color: var(--text);
-  padding-top: 8px;
-}
 </style>

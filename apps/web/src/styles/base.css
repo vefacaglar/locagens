@@ -93,6 +93,13 @@ pre {
   font-family: inherit;
 }
 
+/* Single-line ellipsis truncation utility. */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 
 ::-webkit-scrollbar {
   width: 8px;

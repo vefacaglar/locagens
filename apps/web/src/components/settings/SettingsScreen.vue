@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset } from '@locagens/shared';
+import { useIsMobile } from '../../composables/useIsMobile';
 import PermissionsTab from './PermissionsTab.vue';
 import ProvidersTab from './ProvidersTab.vue';
 import AgentPresetsTab from './AgentPresetsTab.vue';
@@ -46,6 +47,7 @@ type TabId = (typeof TABS)[number]['id'];
 
 const localActiveTab = ref<TabId>('permissions');
 const isSidebarCollapsed = ref(false);
+const isMobile = useIsMobile();
 
 watch(() => props.activeTab, (newVal) => {
   if (newVal) {
@@ -56,7 +58,7 @@ watch(() => props.activeTab, (newVal) => {
 function selectTab(tabId: TabId) {
   localActiveTab.value = tabId;
   emit('update:activeTab', tabId);
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
   }
 }
@@ -70,13 +72,13 @@ function onKey(e: KeyboardEvent) {
 
 watch(() => props.show, (newVal) => {
   if (newVal) {
-    isSidebarCollapsed.value = window.innerWidth <= 760;
+    isSidebarCollapsed.value = isMobile.value;
   }
 });
 
 onMounted(() => {
   window.addEventListener('keydown', onKey);
-  if (window.innerWidth <= 760) {
+  if (isMobile.value) {
     isSidebarCollapsed.value = true;
   }
 });

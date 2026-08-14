@@ -1,0 +1,61 @@
+/* Shared shell for the composer's prompt cards (confirmation, question,
+   permission). Cards add a positioning modifier and keep their own padding /
+   gap / shadow overrides scoped. */
+.prompt-card {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  z-index: 1;
+  pointer-events: auto;
+  box-shadow: 0 10px 30px var(--card-overlay-shadow);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Floating above the composer. */
+.prompt-card--floating {
+  position: absolute;
+  bottom: calc(100% - 6px);
+  left: 12px;
+  right: 12px;
+}
+
+/* In normal flow at the top of the composer container so the pinned task list
+   above it stays visible. */
+.prompt-card--inline {
+  position: relative;
+  margin: 0 0 10px;
+}
+
+/* Free-text note input shared by the confirmation and question cards. */
+.prompt-note {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.prompt-note::placeholder {
+  color: var(--faint);
+}
+
+.prompt-note:focus {
+  outline: none;
+  border-color: var(--muted);
+}
+
+/* Enter/leave transition for the prompt cards. Named distinctly from the
+   global `slide-up` (composer.css) which animates differently. */
+.card-slide-up-enter-active,
+.card-slide-up-leave-active {
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+
+.card-slide-up-enter-from,
+.card-slide-up-leave-to {
+  transform: translateY(8px);
+  opacity: 0;
+}

@@ -2,11 +2,13 @@
 import { ref, watch, nextTick, onUnmounted } from 'vue';
 import type { Run, Plan } from '@locagens/shared';
 import type { AgentSummary, MessageGroup } from '../lib/messageGroups';
-import { renderMarkdown, formatSystemErrorMessage, capturePreScrollStates, restorePreScrollStates } from '../lib/markdown';
+import { renderMarkdown, formatSystemErrorMessage } from '../lib/markdown';
+import { capturePreScrollStates, restorePreScrollStates } from '../lib/domScroll';
 import { cleanedMessageContent, extractPlanFromMessage, messageTokenEstimate } from '../lib/messageDerived';
 import { formatTime } from '../lib/format';
 import ToolGroup from './ToolGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
+import CopyButton from './ui/CopyButton.vue';
 
 const props = defineProps<{
   activeRun: Run | null;
@@ -26,18 +28,7 @@ const emit = defineEmits<{
 
 const planDoneCount = computed(() => props.plan?.tasks.filter(t => t.status === 'completed').length ?? 0);
 
-const copiedMessageId = ref<string | null>(null);
 const containerEl = ref<HTMLElement | null>(null);
-
-function copyTextWithStatus(value: string, messageId: string) {
-  navigator.clipboard.writeText(value);
-  copiedMessageId.value = messageId;
-  setTimeout(() => {
-    if (copiedMessageId.value === messageId) {
-      copiedMessageId.value = null;
-    }
-  }, 2000);
-}
 
 // User message collapse/expand states
 const expandedUserMessages = ref<Record<string, boolean>>({});
@@ -286,19 +277,7 @@ const formattedElapsedTime = computed(() => {
         ></div>
       </article>
       <div class="user-response-footer">
-        <button 
-          class="copy-button-icon" 
-          title="Copy message"
-          @click.stop="copyTextWithStatus(activeRun?.task || '', activeRun?.id || '')"
-        >
-          <svg v-if="copiedMessageId === activeRun?.id" class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 6 9 17l-5-5"/>
-          </svg>
-          <svg v-else class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-            <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-          </svg>
-        </button>
+        <CopyButton class="copy-button-icon" label="Copy message" :text="() => activeRun?.task || ''" />
       </div>
     </div>
 
@@ -345,19 +324,7 @@ const formattedElapsedTime = computed(() => {
           ></div>
         </article>
         <div class="user-response-footer">
-          <button 
-            class="copy-button-icon" 
-            title="Copy message"
-            @click.stop="copyTextWithStatus(group.message.content, group.message.id)"
-          >
-            <svg v-if="copiedMessageId === group.message.id" class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 6 9 17l-5-5"/>
-            </svg>
-            <svg v-else class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-              <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-            </svg>
-          </button>
+          <CopyButton class="copy-button-icon" label="Copy message" :text="group.message.content" />
         </div>
       </div>
 
@@ -452,19 +419,7 @@ const formattedElapsedTime = computed(() => {
           v-html="renderMarkdown(cleanedMessageContent(group.message), group.message.id)"
         ></div>
         <div class="assistant-response-footer" style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
-          <button 
-            class="copy-button-icon" 
-            title="Copy entire response"
-            @click="copyTextWithStatus(group.message.content, group.message.id)"
-          >
-            <svg v-if="copiedMessageId === group.message.id" class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 6 9 17l-5-5"/>
-            </svg>
-            <svg v-else class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-              <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-            </svg>
-          </button>
+          <CopyButton class="copy-button-icon" label="Copy entire response" :text="group.message.content" />
           <span class="response-tokens-badge" style="font-size: 0.72rem; color: var(--faint); font-family: monospace; user-select: none;">
             {{ messageTokenEstimate(group.message) }} tokens
           </span>

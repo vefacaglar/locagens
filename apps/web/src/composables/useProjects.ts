@@ -1,6 +1,7 @@
 import { computed, ref, watch, type Ref } from 'vue';
 import type { Run, Project } from '@locagens/shared';
 import { api } from '../api/client';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 import { DEFAULT_PROJECT_PATH } from '../lib/format';
 import { useCustomDialog } from './useCustomDialog';
 
@@ -11,10 +12,10 @@ import { useCustomDialog } from './useCustomDialog';
 export function useProjects(runs: Ref<Run[]>) {
   const { showAlert, showConfirm } = useCustomDialog();
   const projects = ref<Project[]>([]);
-  const activeProjectPath = ref(localStorage.getItem('activeProjectPath') || DEFAULT_PROJECT_PATH);
+  const activeProjectPath = ref(localStorage.getItem(STORAGE_KEYS.activeProjectPath) || DEFAULT_PROJECT_PATH);
 
   watch(activeProjectPath, (newVal) => {
-    localStorage.setItem('activeProjectPath', newVal);
+    localStorage.setItem(STORAGE_KEYS.activeProjectPath, newVal);
   });
 
   const showAddProjectModal = ref(false);

@@ -1,6 +1,6 @@
-import { ref } from 'vue';
 import type { Memory, MemoryCategory, MemoryScope } from '@locagens/shared';
 import { api } from '../api/client';
+import { useAsyncResource } from './useAsyncResource';
 import { useCustomDialog } from './useCustomDialog';
 
 /**
@@ -10,18 +10,10 @@ import { useCustomDialog } from './useCustomDialog';
  */
 export function useMemories() {
   const { showConfirm } = useCustomDialog();
-  const memories = ref<Memory[]>([]);
-  const isLoading = ref(false);
-
-  async function loadMemories() {
-    isLoading.value = true;
-    try {
-      const data = await api.getMemories();
-      if (data) memories.value = data;
-    } finally {
-      isLoading.value = false;
-    }
-  }
+  const { data: memories, isLoading, load: loadMemories } = useAsyncResource<Memory[]>(
+    () => api.getMemories(),
+    []
+  );
 
   async function addMemory(payload: { scope: MemoryScope; category: MemoryCategory; content: string; projectPath?: string }) {
     const created = await api.createMemory(payload);

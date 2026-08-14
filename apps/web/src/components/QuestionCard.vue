@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import type { UserQuestion } from '@locagens/shared';
-import ThemedButton from './ThemedButton.vue';
+import ThemedButton from './ui/ThemedButton.vue';
+import StepperFooter from './ui/StepperFooter.vue';
 
 const props = defineProps<{
   // The pending question request ({ questions: UserQuestion[] }) or null.
@@ -82,8 +83,8 @@ function submit() {
 </script>
 
 <template>
-  <transition name="slide-up">
-    <div v-if="request && currentQuestion" class="composer-question-card">
+  <transition name="card-slide-up">
+    <div v-if="request && currentQuestion" class="prompt-card prompt-card--floating composer-question-card">
       <div class="question-card-header">
         <strong>The assistant needs your input</strong>
         <span v-if="questions.length > 1" class="question-step">{{ currentIndex + 1 }} / {{ questions.length }}</span>
@@ -111,50 +112,29 @@ function submit() {
 
         <textarea
           v-model="notes[currentIndex]"
-          class="question-note"
+          class="question-note prompt-note"
           rows="2"
           placeholder="Your own comment (optional)…"
         ></textarea>
       </div>
 
-      <div class="question-card-footer">
-        <ThemedButton
-          v-if="!isFirst"
-          variant="secondary"
-          @click="goPrev"
-        >Previous</ThemedButton>
-        <ThemedButton
-          v-if="!isLast"
-          variant="primary"
-          :disabled="!currentAnswered"
-          @click="goNext"
-        >Next</ThemedButton>
-        <ThemedButton
-          v-else
-          variant="primary"
-          :disabled="!canSubmit"
-          @click="submit"
-        >Submit</ThemedButton>
-      </div>
+      <StepperFooter
+        :is-first="isFirst"
+        :is-last="isLast"
+        :can-advance="currentAnswered"
+        :can-submit="canSubmit"
+        @prev="goPrev"
+        @next="goNext"
+        @submit="submit"
+      />
     </div>
   </transition>
 </template>
 
 <style scoped>
+/* Shell + positioning come from the global .prompt-card / .prompt-card--floating. */
 .composer-question-card {
-  position: absolute;
-  bottom: calc(100% - 6px);
-  left: 12px;
-  right: 12px;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border);
-  border-radius: 12px;
   padding: 16px;
-  z-index: 1;
-  pointer-events: auto;
-  box-shadow: 0 10px 30px var(--card-overlay-shadow);
-  display: flex;
-  flex-direction: column;
   gap: 14px;
   max-height: 60vh;
   overflow-y: auto;
@@ -242,43 +222,11 @@ function submit() {
   opacity: 0.7;
 }
 
+/* Base input styling comes from the global .prompt-note. */
 .question-note {
-  width: 100%;
-  box-sizing: border-box;
   margin-top: 2px;
-  background: var(--bg);
-  border: 1px solid var(--border);
   border-radius: 9px;
   padding: 8px 11px;
-  color: var(--text);
-  font-size: 0.82rem;
-  font-family: inherit;
   resize: vertical;
-}
-
-.question-note::placeholder {
-  color: var(--faint);
-}
-
-.question-note:focus {
-  outline: none;
-  border-color: var(--muted);
-}
-
-.question-card-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.slide-up-enter-active,
-.slide-up-leave-active {
-  transition: transform 0.18s ease, opacity 0.18s ease;
-}
-
-.slide-up-enter-from,
-.slide-up-leave-to {
-  transform: translateY(8px);
-  opacity: 0;
 }
 </style>

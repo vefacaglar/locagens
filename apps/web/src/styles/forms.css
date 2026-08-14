@@ -1,0 +1,23 @@
+/* Shared text-input recipe used across settings forms. Components add
+   `text-input` to the element and keep only layout-specific overrides
+   (height, radius, padding) in their scoped styles. */
+.text-input {
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: var(--text);
+  font-size: 0.88rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.text-input:focus {
+  border-color: var(--control-border-focus);
+}
+
+.text-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

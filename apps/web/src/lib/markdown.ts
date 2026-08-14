@@ -1,4 +1,5 @@
 import { Marked } from 'marked';
+import { COPY_ICON_SVG, CHECK_ICON_SVG } from './icons';
 // The core build + explicit grammar registration keeps ~175 unused grammars
 // (roughly 70% of the app bundle) out of the build. Unregistered languages
 // degrade gracefully to plain escaped code blocks below.
@@ -115,8 +116,8 @@ marked.use({
                 this.querySelector('.check-icon').style.display = 'none';
               }, 2000);
             " title="Copy code">
-              <svg class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-              <svg class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="20 6 9 17 4 12"/></svg>
+              ${COPY_ICON_SVG}
+              ${CHECK_ICON_SVG.replace('class="check-icon"', 'class="check-icon" style="display: none;"')}
             </button>
           </div>
           <pre id="${blockId}"><code class="hljs language-${displayLang}">${highlightedCode}</code></pre>
@@ -208,61 +209,3 @@ export function formatSystemErrorMessage(content: string): string {
   return content;
 }
 
-export interface PreScrollState {
-  scrollTop: number;
-  scrollHeight: number;
-  clientHeight: number;
-  wasAtBottom: boolean;
-}
-
-/**
- * Captures scroll state of pre elements inside a container. When messageId is
- * given, only that message's code blocks are measured (their block ids embed
- * the message id, e.g. `<id>-code-0` / `thought-<id>-code-0`) — reading
- * scrollHeight forces a synchronous layout, so during streaming the caller
- * scopes this to the one message whose content can actually change.
- */
-export function capturePreScrollStates(container: HTMLElement | null, messageId?: string): Map<string, PreScrollState> {
-  const states = new Map<string, PreScrollState>();
-  if (!container) return states;
-
-  const selector = messageId ? `pre[id*="${CSS.escape(messageId)}"]` : 'pre[id]';
-  const preElements = container.querySelectorAll(selector);
-  preElements.forEach((el) => {
-    const pre = el as HTMLElement;
-    const wasAtBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight <= 60;
-    states.set(pre.id, {
-      scrollTop: pre.scrollTop,
-      scrollHeight: pre.scrollHeight,
-      clientHeight: pre.clientHeight,
-      wasAtBottom
-    });
-  });
-
-  return states;
-}
-
-/**
- * Restores scroll state of pre elements inside a container, scoped the same
- * way as capturePreScrollStates.
- */
-export function restorePreScrollStates(container: HTMLElement | null, states: Map<string, PreScrollState>, messageId?: string) {
-  if (!container) return;
-
-  const selector = messageId ? `pre[id*="${CSS.escape(messageId)}"]` : 'pre[id]';
-  const preElements = container.querySelectorAll(selector);
-  preElements.forEach((el) => {
-    const pre = el as HTMLElement;
-    if (states.has(pre.id)) {
-      const state = states.get(pre.id)!;
-      if (state.wasAtBottom) {
-        pre.scrollTop = pre.scrollHeight;
-      } else {
-        pre.scrollTop = state.scrollTop;
-      }
-    } else {
-      // New code block being generated: default to auto-scrolling to the bottom.
-      pre.scrollTop = pre.scrollHeight;
-    }
-  });
-}

@@ -2,9 +2,10 @@
 import { ref, computed, watch } from 'vue';
 import type { AgentPreset, ProviderMetadata, ReasoningEffort, ReasoningOption } from '@locagens/shared';
 import { api } from '../../api/client';
+import { splitCombined } from '../../lib/format';
 import { useCustomDialog } from '../../composables/useCustomDialog';
-import ThemedSelect from './ThemedSelect.vue';
-import ThemedButton from '../ThemedButton.vue';
+import ThemedSelect from '../ui/ThemedSelect.vue';
+import ThemedButton from '../ui/ThemedButton.vue';
 
 const props = defineProps<{
   providers: ProviderMetadata[];
@@ -59,12 +60,6 @@ const maxSubAgentOptions = [
 
 function combined(providerId: string, model: string): string {
   return `${providerId}:${model}`;
-}
-
-function splitCombined(value: string): { providerId: string; model: string } {
-  const idx = value.indexOf(':');
-  if (idx === -1) return { providerId: value, model: '' };
-  return { providerId: value.slice(0, idx), model: value.slice(idx + 1) };
 }
 
 function normalizedReasoningOptions(value: string): ReasoningOption[] {
@@ -267,11 +262,11 @@ async function handleDelete(preset: AgentPreset) {
     <div v-if="isEditing" class="preset-editor">
       <div class="form-row">
         <label>Id</label>
-        <input v-model="formId" placeholder="opusplan" :disabled="!!editingOriginalId" />
+        <input v-model="formId" class="text-input" placeholder="opusplan" :disabled="!!editingOriginalId" />
       </div>
       <div class="form-row">
         <label>Display name</label>
-        <input v-model="formDisplayName" placeholder="Opus Plan" />
+        <input v-model="formDisplayName" class="text-input" placeholder="Opus Plan" />
       </div>
       <div class="form-row">
         <label>Architect model</label>
@@ -405,22 +400,9 @@ async function handleDelete(preset: AgentPreset) {
   accent-color: var(--control-accent);
 }
 
-.form-row input {
-  background: var(--control-bg);
-  border: 1px solid var(--control-border);
-  border-radius: 8px;
+.form-row input.text-input {
   padding: 9px 11px;
-  color: var(--text);
   font-size: 0.85rem;
-}
-
-.form-row input:disabled {
-  opacity: 0.6;
-}
-
-.form-row input:focus {
-  border-color: var(--control-border-focus);
-  outline: none;
 }
 
 .effort-row {

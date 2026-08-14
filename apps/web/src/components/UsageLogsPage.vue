@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import type { UsageLog } from '@locagens/shared';
 import { api } from '../api/client';
+import Spinner from './ui/Spinner.vue';
 
 const emit = defineEmits<{
   (e: 'select-run', runId: string): void;
@@ -240,7 +241,7 @@ function getHitRateClass(rate: number): string {
     <!-- Table Container -->
     <div class="table-container">
       <div v-if="isLoading" class="loading-state">
-        <div class="spinner"></div>
+        <Spinner :size="32" :thickness="3" style="color: var(--info)" />
         <span>Loading usage logs...</span>
       </div>
 
@@ -691,15 +692,6 @@ function getHitRateClass(rate: number): string {
 .loading-state {
   gap: 16px;
   color: var(--muted);
-}
-
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid rgba(255, 255, 255, 0.08);
-  border-top-color: var(--info);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
 }
 
 .empty-state {

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import type { Memory, MemoryCategory, MemoryScope } from '@locagens/shared';
-import ThemedSelect from './ThemedSelect.vue';
-import ThemedButton from '../ThemedButton.vue';
+import { basename } from '../../lib/format';
+import ThemedSelect from '../ui/ThemedSelect.vue';
+import ThemedButton from '../ui/ThemedButton.vue';
 
 const props = defineProps<{
   memories: Memory[];
@@ -19,11 +20,6 @@ const emit = defineEmits<{
 }>();
 
 const CATEGORIES: MemoryCategory[] = ['user', 'feedback', 'project', 'reference'];
-
-function basename(path: string): string {
-  const parts = path.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || path;
-}
 
 const globalMemories = computed(() => props.memories.filter(m => m.scope === 'global'));
 
@@ -121,7 +117,7 @@ function submitAdd() {
       <input
         v-model="newContent"
         type="text"
-        class="mem-input"
+        class="mem-input text-input"
         placeholder="A durable fact to remember (e.g. 'Always use pnpm build')"
         @keyup.enter="submitAdd"
       />
@@ -148,7 +144,7 @@ function submitAdd() {
                   <input
                     v-model="editDraft"
                     type="text"
-                    class="mem-edit-input"
+                    class="mem-edit-input text-input"
                     @keyup.enter="saveEdit(m.id)"
                     @keyup.esc="cancelEdit"
                   />
@@ -181,7 +177,7 @@ function submitAdd() {
                   <input
                     v-model="editDraft"
                     type="text"
-                    class="mem-edit-input"
+                    class="mem-edit-input text-input"
                     @keyup.enter="saveEdit(m.id)"
                     @keyup.esc="cancelEdit"
                   />
@@ -245,18 +241,8 @@ function submitAdd() {
   width: 100%;
   height: 36px;
   box-sizing: border-box;
-  background: var(--control-bg);
-  border: 1px solid var(--control-border);
   border-radius: 6px;
-  color: var(--text);
   padding: 0 12px;
-  font-size: 0.88rem;
-  font-family: inherit;
-}
-
-.mem-input:focus {
-  border-color: var(--control-border-focus);
-  outline: none;
 }
 
 .mem-add-actions {
@@ -275,20 +261,10 @@ function submitAdd() {
 .mem-edit-input {
   flex: 1;
   min-width: 0;
-  background: var(--control-bg);
-  border: 1px solid var(--control-border);
   border-radius: 6px;
-  color: var(--text);
-  font-size: 0.88rem;
-  font-family: inherit;
   height: 32px;
   box-sizing: border-box;
   padding: 0 10px;
-}
-
-.mem-edit-input:focus {
-  border-color: var(--control-border-focus);
-  outline: none;
 }
 
 .mem-edit-actions {

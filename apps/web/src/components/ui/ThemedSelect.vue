@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
+import { onClickOutside } from '@vueuse/core';
 
 type OptionValue = string | number;
 
@@ -25,18 +26,8 @@ function selectOption(value: OptionValue, disabled?: boolean) {
   isOpen.value = false;
 }
 
-function handleDocumentClick(event: MouseEvent) {
-  if (!root.value?.contains(event.target as Node)) {
-    isOpen.value = false;
-  }
-}
-
-onMounted(() => {
-  document.addEventListener('click', handleDocumentClick);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', handleDocumentClick);
+onClickOutside(root, () => {
+  isOpen.value = false;
 });
 </script>
 
@@ -48,7 +39,7 @@ onBeforeUnmount(() => {
       :class="{ open: isOpen }"
       @click.stop="isOpen = !isOpen"
     >
-      <span class="themed-select-label">{{ selectedLabel }}</span>
+      <span class="themed-select-label truncate">{{ selectedLabel }}</span>
       <span class="themed-select-caret">⌄</span>
     </button>
     <div v-if="isOpen" class="themed-select-menu">
@@ -99,9 +90,6 @@ onBeforeUnmount(() => {
 
 .themed-select-label {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .themed-select-caret {

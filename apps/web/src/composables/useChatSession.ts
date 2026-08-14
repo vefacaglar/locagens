@@ -3,9 +3,16 @@ import { tryOnScopeDispose } from '@vueuse/core';
 import type { ProviderMetadata, Run, RunMessage, RunStatus, Plan, RunUsageSummary } from '@locagens/shared';
 import { api, type PermissionDecision } from '../api/client';
 import { ACTIVE_STATUSES } from '../lib/format';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 import { groupMessages, type MessageGroup } from '../lib/messageGroups';
 import { getConfirmationOptions } from '../lib/confirmation';
 import { useCustomDialog } from './useCustomDialog';
+import {
+  clearDraftComposerSettings,
+  saveLastUsedComposerSettings,
+  saveRunComposerSettings,
+  type PersistedComposerSettings
+} from './useComposerSettings';
 
 interface ChatSessionOptions {
   activeRunId: Ref<string | null>;
@@ -190,7 +197,7 @@ export function useChatSession(options: ChatSessionOptions) {
     const latestRun = runs.value.find(r => r.id === run.id) || run;
 
     activeRunId.value = latestRun.id;
-    localStorage.setItem('activeRunId', latestRun.id);
+    localStorage.setItem(STORAGE_KEYS.activeRunId, latestRun.id);
     activeRun.value = { ...latestRun };
     options.activeProjectPath.value = latestRun.projectPath || options.activeProjectPath.value;
     taskInput.value = '';
@@ -269,15 +276,11 @@ export function useChatSession(options: ChatSessionOptions) {
     clearPendingMessageUpdates();
 
     // Clear draft settings so it initializes with last used settings
-    localStorage.removeItem('bm_draft_selected_model');
-    localStorage.removeItem('bm_draft_reasoning_effort');
-    localStorage.removeItem('bm_draft_selected_preset');
-    localStorage.removeItem('bm_draft_current_mode');
-    localStorage.removeItem('bm_draft_bypass_permissions');
+    clearDraftComposerSettings();
 
     isRunning.value = false;
     activeRunId.value = null;
-    localStorage.removeItem('activeRunId');
+    localStorage.removeItem(STORAGE_KEYS.activeRunId);
     activeRun.value = null;
     resetMessageSurfaces();
     currentPlan.value = null;
@@ -507,15 +510,21 @@ export function useChatSession(options: ChatSessionOptions) {
 
   // --- Sending -------------------------------------------------------------
 
+  function currentComposerSettings(): PersistedComposerSettings {
+    return {
+      selectedModel: options.selectedModelCombined.value,
+      reasoningEffort: options.selectedReasoningEffort.value,
+      selectedPreset: options.selectedPresetId.value,
+      mode: options.currentMode.value,
+      bypassPermissions: options.bypassPermissions.value
+    };
+  }
+
   async function handleSendTask() {
     if (!taskInput.value.trim() || isRunning.value || !options.selectedModelCombined.value) return;
 
     // Record last used settings in localStorage
-    localStorage.setItem('bm_last_used_selected_model', options.selectedModelCombined.value);
-    localStorage.setItem('bm_last_used_reasoning_effort', options.selectedReasoningEffort.value);
-    localStorage.setItem('bm_last_used_selected_preset', options.selectedPresetId.value);
-    localStorage.setItem('bm_last_used_current_mode', options.currentMode.value);
-    localStorage.setItem('bm_last_used_bypass_permissions', String(options.bypassPermissions.value));
+    saveLastUsedComposerSettings(currentComposerSettings());
 
     const { providerId, model } = options.effectiveModel.value;
     const agentFields = options.agentRunFields.value;
@@ -567,14 +576,10 @@ export function useChatSession(options: ChatSessionOptions) {
         taskInput.value = '';
 
         // Initialize settings for the new run
-        localStorage.setItem(`bm_run_${run.id}_selected_model`, options.selectedModelCombined.value);
-        localStorage.setItem(`bm_run_${run.id}_reasoning_effort`, options.selectedReasoningEffort.value);
-        localStorage.setItem(`bm_run_${run.id}_selected_preset`, options.selectedPresetId.value);
-        localStorage.setItem(`bm_run_${run.id}_current_mode`, options.currentMode.value);
-        localStorage.setItem(`bm_run_${run.id}_bypass_permissions`, String(options.bypassPermissions.value));
+        saveRunComposerSettings(run.id, currentComposerSettings());
 
         activeRunId.value = run.id;
-        localStorage.setItem('activeRunId', run.id);
+        localStorage.setItem(STORAGE_KEYS.activeRunId, run.id);
         activeRun.value = run;
         runs.value.unshift(run);
         connectEventSource(run.id);

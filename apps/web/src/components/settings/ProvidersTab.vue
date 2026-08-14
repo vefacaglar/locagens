@@ -3,8 +3,9 @@ import { ref, computed, watch } from 'vue';
 import type { ProviderModelSettings, ReasoningEffort, ReasoningOption, ReasoningStyle, PriceTier } from '@locagens/shared';
 import { api } from '../../api/client';
 import { useCustomDialog } from '../../composables/useCustomDialog';
-import ThemedSelect from './ThemedSelect.vue';
-import ThemedButton from '../ThemedButton.vue';
+import ThemedSelect from '../ui/ThemedSelect.vue';
+import ThemedButton from '../ui/ThemedButton.vue';
+import Spinner from '../ui/Spinner.vue';
 
 const props = defineProps<{
   providersConfig: Record<string, any>;
@@ -345,7 +346,7 @@ async function handleFetchModels() {
     </header>
 
     <div v-if="isLoading" class="settings-empty">
-      <div class="spinner-spinner"></div>
+      <Spinner :size="24" style="color: var(--btn-primary-bg)" />
       <span>Loading configurations...</span>
     </div>
 
@@ -641,19 +642,6 @@ async function handleFetchModels() {
   color: var(--muted);
   gap: 12px;
   font-size: 0.9rem;
-}
-
-.spinner-spinner {
-  width: 24px;
-  height: 24px;
-  border: 2px solid rgba(255, 255, 255, 0.1);
-  border-top-color: var(--btn-primary-bg);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 
 /* Provider List View Mode */

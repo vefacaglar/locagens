@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import type { PermissionRule } from '@locagens/shared';
-import ThemedButton from '../ThemedButton.vue';
+import { basename } from '../../lib/format';
+import { useExpandedMap } from '../../composables/useExpandedMap';
+import ThemedButton from '../ui/ThemedButton.vue';
 
 const props = defineProps<{
   permissions: PermissionRule[];
@@ -13,22 +15,8 @@ const emit = defineEmits<{
   (e: 'clear-all'): void;
 }>();
 
-const expandedIds = ref<Record<number, boolean>>({});
-
-function toggleExpand(id: number) {
-  expandedIds.value[id] = !expandedIds.value[id];
-}
-
-const expandedGroups = ref<Record<string, boolean>>({});
-
-function toggleGroup(groupPath: string) {
-  expandedGroups.value[groupPath] = !expandedGroups.value[groupPath];
-}
-
-function basename(path: string): string {
-  const parts = path.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || path;
-}
+const { map: expandedIds, toggle: toggleExpand } = useExpandedMap<number>();
+const { map: expandedGroups, toggle: toggleGroup } = useExpandedMap();
 
 function ruleScopeText(rule: PermissionRule): string {
   return rule.scope === 'global'
@@ -106,7 +94,7 @@ const projectPermissionsGroups = computed(() => {
                 </svg>
               </span>
               <span class="perm-accordion-title">{{ rule.tool }}</span>
-              <span v-if="rule.command" class="perm-accordion-desc">— {{ truncateCommand(rule.command) }}</span>
+              <span v-if="rule.command" class="perm-accordion-desc truncate">— {{ truncateCommand(rule.command) }}</span>
               <ThemedButton
                 variant="danger"
                 size="sm"
@@ -157,7 +145,7 @@ const projectPermissionsGroups = computed(() => {
                 </svg>
               </span>
               <span class="perm-accordion-title">{{ rule.tool }}</span>
-              <span v-if="rule.command" class="perm-accordion-desc">— {{ truncateCommand(rule.command) }}</span>
+              <span v-if="rule.command" class="perm-accordion-desc truncate">— {{ truncateCommand(rule.command) }}</span>
               <ThemedButton
                 variant="danger"
                 size="sm"
@@ -245,9 +233,6 @@ const projectPermissionsGroups = computed(() => {
 .perm-accordion-desc {
   font-size: 0.82rem;
   color: var(--faint);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   flex: 1;
   min-width: 0;
 }

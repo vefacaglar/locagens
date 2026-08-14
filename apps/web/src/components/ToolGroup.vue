@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import type { RunMessage } from '@locagens/shared';
 import { isToolSuccess } from '../lib/messageGroups';
 import { cleanMessageContent, renderMarkdown } from '../lib/markdown';
+import CopyButton from './ui/CopyButton.vue';
 
 const props = defineProps<{
   id?: string;
@@ -21,9 +22,6 @@ const emit = defineEmits<{
 }>();
 
 const detailsExpanded = ref<Record<number, boolean>>({});
-
-const copiedParameters = ref<Record<number, boolean>>({});
-const copiedResults = ref<Record<number, boolean>>({});
 
 // Local instance cache to prevent redundant JSON.parse & string manipulation on updates
 const parsedArgsCache = new Map<string, Record<string, any>>();
@@ -252,22 +250,6 @@ function clusterStatus(c: ToolCluster): 'success' | 'failed' | 'pending' {
     else if (!isToolSuccessCached(res.content)) return 'failed';
   }
   return anyPending ? 'pending' : 'success';
-}
-
-function copyParameters(idx: number, text: string) {
-  navigator.clipboard.writeText(text);
-  copiedParameters.value[idx] = true;
-  setTimeout(() => {
-    copiedParameters.value[idx] = false;
-  }, 2000);
-}
-
-function copyResult(idx: number, text: string) {
-  navigator.clipboard.writeText(text);
-  copiedResults.value[idx] = true;
-  setTimeout(() => {
-    copiedResults.value[idx] = false;
-  }, 2000);
 }
 
 function getSingleBoxHeaderLabel(name: string, argumentsJson: string): string {
@@ -754,20 +736,11 @@ function formatToolResult(name: string, contentJson: string): string {
             <div v-if="hasToolParamsCached(tc.function?.name, tc.function?.arguments)" class="code-block-wrapper">
               <div class="code-block-header">
                 <span class="code-block-lang">{{ getSingleBoxHeaderLabelCached(tc.function?.name, tc.function?.arguments) }} (params)</span>
-                <button 
-                  class="code-block-copy-btn" 
-                  :class="{ copied: copiedParameters[idx] }" 
-                  @click.stop="copyParameters(idx, formatToolParamsCached(tc.function?.name, tc.function?.arguments))"
-                  title="Copy parameters"
-                >
-                  <svg v-if="copiedParameters[idx]" class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                  <svg v-else class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-                  </svg>
-                </button>
+                <CopyButton
+                  class="code-block-copy-btn"
+                  label="Copy parameters"
+                  :text="() => formatToolParamsCached(tc.function?.name, tc.function?.arguments)"
+                />
               </div>
               <pre class="faint-code"><code>{{ formatToolParamsCached(tc.function?.name, tc.function?.arguments) }}</code></pre>
 
@@ -820,20 +793,11 @@ function formatToolResult(name: string, contentJson: string): string {
             <div class="code-block-wrapper">
               <div class="code-block-header">
                 <span class="code-block-lang">{{ getSingleBoxHeaderLabelCached(tc.function?.name, tc.function?.arguments) }}</span>
-                <button 
-                  class="code-block-copy-btn" 
-                  :class="{ copied: copiedResults[idx] }" 
-                  @click.stop="copyResult(idx, formatSingleBoxContentCached(tc.function?.name, tc.function?.arguments, toolResponses[idx]))"
-                  title="Copy results"
-                >
-                  <svg v-if="copiedResults[idx]" class="check-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                  <svg v-else class="copy-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-                  </svg>
-                </button>
+                <CopyButton
+                  class="code-block-copy-btn"
+                  label="Copy results"
+                  :text="() => formatSingleBoxContentCached(tc.function?.name, tc.function?.arguments, toolResponses[idx])"
+                />
               </div>
               <pre class="faint-code"><code>{{ formatSingleBoxContentCached(tc.function?.name, tc.function?.arguments, toolResponses[idx]) }}</code></pre>
             </div>

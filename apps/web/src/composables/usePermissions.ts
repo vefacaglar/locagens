@@ -1,36 +1,18 @@
-import { ref } from 'vue';
 import type { PermissionRule } from '@locagens/shared';
 import { api } from '../api/client';
+import { useAsyncResource } from './useAsyncResource';
 import { useCustomDialog } from './useCustomDialog';
 
 /**
- * Owns the standing-permissions list and the settings modal that manages it.
- * Permissions are loaded lazily when the modal opens.
+ * Owns the standing-permissions list shown in Settings → Permissions.
+ * Loaded lazily when the settings screen opens (see useAppShell.openSettings).
  */
 export function usePermissions() {
   const { showConfirm } = useCustomDialog();
-  const permissions = ref<PermissionRule[]>([]);
-  const showSettings = ref(false);
-  const isLoading = ref(false);
-
-  async function loadPermissions() {
-    isLoading.value = true;
-    try {
-      const data = await api.getPermissions();
-      if (data) permissions.value = data;
-    } finally {
-      isLoading.value = false;
-    }
-  }
-
-  async function openSettings() {
-    showSettings.value = true;
-    await loadPermissions();
-  }
-
-  function closeSettings() {
-    showSettings.value = false;
-  }
+  const { data: permissions, isLoading, load: loadPermissions } = useAsyncResource<PermissionRule[]>(
+    () => api.getPermissions(),
+    []
+  );
 
   async function revokePermission(id: number) {
     await api.revokePermission(id);
@@ -46,10 +28,8 @@ export function usePermissions() {
 
   return {
     permissions,
-    showSettings,
     isLoading,
-    openSettings,
-    closeSettings,
+    loadPermissions,
     revokePermission,
     clearPermissions
   };

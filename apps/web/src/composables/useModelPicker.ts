@@ -1,5 +1,6 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { REASONING_EFFORTS, type ModelOption } from './useComposerSettings';
+import { STORAGE_KEYS } from '../lib/storageKeys';
 
 /**
  * State and behavior of the composer's model-picker dropdown: search,
@@ -41,7 +42,7 @@ export function useModelPicker(host: ModelPickerHost) {
   const favoriteModels = ref<string[]>([]);
 
   onMounted(() => {
-    const stored = localStorage.getItem('bm_favorite_models');
+    const stored = localStorage.getItem(STORAGE_KEYS.favoriteModels);
     if (stored) {
       try {
         favoriteModels.value = JSON.parse(stored);
@@ -58,7 +59,7 @@ export function useModelPicker(host: ModelPickerHost) {
     } else {
       favoriteModels.value.push(val);
     }
-    localStorage.setItem('bm_favorite_models', JSON.stringify(favoriteModels.value));
+    localStorage.setItem(STORAGE_KEYS.favoriteModels, JSON.stringify(favoriteModels.value));
   }
 
   function isStarred(val: string): boolean {

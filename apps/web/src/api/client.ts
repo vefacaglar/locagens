@@ -58,42 +58,57 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
   return body?.error || fallback;
 }
 
+interface RequestInitJson {
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  /** JSON.stringify'd into the body; sets the Content-Type header. */
+  body?: unknown;
+  errorFallback?: string;
+}
+
+/** Core fetch wrapper: throws Error(`{ error }` body or fallback) on !ok. */
+async function request(path: string, init: RequestInitJson = {}): Promise<Response> {
+  const { method = 'GET', body, errorFallback = 'Request failed.' } = init;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    ...(body !== undefined
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+      : {})
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, errorFallback));
+  return response;
+}
+
+async function requestJson<T>(path: string, init: RequestInitJson = {}): Promise<T> {
+  return (await request(path, init)).json() as Promise<T>;
+}
+
+async function requestVoid(path: string, init: RequestInitJson = {}): Promise<void> {
+  await request(path, init);
+}
+
+/** GETs that report failure as null so callers can `if (data)` instead of try/catch. */
 async function getJson<T>(path: string): Promise<T | null> {
   const response = await fetch(`${API_BASE}${path}`);
   if (!response.ok) return null;
   return response.json() as Promise<T>;
 }
 
+/** DELETEs whose failures are intentionally ignored (existing behavior). */
+async function deleteQuiet(path: string): Promise<void> {
+  await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
+}
+
 export const api = {
   getSettings: () => getJson<AppSettings>('/api/settings'),
-  async saveSettings(settings: AppSettings): Promise<AppSettings & { restartRequired?: boolean }> {
-    const response = await fetch(`${API_BASE}/api/settings`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to save settings.'));
-    return response.json() as Promise<AppSettings & { restartRequired?: boolean }>;
-  },
+  saveSettings: (settings: AppSettings) =>
+    requestJson<AppSettings & { restartRequired?: boolean }>('/api/settings', { method: 'PUT', body: settings, errorFallback: 'Failed to save settings.' }),
   getProviders: () => getJson<ProviderMetadata[]>('/api/providers'),
   getAgentPresets: () => getJson<AgentPreset[]>('/api/agent-presets'),
-  async saveAgentPresets(presets: Record<string, any>): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/agent-presets`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(presets)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to save agent presets.'));
-  },
+  saveAgentPresets: (presets: Record<string, any>) =>
+    requestVoid('/api/agent-presets', { method: 'PUT', body: presets, errorFallback: 'Failed to save agent presets.' }),
   getProvidersConfig: () => getJson<Record<string, any>>('/api/providers/config'),
-  async saveProvidersConfig(configs: Record<string, any>): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/providers/config`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(configs)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to save provider settings.'));
-  },
+  saveProvidersConfig: (configs: Record<string, any>) =>
+    requestVoid('/api/providers/config', { method: 'POST', body: configs, errorFallback: 'Failed to save provider settings.' }),
   getRuns: () => getJson<Run[]>('/api/runs'),
   getMessages: (runId: string) => getJson<RunMessage[]>(`/api/runs/${runId}/messages`),
   getRunPlan: (runId: string) => getJson<Plan | null>(`/api/runs/${runId}/plan`),
@@ -122,114 +137,63 @@ export const api = {
 
   eventsUrl: (runId: string) => `${API_BASE}/api/runs/${runId}/events`,
 
-  async revokePermission(id: number): Promise<void> {
-    await fetch(`${API_BASE}/api/permissions/${id}`, { method: 'DELETE' });
-  },
-
-  async clearPermissions(): Promise<void> {
-    await fetch(`${API_BASE}/api/permissions`, { method: 'DELETE' });
-  },
+  revokePermission: (id: number) => deleteQuiet(`/api/permissions/${id}`),
+  clearPermissions: () => deleteQuiet('/api/permissions'),
 
   getMemories: () => getJson<Memory[]>('/api/memories'),
+  createMemory: (payload: { scope: MemoryScope; category: MemoryCategory; content: string; projectPath?: string }) =>
+    requestJson<Memory>('/api/memories', { method: 'POST', body: payload, errorFallback: 'Failed to save memory.' }),
+  updateMemory: (id: number, content: string) =>
+    requestJson<Memory>(`/api/memories/${id}`, { method: 'PUT', body: { content }, errorFallback: 'Failed to update memory.' }),
+  deleteMemory: (id: number) => deleteQuiet(`/api/memories/${id}`),
+  clearMemories: () => deleteQuiet('/api/memories'),
 
-  async createMemory(payload: { scope: MemoryScope; category: MemoryCategory; content: string; projectPath?: string }): Promise<Memory> {
-    const response = await fetch(`${API_BASE}/api/memories`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to save memory.'));
-    return response.json() as Promise<Memory>;
-  },
+  createRun: (payload: CreateRunPayload) =>
+    requestJson<Run>('/api/runs', { method: 'POST', body: payload, errorFallback: 'Failed to start chat.' }),
+  continueRun: (runId: string, payload: ContinueRunPayload) =>
+    requestVoid(`/api/runs/${runId}/continue`, { method: 'POST', body: payload, errorFallback: 'Failed to send message.' }),
 
-  async updateMemory(id: number, content: string): Promise<Memory> {
-    const response = await fetch(`${API_BASE}/api/memories/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content })
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to update memory.'));
-    return response.json() as Promise<Memory>;
-  },
-
-  async deleteMemory(id: number): Promise<void> {
-    await fetch(`${API_BASE}/api/memories/${id}`, { method: 'DELETE' });
-  },
-
-  async clearMemories(): Promise<void> {
-    await fetch(`${API_BASE}/api/memories`, { method: 'DELETE' });
-  },
-
-  async createRun(payload: CreateRunPayload): Promise<Run> {
-    const response = await fetch(`${API_BASE}/api/runs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to start chat.'));
-    return response.json() as Promise<Run>;
-  },
-
-  async continueRun(runId: string, payload: ContinueRunPayload): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/runs/${runId}/continue`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to send message.'));
-  },
-
+  // TODO: should return a typed result instead of leaking the raw Response.
   async cancelRun(runId: string): Promise<Response> {
     return fetch(`${API_BASE}/api/runs/${runId}/cancel`, { method: 'POST' });
   },
 
-  async sendPermissionDecision(runId: string, decision: PermissionDecision): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/runs/${runId}/permission`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision })
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Permission decision could not be processed.'));
-  },
+  sendPermissionDecision: (runId: string, decision: PermissionDecision) =>
+    requestVoid(`/api/runs/${runId}/permission`, { method: 'POST', body: { decision }, errorFallback: 'Permission decision could not be processed.' }),
+  answerQuestion: (runId: string, selections: string[][], notes: string[]) =>
+    requestVoid(`/api/runs/${runId}/answer`, { method: 'POST', body: { selections, notes }, errorFallback: 'Answer could not be submitted.' }),
 
-  async answerQuestion(runId: string, selections: string[][], notes: string[]): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/runs/${runId}/answer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selections, notes })
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Answer could not be submitted.'));
-  },
+  createProject: (path: string, name: string) =>
+    requestJson<Project>('/api/projects', { method: 'POST', body: { path, name }, errorFallback: 'Failed to add project.' }),
+  deleteProject: (path: string) => deleteQuiet(`/api/projects?path=${encodeURIComponent(path)}`),
+  browseFolder: () =>
+    requestJson<{ path: string; name: string }>('/api/projects/select-dir', { method: 'POST', errorFallback: 'Failed to select folder.' }),
 
-  async createProject(path: string, name: string): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, name })
-    });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to add project.'));
-    return response.json() as Promise<Project>;
-  },
-
-  async deleteProject(path: string): Promise<void> {
-    await fetch(`${API_BASE}/api/projects?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
-  },
-
-  async browseFolder(): Promise<{ path: string; name: string }> {
-    const response = await fetch(`${API_BASE}/api/projects/select-dir`, { method: 'POST' });
-    if (!response.ok) throw new Error(await errorMessage(response, 'Failed to select folder.'));
-    return response.json() as Promise<{ path: string; name: string }>;
-  },
+  getGitStatus: (path: string) =>
+    requestJson<{ isGit: boolean; branch?: string; hasChanges?: boolean }>(
+      `/api/projects/git/status?path=${encodeURIComponent(path)}`,
+      { errorFallback: 'Failed to fetch status' }
+    ),
+  getGitDiffDetails: (path: string) =>
+    requestJson<{ files?: Array<{ path: string; kind: string; oldText: string; newText: string }> }>(
+      `/api/projects/git/diff-details?path=${encodeURIComponent(path)}`,
+      { errorFallback: 'Failed to fetch diff details' }
+    ),
+  generateCommitMessage: (runId: string) =>
+    requestJson<{ message: string }>('/api/projects/git/generate-message', { method: 'POST', body: { runId }, errorFallback: 'Failed to generate message' }),
+  gitCommit: (path: string, message: string, action: string) =>
+    requestVoid('/api/projects/git/commit', { method: 'POST', body: { path, message, action }, errorFallback: 'Failed to execute git action' }),
 
   async fetchModels(payload: { type: string; baseUrl: string; apiKey?: string; providerId?: string }): Promise<{ success: boolean; models?: string[]; error?: string }> {
+    // HTTP failures come back as { success: false } (callers branch on it);
+    // network errors still throw, matching the callers' try/catch path.
     const response = await fetch(`${API_BASE}/api/providers/fetch-models`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
-      const err = await errorMessage(response, 'Failed to fetch models.');
-      return { success: false, error: err };
+      return { success: false, error: await errorMessage(response, 'Failed to fetch models.') };
     }
     return response.json() as Promise<{ success: boolean; models?: string[]; error?: string }>;
   }

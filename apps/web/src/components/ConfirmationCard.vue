@@ -2,7 +2,8 @@
 import { computed, ref, watch } from 'vue';
 import type { MessageGroup } from '../lib/messageGroups';
 import { getConfirmations } from '../lib/confirmation';
-import ThemedButton from './ThemedButton.vue';
+import ThemedButton from './ui/ThemedButton.vue';
+import StepperFooter from './ui/StepperFooter.vue';
 
 const props = defineProps<{
   group: MessageGroup | null;
@@ -78,8 +79,8 @@ function submit() {
 </script>
 
 <template>
-  <transition name="slide-up">
-    <div v-if="group && currentQuestion" class="composer-confirmation-card">
+  <transition name="card-slide-up">
+    <div v-if="group && currentQuestion" class="prompt-card prompt-card--inline composer-confirmation-card">
       <div class="confirm-card-header">
         <strong>{{ currentQuestion.question || 'Confirm prompt action?' }}</strong>
         <span v-if="confirmations.length > 1" class="confirm-step">{{ currentIndex + 1 }} / {{ confirmations.length }}</span>
@@ -98,56 +99,30 @@ function submit() {
       <input
         v-model="notes[currentIndex]"
         type="text"
-        class="confirm-note"
+        class="confirm-note prompt-note"
         :placeholder="commentPlaceholder"
         @keydown.enter.prevent="submit"
       />
-      
-      <div v-if="confirmations.length > 1" class="confirm-card-footer">
-        <ThemedButton
-          v-if="!isFirst"
-          variant="secondary"
-          @click="goPrev"
-        >
-          Previous
-        </ThemedButton>
-        <ThemedButton
-          v-if="!isLast"
-          variant="primary"
-          :disabled="!selections[currentIndex]"
-          @click="goNext"
-        >
-          Next
-        </ThemedButton>
-        <ThemedButton
-          v-else
-          variant="primary"
-          :disabled="!selections[currentIndex]"
-          @click="submit"
-        >
-          Submit
-        </ThemedButton>
-      </div>
+
+      <StepperFooter
+        v-if="confirmations.length > 1"
+        class="confirm-card-footer"
+        :is-first="isFirst"
+        :is-last="isLast"
+        :can-advance="!!selections[currentIndex]"
+        :can-submit="!!selections[currentIndex]"
+        @prev="goPrev"
+        @next="goNext"
+        @submit="submit"
+      />
     </div>
   </transition>
 </template>
 
 <style scoped>
-/* In normal flow at the top of the composer container so the pinned task list
-   above it stays visible (the card no longer overlaps it). When the card closes
-   the task list returns to sitting right above the composer. */
+/* Shell + positioning come from the global .prompt-card / .prompt-card--inline. */
 .composer-confirmation-card {
-  position: relative;
-  margin: 0 0 10px;
-  background: var(--surface-elevated);
-  border: 1px solid var(--border);
-  border-radius: 12px;
   padding: 14px 16px;
-  z-index: 1;
-  pointer-events: auto;
-  box-shadow: 0 10px 30px var(--card-overlay-shadow);
-  display: flex;
-  flex-direction: column;
   gap: 12px;
 }
 
@@ -173,65 +148,12 @@ function submit() {
   text-align: left;
 }
 
-.composer-confirm-btn {
-  width: 100%;
-  text-align: left;
-  padding: 10px 14px;
-  border-radius: 9px;
-  font-size: 0.85rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-}
-
-.composer-confirm-btn:hover {
-  border-color: var(--muted);
-}
-
-.composer-confirm-btn.no,
-.composer-confirm-btn.yes {
-  background: var(--surface-strong);
-  color: var(--text);
-  border-color: transparent;
-  font-weight: 600;
-}
-
-.composer-confirm-btn.no:hover,
-.composer-confirm-btn.yes:hover {
-  border-color: transparent;
-  filter: brightness(1.05);
-}
-
+/* Base input styling comes from the global .prompt-note. */
 .confirm-note {
-  width: 100%;
-  box-sizing: border-box;
   margin-top: 4px;
-  background: var(--bg);
-  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 12px;
-  color: var(--text);
-  font-size: 0.82rem;
-  font-family: inherit;
   resize: none;
-}
-
-.confirm-note::placeholder {
-  color: var(--faint);
-}
-
-.confirm-note:focus {
-  outline: none;
-  border-color: var(--muted);
-}
-
-.composer-confirm-btn.selected {
-  border-color: transparent;
-  background: var(--surface-strong);
-  font-weight: 600;
 }
 
 .confirm-step {
@@ -240,61 +162,12 @@ function submit() {
   color: var(--muted);
 }
 
-.confirm-card-footer {
-  display: flex;
-  justify-content: flex-end;
+.stepper-footer.confirm-card-footer {
   gap: 8px;
   align-items: center;
   margin-top: 8px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
   width: 100%;
-}
-
-.confirm-nav-btn {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.confirm-nav-btn.primary {
-  background: var(--text);
-  color: var(--bg);
-  border: 1px solid var(--text);
-  font-weight: 600;
-}
-
-.confirm-nav-btn.primary:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.confirm-nav-btn.secondary {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-
-.confirm-nav-btn.secondary:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--muted);
-}
-
-.confirm-nav-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.slide-up-enter-active,
-.slide-up-leave-active {
-  transition: transform 0.18s ease, opacity 0.18s ease;
-}
-
-.slide-up-enter-from,
-.slide-up-leave-to {
-  transform: translateY(8px);
-  opacity: 0;
 }
 </style>
