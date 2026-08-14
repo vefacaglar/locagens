@@ -7,7 +7,7 @@ import Fastify from "fastify";
 import { registerApiAuthentication } from "./apiAuth.js";
 import { registerOriginPolicy } from "./originPolicy.js";
 import { isPrivateAddress, safeFetchText, selectPublicAddress, validateAgentUrl } from "./SafeHttpClient.js";
-import { commandSandbox, normalizeNetworkDomains } from "./CommandSandbox.js";
+import { commandSandbox, normalizeCommandTimeout, normalizeNetworkDomains } from "./CommandSandbox.js";
 import { canonicalProjectPath, requireRegisteredProject } from "./projectPaths.js";
 import { resolveInsideForMutation, resolveInsideForRead } from "../orchestrator/workspace/pathGuards.js";
 
@@ -77,6 +77,13 @@ test("network domains are normalized and local/IP targets are refused", () => {
   assert.throws(() => normalizeNetworkDomains(["127.0.0.1"]));
   assert.throws(() => normalizeNetworkDomains(["2130706433"]));
   assert.throws(() => normalizeNetworkDomains(["example.com:99999"]));
+});
+
+test("command timeout defaults to ten minutes and stays within safe bounds", () => {
+  assert.equal(normalizeCommandTimeout(undefined), 600_000);
+  assert.equal(normalizeCommandTimeout(300_000), 300_000);
+  assert.throws(() => normalizeCommandTimeout(999), /between 1000 and 900000/);
+  assert.throws(() => normalizeCommandTimeout(900_001), /between 1000 and 900000/);
 });
 
 test("sandbox adapter probes the current platform without assuming readiness", async () => {

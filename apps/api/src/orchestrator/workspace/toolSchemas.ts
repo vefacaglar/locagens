@@ -188,6 +188,12 @@ export const WORKSPACE_TOOLS = [
             type: "array",
             items: { type: "string" },
             description: "Exact outbound host names required by this command. Omit for a network-isolated command. New domains always require approval."
+          },
+          timeout_ms: {
+            type: "integer",
+            minimum: 1000,
+            maximum: 900000,
+            description: "Maximum runtime in milliseconds. Defaults to 600000 (10 minutes); use a larger value for long builds or test suites."
           }
         },
         required: ["command"]

@@ -116,7 +116,7 @@ onMounted(load);
             {{ security?.sandbox.status || 'unavailable' }}
           </span>
         </div>
-        <p>Platform: <code>{{ security?.sandbox.platform || 'unknown' }}</code>. Command network access is denied unless exact domains are approved.</p>
+        <p>Platform: <code>{{ security?.sandbox.platform || 'unknown' }}</code>.</p>
         <p v-for="item in security?.sandbox.errors || []" :key="item" class="server-msg-error">{{ item }}</p>
         <p v-for="item in security?.sandbox.warnings || []" :key="item">{{ item }}</p>
         <ThemedButton

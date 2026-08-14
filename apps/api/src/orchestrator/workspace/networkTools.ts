@@ -4,7 +4,7 @@ import { truncateOutput } from "./pathGuards.js";
 import { commandScansOutsideWorkspace } from "./permissionPreview.js";
 import { executeWorkspaceTool } from "./fileToolExecutor.js";
 import { safeFetchText } from "../../security/SafeHttpClient.js";
-import { commandSandbox, normalizeNetworkDomains } from "../../security/CommandSandbox.js";
+import { commandSandbox, normalizeCommandTimeout, normalizeNetworkDomains } from "../../security/CommandSandbox.js";
 
 /**
  * The async tools (shell + network) and the orchestrator's execution entry
@@ -23,7 +23,12 @@ export async function executeWorkspaceToolAsync(run: Run, toolCall: ToolCall): P
     try {
       const args = JSON.parse(toolCall.function.arguments);
       const baseDir = path.resolve(run.projectPath || process.cwd());
-      return await runShellCommand(baseDir, typeof args.command === "string" ? args.command : "", args.network_domains);
+      return await runShellCommand(
+        baseDir,
+        typeof args.command === "string" ? args.command : "",
+        args.network_domains,
+        normalizeCommandTimeout(args.timeout_ms)
+      );
     } catch (err: any) {
       return JSON.stringify({ success: false, error: err.message });
     }
@@ -51,7 +56,7 @@ export async function executeWorkspaceToolAsync(run: Run, toolCall: ToolCall): P
 }
 
 /** Runs shell commands without blocking the orchestrator's event loop. */
-async function runShellCommand(baseDir: string, rawCommand: string, rawDomains: unknown): Promise<string> {
+async function runShellCommand(baseDir: string, rawCommand: string, rawDomains: unknown, timeoutMs: number): Promise<string> {
   const command = rawCommand.trim();
   if (command === "") {
     return JSON.stringify({ success: false, error: "Missing parameter: command" });
@@ -63,7 +68,7 @@ async function runShellCommand(baseDir: string, rawCommand: string, rawDomains: 
     });
   }
   const domains = normalizeNetworkDomains(rawDomains);
-  return JSON.stringify(await commandSandbox.run(baseDir, command, domains));
+  return JSON.stringify(await commandSandbox.run(baseDir, command, domains, timeoutMs));
 }
 
 /** Fetches an http(s) URL and returns its text body (truncated). */
