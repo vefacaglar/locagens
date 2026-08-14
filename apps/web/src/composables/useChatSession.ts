@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from 'vue';
+import { computed, ref, shallowRef, type ComputedRef, type Ref } from 'vue';
 import { tryOnScopeDispose } from '@vueuse/core';
 import type { ProviderMetadata, Run, RunMessage, RunStatus, Plan, RunUsageSummary } from '@locagens/shared';
 import { api, type PermissionDecision } from '../api/client';
@@ -6,7 +6,6 @@ import { ACTIVE_STATUSES } from '../lib/format';
 import { groupMessages, type MessageGroup } from '../lib/messageGroups';
 import { getConfirmationOptions } from '../lib/confirmation';
 import { useCustomDialog } from './useCustomDialog';
-import { clearMarkdownCache } from '../lib/markdown';
 
 interface ChatSessionOptions {
   activeRunId: Ref<string | null>;
@@ -45,8 +44,11 @@ export function useChatSession(options: ChatSessionOptions) {
   const { showAlert } = useCustomDialog();
   const providers = options.providers;
   const runs = options.runs;
-  const messages = ref<RunMessage[]>([]);
-  const sidePanelMessages = ref<RunMessage[]>([]);
+  // shallowRef: the arrays are always replaced wholesale (never mutated in
+  // place), so deep-proxying every RunMessage — including large rawResponse
+  // blobs — would only add per-property-read overhead on the render hot path.
+  const messages = shallowRef<RunMessage[]>([]);
+  const sidePanelMessages = shallowRef<RunMessage[]>([]);
 
   const activeRunId = options.activeRunId;
   const activeRun = options.activeRun;
@@ -73,6 +75,10 @@ export function useChatSession(options: ChatSessionOptions) {
   // Raw SSE updates stay in a plain Map so high-frequency token/sub-agent
   // events do not touch Vue reactivity until the scheduled flush runs.
   const pendingMessageUpdates = new Map<string, RunMessage>();
+  // Persistent id → index lookup for the messages array, maintained across
+  // flushes so applying updates is O(changed) instead of rebuilding a full
+  // index over every message per animation frame.
+  const messageIndexById = new Map<string, number>();
   const SIDE_PANEL_SNAPSHOT_DELAY_MS = 200;
 
   const groupedMessages = computed<MessageGroup[]>(() => groupMessages(messages.value));
@@ -178,10 +184,9 @@ export function useChatSession(options: ChatSessionOptions) {
     eventSource?.close();
     eventSource = null;
     clearPendingMessageUpdates();
-    clearMarkdownCache();
 
-    // Refresh the list of runs to get the latest titles, statuses, etc. from server
-    await loadRuns();
+    // The runs list is kept fresh by the active-run poll and finishEventStream,
+    // so use the current copy instead of a blocking refetch on the switch path.
     const latestRun = runs.value.find(r => r.id === run.id) || run;
 
     activeRunId.value = latestRun.id;
@@ -262,7 +267,6 @@ export function useChatSession(options: ChatSessionOptions) {
     eventSource?.close();
     eventSource = null;
     clearPendingMessageUpdates();
-    clearMarkdownCache();
 
     // Clear draft settings so it initializes with last used settings
     localStorage.removeItem('bm_draft_selected_model');
@@ -319,14 +323,13 @@ export function useChatSession(options: ChatSessionOptions) {
     pendingMessageUpdates.clear();
 
     const next = messages.value.slice();
-    const indexById = new Map(next.map((message, index) => [message.id, index]));
 
     for (const message of updates) {
-      const index = indexById.get(message.id);
+      const index = messageIndexById.get(message.id);
       if (index !== undefined) {
         next[index] = message;
       } else {
-        indexById.set(message.id, next.length);
+        messageIndexById.set(message.id, next.length);
         next.push(message);
       }
     }
@@ -364,11 +367,19 @@ export function useChatSession(options: ChatSessionOptions) {
     pendingMessageUpdates.clear();
   }
 
+  function rebuildMessageIndex(list: RunMessage[]) {
+    messageIndexById.clear();
+    for (let i = 0; i < list.length; i++) {
+      messageIndexById.set(list[i].id, i);
+    }
+  }
+
   function resetMessageSurfaces() {
     clearPendingMessageUpdates();
     cancelSidePanelSnapshot();
     messages.value = [];
     sidePanelMessages.value = [];
+    messageIndexById.clear();
   }
 
   function replaceMessages(nextMessages: RunMessage[]) {
@@ -376,6 +387,7 @@ export function useChatSession(options: ChatSessionOptions) {
     cancelSidePanelSnapshot();
     messages.value = nextMessages;
     sidePanelMessages.value = nextMessages;
+    rebuildMessageIndex(nextMessages);
   }
 
   function queueMessageUpdate(message: RunMessage) {

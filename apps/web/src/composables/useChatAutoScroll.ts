@@ -67,16 +67,16 @@ export function useChatAutoScroll(
     nextTick(scrollToBottom);
   });
 
+  // Watch primitives (not a fresh object literal) so Vue's per-source
+  // comparison suppresses the callback — and its forced-layout scroll —
+  // when nothing scroll-relevant actually changed.
   watch(
-    () => {
-      const last = messages.value[messages.value.length - 1];
-      return {
-        length: messages.value.length,
-        lastId: last?.id,
-        lastContentLength: last?.content?.length ?? 0,
-        lastReasoningLength: last?.reasoningContent?.length ?? 0
-      };
-    },
+    [
+      () => messages.value.length,
+      () => messages.value[messages.value.length - 1]?.id,
+      () => messages.value[messages.value.length - 1]?.content?.length ?? 0,
+      () => messages.value[messages.value.length - 1]?.reasoningContent?.length ?? 0
+    ],
     () => {
       if (!container.value) return;
 

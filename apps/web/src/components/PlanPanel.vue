@@ -2,13 +2,15 @@
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import type { Plan } from '@locagens/shared';
 import type { AgentSummary } from '../lib/messageGroups';
-import { renderMarkdown, cleanMessageContent } from '../lib/markdown';
+import { renderMarkdown } from '../lib/markdown';
+import { cleanedMessageContent } from '../lib/messageDerived';
 import { changeDiffRows, type WorkspaceChange } from '../lib/workspaceChanges';
 import ToolGroup from './ToolGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
 import ThemedButton from './ThemedButton.vue';
+import DiffView from './DiffView.vue';
 import { API_BASE } from '../api/client';
-import { lineDiff, filterDiffContext, type DiffRow } from '../lib/diff';
+import { lineDiff, type DiffRow } from '../lib/diff';
 
 const props = defineProps<{
   runId?: string | null;
@@ -73,7 +75,10 @@ interface GitDiffFile {
   oldText: string;
   newText: string;
   isOpen: boolean;
+  /** Full (unfiltered) lineDiff rows; DiffView collapses unchanged context itself. */
   diffRows: DiffRow[];
+  added: number;
+  deleted: number;
 }
 
 const isGitRepo = ref(false);
@@ -117,6 +122,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', closeDropdown);
+  if (gitStatusRefreshTimer) {
+    clearTimeout(gitStatusRefreshTimer);
+    gitStatusRefreshTimer = null;
+  }
 });
 
 function toggleActionsDropdown(e: Event) {
@@ -140,13 +149,30 @@ async function fetchGitDiffDetails() {
       gitDiffFiles.value = data.files.map((file: any) => {
         const existing = gitDiffFiles.value.find(f => f.path === file.path);
         const isOpen = existing ? existing.isOpen : true;
+
+        // Reuse the previous rows when the file content is unchanged so the
+        // rows array keeps its identity — DiffView then preserves which hidden
+        // ranges the user has expanded across periodic refreshes.
+        if (existing && existing.oldText === file.oldText && existing.newText === file.newText) {
+          return { ...existing, kind: file.kind, isOpen };
+        }
+
+        const diffRows = lineDiff(file.oldText, file.newText);
+        let added = 0;
+        let deleted = 0;
+        for (const row of diffRows) {
+          if (row.type === 'add') added++;
+          else if (row.type === 'del') deleted++;
+        }
         return {
           path: file.path,
           kind: file.kind,
           oldText: file.oldText,
           newText: file.newText,
           isOpen,
-          diffRows: filterDiffContext(lineDiff(file.oldText, file.newText))
+          diffRows,
+          added,
+          deleted
         };
       });
     }
@@ -155,6 +181,23 @@ async function fetchGitDiffDetails() {
   } finally {
     isLoadingDiffs.value = false;
   }
+}
+
+// The changes prop refreshes every ~200ms while the agent streams edits, and
+// each git status check chains a diff-details fetch + client-side line diffs.
+// Debounce the changes-driven refresh; explicit triggers (tab switch, run end)
+// still call checkGitStatus directly.
+let gitStatusRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+const GIT_STATUS_REFRESH_DELAY_MS = 800;
+
+function scheduleGitStatusRefresh() {
+  if (gitStatusRefreshTimer) return;
+  gitStatusRefreshTimer = setTimeout(() => {
+    gitStatusRefreshTimer = null;
+    if (activeTab.value === 'review' && props.isOpen && props.projectPath) {
+      checkGitStatus();
+    }
+  }, GIT_STATUS_REFRESH_DELAY_MS);
 }
 
 async function checkGitStatus() {
@@ -246,12 +289,15 @@ watch(
   },
   { immediate: true }
 );
+// These props are replaced immutably upstream (App.vue computeds produce new
+// arrays/objects), so identity watching is sufficient — `deep: true` would
+// traverse full RunMessage trees and whole file texts on every update.
 watch(
   () => props.plan,
   (newPlan) => {
     plan.value = newPlan;
   },
-  { immediate: true, deep: true }
+  { immediate: true }
 );
 
 watch(
@@ -259,10 +305,10 @@ watch(
   (newChanges) => {
     changes.value = newChanges ?? [];
     if (activeTab.value === 'review' && props.isOpen && props.projectPath) {
-      checkGitStatus();
+      scheduleGitStatusRefresh();
     }
   },
-  { immediate: true, deep: true }
+  { immediate: true }
 );
 
 watch(
@@ -270,7 +316,7 @@ watch(
   (newAgents) => {
     agents.value = newAgents ?? [];
   },
-  { immediate: true, deep: true }
+  { immediate: true }
 );
 
 watch(
@@ -282,23 +328,39 @@ watch(
   }
 );
 
+// Non-git fallback: workspace changes render as inline diff accordions, same
+// layout as the git file list. Open state is keyed by change id (default open);
+// diff rows are cached per id + content so periodic snapshots don't re-diff
+// unchanged files and DiffView keeps its expanded ranges.
+const openChangeAccordions = ref<Record<string, boolean>>({});
+const changeDiffCache = new Map<string, { oldText: string; newText: string; rows: DiffRow[] }>();
+
+function isChangeOpen(id: string): boolean {
+  return openChangeAccordions.value[id] ?? true;
+}
+
+function toggleChangeAccordion(id: string) {
+  openChangeAccordions.value[id] = !isChangeOpen(id);
+}
+
+function diffRowsForChange(change: WorkspaceChange): DiffRow[] {
+  const cached = changeDiffCache.get(change.id);
+  if (cached && cached.oldText === change.oldText && cached.newText === change.newText) {
+    return cached.rows;
+  }
+  const rows = changeDiffRows(change);
+  changeDiffCache.set(change.id, { oldText: change.oldText, newText: change.newText, rows });
+  return rows;
+}
+
 const doneCount = computed(() => plan.value?.tasks.filter(t => t.status === 'completed').length ?? 0);
 const totalCount = computed(() => plan.value?.tasks.length ?? 0);
 const totalAdded = computed(() => changes.value.reduce((sum, c) => sum + c.added, 0));
 const totalDeleted = computed(() => changes.value.reduce((sum, c) => sum + c.deleted, 0));
 const runningAgentCount = computed(() => agents.value.filter(agent => agent.status === 'running').length);
 
-const totalGitAdded = computed(() => {
-  return gitDiffFiles.value.reduce((sum, file) => {
-    return sum + file.diffRows.filter(r => r.type === 'add').length;
-  }, 0);
-});
-
-const totalGitDeleted = computed(() => {
-  return gitDiffFiles.value.reduce((sum, file) => {
-    return sum + file.diffRows.filter(r => r.type === 'del').length;
-  }, 0);
-});
+const totalGitAdded = computed(() => gitDiffFiles.value.reduce((sum, file) => sum + file.added, 0));
+const totalGitDeleted = computed(() => gitDiffFiles.value.reduce((sum, file) => sum + file.deleted, 0));
 
 const tabs = computed(() => {
   const list: { id: PanelTab; label: string }[] = [];
@@ -318,7 +380,8 @@ const activeChange = computed(() => {
   return changes.value.find(c => c.id === id) ?? null;
 });
 
-const activeDiffRows = computed(() => activeChange.value ? filterDiffContext(changeDiffRows(activeChange.value)) : []);
+// Full rows — DiffView collapses unchanged context behind expandable separators.
+const activeDiffRows = computed(() => activeChange.value ? changeDiffRows(activeChange.value) : []);
 
 watch(
   () => [plan.value?.id, agents.value.length, changes.value.length, isGitRepo.value] as const,
@@ -334,10 +397,8 @@ watch(
 watch(
   () => agents.value.length,
   (count, previous) => {
-    console.log(`[PlanPanel] watch agents.length: count=${count}, previous=${previous}, isSwitchingRun=${isSwitchingRun.value}`);
     if (isSwitchingRun.value) return;
     if (count > 0 && previous === 0) {
-      console.log(`[PlanPanel] watch agents.length trigger AUTO-SWITCH to agents`);
       activeTab.value = 'agents';
     }
   }
@@ -418,7 +479,6 @@ const loadedState = ref<{
 } | null>(null);
 
 function saveCurrentState() {
-  console.log(`[PlanPanel] saveCurrentState: runId=${props.runId}, activeTab=${activeTab.value}, loadedState=${loadedState.value ? 'exists' : 'null'}`);
   if (!props.runId || loadedState.value) return;
   const state = {
     activeTab: activeTab.value,
@@ -426,12 +486,10 @@ function saveCurrentState() {
     expandedTranscripts: expandedTranscripts.value,
     expandedReasoning: expandedReasoning.value
   };
-  console.log(`[PlanPanel] persisting state to localStorage runPanelState:${props.runId}:`, state);
   localStorage.setItem(`runPanelState:${props.runId}`, JSON.stringify(state));
 }
 
 function loadRunState(id: string | null | undefined) {
-  console.log(`[PlanPanel] loadRunState: id=${id}`);
   let loadedActiveTab: PanelTab = 'plan';
   let loadedOpenFileTabs: string[] = [];
   let loadedTranscripts: Record<string, boolean> = {};
@@ -439,7 +497,6 @@ function loadRunState(id: string | null | undefined) {
 
   if (id) {
     const stored = localStorage.getItem(`runPanelState:${id}`);
-    console.log(`[PlanPanel] loadRunState stored raw content:`, stored);
     if (stored) {
       try {
         const state = JSON.parse(stored);
@@ -460,7 +517,6 @@ function loadRunState(id: string | null | undefined) {
     expandedTranscripts: loadedTranscripts,
     expandedReasoning: loadedReasoning
   };
-  console.log(`[PlanPanel] loadRunState loadedState populated:`, loadedState.value);
 
   // Filter open file tabs based on current changes
   const currentChanges = props.changes ?? [];
@@ -480,20 +536,19 @@ function loadRunState(id: string | null | undefined) {
     validTabIds.push(`file:${fileId}`);
   }
 
-  console.log(`[PlanPanel] loadRunState validTabIds:`, validTabIds, 'loadedActiveTab:', loadedActiveTab);
   if (validTabIds.includes(loadedActiveTab)) {
     activeTab.value = loadedActiveTab;
   } else {
     activeTab.value = props.plan ? 'plan' : (props.agents?.length ? 'agents' : 'review');
   }
-  console.log(`[PlanPanel] loadRunState activeTab.value set to:`, activeTab.value);
 }
 
 watch(
   () => props.runId,
   async (newId) => {
-    console.log(`[PlanPanel] watch props.runId triggered: newId=${newId}`);
     isSwitchingRun.value = true;
+    openChangeAccordions.value = {};
+    changeDiffCache.clear();
     loadRunState(newId);
     await nextTick();
     isSwitchingRun.value = false;
@@ -501,7 +556,6 @@ watch(
     // Safety fallback: clear loadedState if watchers didn't trigger
     setTimeout(() => {
       if (loadedState.value) {
-        console.log(`[PlanPanel] watch props.runId safety timeout cleared loadedState`);
         loadedState.value = null;
       }
     }, 10000);
@@ -521,7 +575,6 @@ watch(
 watch(
   () => [plan.value, changes.value, agents.value] as const,
   async () => {
-    console.log(`[PlanPanel] watch plan/changes/agents triggered: loadedState exists=${!!loadedState.value}`);
     if (!loadedState.value) return;
 
     // Wait for auto-tab-switching watchers to finish their updates
@@ -530,7 +583,6 @@ watch(
     if (!loadedState.value) return;
 
     const state = loadedState.value;
-    console.log(`[PlanPanel] watch plan/changes/agents re-applying loadedState:`, state);
     
     // Filter open file tabs based on the actual loaded changes
     const actualOpenFileTabs = state.openFileTabs.filter(fileId => 
@@ -550,13 +602,11 @@ watch(
       validTabIds.push(`file:${fileId}`);
     }
     
-    console.log(`[PlanPanel] watch plan/changes/agents validation: validTabIds=`, validTabIds, 'target=', state.activeTab);
     if (validTabIds.includes(state.activeTab)) {
       activeTab.value = state.activeTab;
     } else {
       activeTab.value = plan.value ? 'plan' : (agents.value.length ? 'agents' : 'review');
     }
-    console.log(`[PlanPanel] watch plan/changes/agents activeTab set to:`, activeTab.value);
     
     loadedState.value = null;
   }
@@ -843,9 +893,9 @@ defineExpose({
                 />
 
                 <div
-                  v-else-if="child.type === 'assistant' && cleanMessageContent(child.message.content)"
+                  v-else-if="child.type === 'assistant' && cleanedMessageContent(child.message)"
                   class="coder-text markdown-body"
-                  v-html="renderMarkdown(cleanMessageContent(child.message.content), child.message.id)"
+                  v-html="renderMarkdown(cleanedMessageContent(child.message), child.message.id)"
                 ></div>
               </template>
             </div>
@@ -1015,33 +1065,19 @@ defineExpose({
                 </span>
                 <span class="git-file-title">
                   <span class="git-file-path" :title="file.path">{{ file.path }}</span>
-                  <span class="git-file-badge" :class="file.kind">{{ changeKindLabel(file.kind) }}</span>
+                  <span class="git-file-meta">
+                    <span v-if="file.added || file.deleted" class="git-file-stats">
+                      <span v-if="file.added" class="add">+{{ file.added }}</span>
+                      <span v-if="file.deleted" class="del">-{{ file.deleted }}</span>
+                    </span>
+                    <span class="git-file-badge" :class="file.kind">{{ changeKindLabel(file.kind) }}</span>
+                  </span>
                 </span>
               </button>
 
               <!-- Accordion Content (Diff View) -->
               <div v-show="file.isOpen" class="git-file-diff-container">
-                <div v-if="file.diffRows.length" class="diff-view">
-                  <div
-                    v-for="(row, index) in file.diffRows"
-                    :key="index"
-                    class="diff-row"
-                    :class="[row.type, { 'is-separator': row.isSeparator }]"
-                  >
-                    <template v-if="row.isSeparator">
-                      <span class="diff-line old separator-line">...</span>
-                      <span class="diff-line new separator-line">...</span>
-                      <span class="diff-mark"></span>
-                      <code class="separator-text">{{ row.text }}</code>
-                    </template>
-                    <template v-else>
-                      <span class="diff-line old">{{ row.oldNo ?? '' }}</span>
-                      <span class="diff-line new">{{ row.newNo ?? '' }}</span>
-                      <span class="diff-mark">{{ row.type === 'add' ? '+' : row.type === 'del' ? '-' : ' ' }}</span>
-                      <code>{{ row.text || ' ' }}</code>
-                    </template>
-                  </div>
-                </div>
+                <DiffView v-if="file.diffRows.length" :rows="file.diffRows" />
                 <p v-else class="panel-empty-small">
                   No changes in this file.
                 </p>
@@ -1053,24 +1089,57 @@ defineExpose({
           </p>
         </div>
 
-        <!-- Fallback original changes list for non-git workspaces -->
-        <div v-else-if="changes.length" class="change-list">
-          <button
+        <!-- Fallback for non-git workspaces: same accordion + inline diff layout -->
+        <div v-else-if="changes.length" class="git-diff-list">
+          <div
             v-for="change in changes"
             :key="change.id"
-            type="button"
-            class="change-row"
-            @click="openFile(change)"
+            class="git-file-accordion"
+            :class="{ collapsed: !isChangeOpen(change.id) }"
           >
-            <span class="change-main">
-              <span class="change-path" :title="change.displayPath">{{ compactReviewPath(change.displayPath) }}</span>
-              <span class="change-kind">{{ changeKindLabel(change.kind) }}</span>
-            </span>
-            <span class="change-stats">
-              <span v-if="change.added" class="add">+{{ change.added }}</span>
-              <span v-if="change.deleted" class="del">-{{ change.deleted }}</span>
-            </span>
-          </button>
+            <button
+              type="button"
+              class="git-file-header"
+              @click="toggleChangeAccordion(change.id)"
+            >
+              <span class="git-file-chevron" :class="{ rotated: !isChangeOpen(change.id) }">
+                <svg viewBox="0 0 16 16" width="10" height="10" fill="currentColor">
+                  <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                </svg>
+              </span>
+              <span class="git-file-title">
+                <span class="git-file-path" :title="change.displayPath">{{ compactReviewPath(change.displayPath) }}</span>
+                <span class="git-file-meta">
+                  <span v-if="change.added || change.deleted" class="git-file-stats">
+                    <span v-if="change.added" class="add">+{{ change.added }}</span>
+                    <span v-if="change.deleted" class="del">-{{ change.deleted }}</span>
+                  </span>
+                  <span class="git-file-badge" :class="change.kind">{{ changeKindLabel(change.kind) }}</span>
+                  <span
+                    class="git-file-open-tab"
+                    title="Open in tab"
+                    @click.stop="openFile(change)"
+                  >
+                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M6.5 3.5h-3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3M9.5 2.5h4v4M13.5 2.5 7 9" />
+                    </svg>
+                  </span>
+                </span>
+              </span>
+            </button>
+
+            <div v-show="isChangeOpen(change.id)" class="git-file-diff-container">
+              <div v-if="change.kind === 'moved'" class="rename-block">
+                <span>{{ change.oldText }}</span>
+                <span>-></span>
+                <span>{{ change.newText }}</span>
+              </div>
+              <DiffView v-else-if="diffRowsForChange(change).length" :rows="diffRowsForChange(change)" />
+              <p v-else class="panel-empty-small">
+                No inline diff is available for this change.
+              </p>
+            </div>
+          </div>
         </div>
 
 
@@ -1098,27 +1167,7 @@ defineExpose({
           <span>{{ activeChange.newText }}</span>
         </div>
 
-        <div v-else-if="activeDiffRows.length" class="diff-view">
-          <div
-            v-for="(row, index) in activeDiffRows"
-            :key="index"
-            class="diff-row"
-            :class="[row.type, { 'is-separator': row.isSeparator }]"
-          >
-            <template v-if="row.isSeparator">
-              <span class="diff-line old separator-line">...</span>
-              <span class="diff-line new separator-line">...</span>
-              <span class="diff-mark"></span>
-              <code class="separator-text">{{ row.text }}</code>
-            </template>
-            <template v-else>
-              <span class="diff-line old">{{ row.oldNo ?? '' }}</span>
-              <span class="diff-line new">{{ row.newNo ?? '' }}</span>
-              <span class="diff-mark">{{ row.type === 'add' ? '+' : row.type === 'del' ? '-' : ' ' }}</span>
-              <code>{{ row.text || ' ' }}</code>
-            </template>
-          </div>
-        </div>
+        <DiffView v-else-if="activeDiffRows.length" :rows="activeDiffRows" />
 
         <p v-else class="panel-empty">
           No inline diff is available for this change.
@@ -1625,58 +1674,6 @@ defineExpose({
 }
 
 .rename-block span {
-  overflow-wrap: anywhere;
-}
-
-.diff-view {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.diff-row,
-.diff-line,
-.diff-mark {
-  border-radius: 0 !important;
-}
-
-.diff-row {
-  display: grid;
-  grid-template-columns: 42px 42px 18px minmax(0, 1fr);
-  min-height: 24px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.76rem;
-  line-height: 1.45;
-}
-
-.diff-row.add {
-  background: var(--diff-add-bg);
-}
-
-.diff-row.del {
-  background: var(--diff-del-bg);
-}
-
-.diff-line,
-.diff-mark {
-  color: var(--faint);
-  user-select: none;
-  text-align: right;
-  padding: 3px 6px;
-  border-right: 1px solid var(--composer-menu-border);
-}
-
-.diff-mark {
-  text-align: center;
-}
-
-.diff-row code {
-  min-width: 0;
-  display: block;
-  padding: 3px 8px;
-  color: var(--text);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -2443,28 +2440,39 @@ defineExpose({
   color: var(--muted);
 }
 
-.diff-row.is-separator {
-  background: var(--shimmer-glow) !important;
-  color: var(--muted);
-  border-top: 1px solid var(--border-soft);
-  border-bottom: 1px solid var(--border-soft);
-  user-select: none;
+.git-file-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
-.diff-row.is-separator .separator-line {
-  background: var(--control-border) !important;
-  color: var(--muted) !important;
+.git-file-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
-  display: flex;
+  font-weight: 600;
+}
+
+.git-file-stats .add {
+  color: var(--success);
+}
+
+.git-file-stats .del {
+  color: var(--plan-del-color);
+}
+
+.git-file-open-tab {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 3px;
+  color: var(--muted);
+  transition: color 0.15s ease;
 }
 
-.diff-row.is-separator .separator-text {
-  color: var(--btn-primary-bg) !important;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-weight: 500;
-  font-size: 0.74rem;
-  padding-left: 8px;
+.git-file-open-tab:hover {
+  color: var(--text);
 }
 </style>

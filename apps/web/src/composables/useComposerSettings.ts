@@ -76,7 +76,28 @@ export function useComposerSettings(
     return val && REASONING_EFFORT_IDS.has(val as any) ? val : 'default';
   }
 
+  // Both the activeRunId and activeRun watchers call this, and every status
+  // update replaces the activeRun object — dedupe so a run switch loads once
+  // instead of twice and status churn doesn't re-read localStorage.
+  let lastSettingsLoadKey: string | null = null;
+
+  function settingsLoadKey(runId: string | null): string {
+    const run = runId && activeRun.value?.id === runId ? activeRun.value : null;
+    return [
+      runId ?? '',
+      run?.providerId ?? '',
+      run?.model ?? '',
+      run?.reasoningEffort ?? '',
+      run?.agentPreset ?? '',
+      run?.mode ?? ''
+    ].join('|');
+  }
+
   function loadSettingsForRun(runId: string | null) {
+    const loadKey = settingsLoadKey(runId);
+    if (loadKey === lastSettingsLoadKey) return;
+    lastSettingsLoadKey = loadKey;
+
     isLoadingSettings = true;
     try {
       if (runId) {

@@ -3,8 +3,6 @@ export interface DiffRow {
   oldNo: number | null;
   newNo: number | null;
   text: string;
-  isSeparator?: boolean;
-  skippedCount?: number;
 }
 
 /**
@@ -60,67 +58,5 @@ export function lineDiff(oldText: string, newText: string): DiffRow[] {
   return rows;
 }
 
-/**
- * Filters the diff rows to only include the changed lines plus a small window of context.
- * Replaces large blocks of unchanged lines with a separator.
- */
-export function filterDiffContext(rows: DiffRow[], contextSize = 3): DiffRow[] {
-  const n = rows.length;
-  const keep = new Array(n).fill(false);
-
-  // Mark context rows to keep around every add/del change
-  for (let i = 0; i < n; i++) {
-    if (rows[i].type === 'add' || rows[i].type === 'del') {
-      const start = Math.max(0, i - contextSize);
-      const end = Math.min(n - 1, i + contextSize);
-      for (let k = start; k <= end; k++) {
-        keep[k] = true;
-      }
-    }
-  }
-
-  const result: DiffRow[] = [];
-  let inSkippedBlock = false;
-  let skippedStart = 0;
-
-  for (let i = 0; i < n; i++) {
-    if (keep[i]) {
-      if (inSkippedBlock) {
-        const skippedCount = i - skippedStart;
-        if (skippedCount > 0) {
-          result.push({
-            type: 'context',
-            oldNo: null,
-            newNo: null,
-            text: `@@ ... Skip ${skippedCount} unchanged lines ... @@`,
-            isSeparator: true,
-            skippedCount
-          });
-        }
-        inSkippedBlock = false;
-      }
-      result.push(rows[i]);
-    } else {
-      if (!inSkippedBlock) {
-        inSkippedBlock = true;
-        skippedStart = i;
-      }
-    }
-  }
-
-  if (inSkippedBlock) {
-    const skippedCount = n - skippedStart;
-    if (skippedCount > 0) {
-      result.push({
-        type: 'context',
-        oldNo: null,
-        newNo: null,
-        text: `@@ ... Skip ${skippedCount} unchanged lines ... @@`,
-        isSeparator: true,
-        skippedCount
-      });
-    }
-  }
-
-  return result;
-}
+// Context collapsing lives in DiffView.vue, which keeps the full rows and
+// expands hidden ranges on click instead of discarding them here.

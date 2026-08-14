@@ -2,7 +2,8 @@
 import { ref, watch, nextTick, onUnmounted } from 'vue';
 import type { Run, Plan } from '@locagens/shared';
 import type { AgentSummary, MessageGroup } from '../lib/messageGroups';
-import { renderMarkdown, cleanMessageContent, formatSystemErrorMessage, capturePreScrollStates, restorePreScrollStates } from '../lib/markdown';
+import { renderMarkdown, formatSystemErrorMessage, capturePreScrollStates, restorePreScrollStates } from '../lib/markdown';
+import { cleanedMessageContent, extractPlanFromMessage, messageTokenEstimate } from '../lib/messageDerived';
 import { formatTime } from '../lib/format';
 import ToolGroup from './ToolGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
@@ -38,33 +39,34 @@ function copyTextWithStatus(value: string, messageId: string) {
   }, 2000);
 }
 
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  const charCount = text.length;
-  const wordCount = text.trim().split(/\s+/).length;
-  return Math.round(Math.max(charCount / 3.7, wordCount * 1.3));
-}
-
-function getMessageTokens(msg: any): number {
-  if (!msg) return 0;
-  return estimateTokens((msg.content || '') + (msg.reasoningContent || ''));
-}
-
 // User message collapse/expand states
 const expandedUserMessages = ref<Record<string, boolean>>({});
 const userMessageExpandable = ref<Record<string, boolean>>({});
 
 function checkBubbleHeight(el: HTMLElement | null, messageId: string) {
   if (!el) return;
+  // User message content never changes after send, so measure only once —
+  // reading scrollHeight forces a layout pass.
+  if (messageId in userMessageExpandable.value) return;
   const body = el.querySelector('.user-raw-message') as HTMLElement | null;
   if (!body) return;
-  
+
   // 3 lines * 1.55 line-height * 15px is around 70px.
   // We use 74px to be safe against rounding.
-  const isLong = body.scrollHeight > 74;
-  if (userMessageExpandable.value[messageId] !== isLong) {
-    userMessageExpandable.value[messageId] = isLong;
+  userMessageExpandable.value[messageId] = body.scrollHeight > 74;
+}
+
+// Stable per-message ref callbacks: an inline `:ref="(el) => ..."` closure gets
+// a new identity every render, which makes Vue re-invoke it on every patch.
+const bubbleRefCallbacks = new Map<string, (el: unknown) => void>();
+
+function bubbleRef(messageId: string) {
+  let callback = bubbleRefCallbacks.get(messageId);
+  if (!callback) {
+    callback = (el: unknown) => checkBubbleHeight(el as HTMLElement | null, messageId);
+    bubbleRefCallbacks.set(messageId, callback);
   }
+  return callback;
 }
 
 function handleUserMessageClick(event: MouseEvent, messageId: string) {
@@ -82,20 +84,19 @@ function handleUserMessageClick(event: MouseEvent, messageId: string) {
 watch(() => props.activeRun?.id, () => {
   expandedUserMessages.value = {};
   userMessageExpandable.value = {};
+  bubbleRefCallbacks.clear();
 });
 
 // Plan Accordion State
 const expandedPlans = ref<Record<string, boolean>>({});
 
 function togglePlan(messageId: string) {
-  expandedPlans.value[messageId] = !expandedPlans.value[messageId];
+  expandedPlans.value[messageId] = !(expandedPlans.value[messageId] ?? true);
 }
 
 function isPlanExpanded(messageId: string): boolean {
-  if (expandedPlans.value[messageId] === undefined) {
-    expandedPlans.value[messageId] = true;
-  }
-  return expandedPlans.value[messageId];
+  // Default to expanded without writing reactive state during render.
+  return expandedPlans.value[messageId] ?? true;
 }
 
 // Reasoning Accordion State (coordinated: newest open, older auto-collapsed).
@@ -151,11 +152,6 @@ watch(latestReasoningId, (newId, oldId) => {
   }
 });
 
-function extractPlan(content: string): string | null {
-  const match = content.match(/<plan>([\s\S]*?)<\/plan>/);
-  return match ? match[1].trim() : null;
-}
-
 import { computed } from 'vue';
 
 
@@ -186,8 +182,11 @@ watch(() => props.groupedMessages, () => {
     : true;
   const prevScrollTop = activeReasoningBodyBefore ? activeReasoningBodyBefore.scrollTop : 0;
 
-  // Capture all pre elements scroll states in the container
-  const preScrollStates = capturePreScrollStates(containerEl.value);
+  // Only the streaming (last) message's code blocks can change, so scope the
+  // scroll capture/restore to that message — measuring every pre in the thread
+  // forced a full layout pass per flush, growing with chat length.
+  const liveMessageId = props.groupedMessages[props.groupedMessages.length - 1]?.message.id;
+  const preScrollStates = capturePreScrollStates(containerEl.value, liveMessageId);
 
   nextTick(() => {
     // The live reasoning panel may sit in either an assistant message or a tool
@@ -202,8 +201,8 @@ watch(() => props.groupedMessages, () => {
       }
     }
 
-    // Restore pre scroll states in the container
-    restorePreScrollStates(containerEl.value, preScrollStates);
+    // Restore pre scroll states for the streaming message only
+    restorePreScrollStates(containerEl.value, preScrollStates, liveMessageId);
   });
 });
 
@@ -279,7 +278,7 @@ const formattedElapsedTime = computed(() => {
           'is-expandable': userMessageExpandable[activeRun?.id || ''] 
         }"
         @click="handleUserMessageClick($event, activeRun?.id || '')"
-        :ref="(el) => checkBubbleHeight(el as HTMLElement, activeRun?.id || '')"
+        :ref="bubbleRef(activeRun?.id || '')"
       >
         <div
           class="user-raw-message user-markdown-body"
@@ -338,7 +337,7 @@ const formattedElapsedTime = computed(() => {
             'is-expandable': userMessageExpandable[group.message.id] 
           }"
           @click="handleUserMessageClick($event, group.message.id)"
-          :ref="(el) => checkBubbleHeight(el as HTMLElement, group.message.id)"
+          :ref="bubbleRef(group.message.id)"
         >
           <div
             class="user-raw-message user-markdown-body"
@@ -417,7 +416,7 @@ const formattedElapsedTime = computed(() => {
         </div>
 
         <!-- AI Plan Accordion (hidden while the side plan panel is showing it) -->
-        <div v-if="extractPlan(group.message.content) && !props.planPanelOpen" class="plan-terminal-container">
+        <div v-if="extractPlanFromMessage(group.message) && !props.planPanelOpen" class="plan-terminal-container">
           <header class="terminal-header" @click="togglePlan(group.message.id + '-plan')">
             <div class="terminal-header-left">
               <svg class="header-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -435,7 +434,7 @@ const formattedElapsedTime = computed(() => {
             </button>
           </header>
           <div v-if="isPlanExpanded(group.message.id + '-plan')" class="terminal-body plan-body">
-            <pre class="plan-text">{{ extractPlan(group.message.content) }}</pre>
+            <pre class="plan-text">{{ extractPlanFromMessage(group.message) }}</pre>
           </div>
         </div>
 
@@ -450,7 +449,7 @@ const formattedElapsedTime = computed(() => {
 
         <div 
           class="markdown-body" 
-          v-html="renderMarkdown(cleanMessageContent(group.message.content), group.message.id)"
+          v-html="renderMarkdown(cleanedMessageContent(group.message), group.message.id)"
         ></div>
         <div class="assistant-response-footer" style="display: flex; align-items: center; gap: 8px; margin-top: 10px;">
           <button 
@@ -467,7 +466,7 @@ const formattedElapsedTime = computed(() => {
             </svg>
           </button>
           <span class="response-tokens-badge" style="font-size: 0.72rem; color: var(--faint); font-family: monospace; user-select: none;">
-            {{ getMessageTokens(group.message) }} tokens
+            {{ messageTokenEstimate(group.message) }} tokens
           </span>
           <span v-if="isRunning && idx === groupedMessages.length - 1" class="working-loader-text">
             <span>· Working on</span>

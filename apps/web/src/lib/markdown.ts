@@ -1,5 +1,41 @@
 import { Marked } from 'marked';
-import hljs from 'highlight.js';
+// The core build + explicit grammar registration keeps ~175 unused grammars
+// (roughly 70% of the app bundle) out of the build. Unregistered languages
+// degrade gracefully to plain escaped code blocks below.
+import hljs from 'highlight.js/lib/core';
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import json from 'highlight.js/lib/languages/json';
+import bash from 'highlight.js/lib/languages/bash';
+import shell from 'highlight.js/lib/languages/shell';
+import xml from 'highlight.js/lib/languages/xml';
+import css from 'highlight.js/lib/languages/css';
+import sql from 'highlight.js/lib/languages/sql';
+import java from 'highlight.js/lib/languages/java';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
+import go from 'highlight.js/lib/languages/go';
+import rust from 'highlight.js/lib/languages/rust';
+import yaml from 'highlight.js/lib/languages/yaml';
+import markdown from 'highlight.js/lib/languages/markdown';
+
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('shell', shell);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('sql', sql);
+hljs.registerLanguage('java', java);
+hljs.registerLanguage('c', c);
+hljs.registerLanguage('cpp', cpp);
+hljs.registerLanguage('go', go);
+hljs.registerLanguage('rust', rust);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('markdown', markdown);
 
 const marked = new Marked({ gfm: true, breaks: true });
 
@@ -93,15 +129,14 @@ marked.use({
 const markdownCache = new Map<string, { content: string; rendered: string }>();
 const MAX_CACHE_SIZE = 500;
 
-export function clearMarkdownCache(): void {
-  markdownCache.clear();
-}
-
 /** Renders markdown to HTML, falling back to raw text on parse errors. */
 export function renderMarkdown(content: string, idPrefix?: string): string {
   if (!content) return '';
 
-  const cacheKey = idPrefix ? `${idPrefix}:${content.length}` : null;
+  // One cache slot per idPrefix (message id): a streaming message overwrites its
+  // own slot instead of minting a new key per token, which used to flood the
+  // FIFO and evict every stable message's rendered HTML.
+  const cacheKey = idPrefix || null;
   if (cacheKey) {
     const cached = markdownCache.get(cacheKey);
     if (cached && cached.content === content) {
@@ -181,13 +216,18 @@ export interface PreScrollState {
 }
 
 /**
- * Captures scroll state of all pre elements inside a container.
+ * Captures scroll state of pre elements inside a container. When messageId is
+ * given, only that message's code blocks are measured (their block ids embed
+ * the message id, e.g. `<id>-code-0` / `thought-<id>-code-0`) — reading
+ * scrollHeight forces a synchronous layout, so during streaming the caller
+ * scopes this to the one message whose content can actually change.
  */
-export function capturePreScrollStates(container: HTMLElement | null): Map<string, PreScrollState> {
+export function capturePreScrollStates(container: HTMLElement | null, messageId?: string): Map<string, PreScrollState> {
   const states = new Map<string, PreScrollState>();
   if (!container) return states;
 
-  const preElements = container.querySelectorAll('pre[id]');
+  const selector = messageId ? `pre[id*="${CSS.escape(messageId)}"]` : 'pre[id]';
+  const preElements = container.querySelectorAll(selector);
   preElements.forEach((el) => {
     const pre = el as HTMLElement;
     const wasAtBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight <= 60;
@@ -203,12 +243,14 @@ export function capturePreScrollStates(container: HTMLElement | null): Map<strin
 }
 
 /**
- * Restores scroll state of all pre elements inside a container.
+ * Restores scroll state of pre elements inside a container, scoped the same
+ * way as capturePreScrollStates.
  */
-export function restorePreScrollStates(container: HTMLElement | null, states: Map<string, PreScrollState>) {
+export function restorePreScrollStates(container: HTMLElement | null, states: Map<string, PreScrollState>, messageId?: string) {
   if (!container) return;
 
-  const preElements = container.querySelectorAll('pre[id]');
+  const selector = messageId ? `pre[id*="${CSS.escape(messageId)}"]` : 'pre[id]';
+  const preElements = container.querySelectorAll(selector);
   preElements.forEach((el) => {
     const pre = el as HTMLElement;
     if (states.has(pre.id)) {

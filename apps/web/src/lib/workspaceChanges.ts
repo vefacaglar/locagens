@@ -1,5 +1,6 @@
 import type { RunMessage } from '@locagens/shared';
 import { lineDiff, type DiffRow } from './diff';
+import { parseToolCalls } from './messageGroups';
 
 export type WorkspaceChangeKind = 'created' | 'edited' | 'deleted' | 'moved';
 
@@ -177,8 +178,8 @@ export function collectWorkspaceChanges(messages: RunMessage[], projectPath?: st
     const message = messages[i];
     if (message.role !== 'assistant') continue;
 
-    const toolCalls = parseJson(message.rawResponse);
-    if (!Array.isArray(toolCalls) || toolCalls.length === 0) continue;
+    const toolCalls = parseToolCalls(message);
+    if (toolCalls.length === 0) continue;
 
     const toolResponses: RunMessage[] = [];
     let j = i + 1;
@@ -214,8 +215,9 @@ export function collectWorkspaceChanges(messages: RunMessage[], projectPath?: st
 export function hasWorkspaceChangeSignals(messages: RunMessage[]): boolean {
   for (const message of messages) {
     if (message.role !== 'assistant') continue;
-    const toolCalls = parseJson(message.rawResponse);
-    if (!Array.isArray(toolCalls)) continue;
+    // parseToolCalls is memoized per message, so this scan re-parses only the
+    // message that changed since the previous side-panel snapshot.
+    const toolCalls = parseToolCalls(message);
     if (toolCalls.some((toolCall: any) => CHANGE_TOOLS.has(toolCall?.function?.name))) {
       return true;
     }

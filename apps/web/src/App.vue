@@ -1,16 +1,21 @@
 <script setup lang="ts">
 import { useAppShell } from './composables/useAppShell';
 import type { Run } from '@locagens/shared';
+import { defineAsyncComponent } from 'vue';
 import AppSidebar from './components/AppSidebar.vue';
 import MessageThread from './components/MessageThread.vue';
 import ChatComposer from './components/ChatComposer.vue';
-import AddProjectModal from './components/AddProjectModal.vue';
-import SettingsScreen from './components/settings/SettingsScreen.vue';
-import AgentTaskList from './components/AgentTaskList.vue';
-import PlanPanel from './components/PlanPanel.vue';
-import UsageLogsPage from './components/UsageLogsPage.vue';
+
+// Demand-only surfaces (modals, settings, side panel, usage page) load as
+// separate chunks so first paint only pays for the always-visible shell.
+const AddProjectModal = defineAsyncComponent(() => import('./components/AddProjectModal.vue'));
+const SettingsScreen = defineAsyncComponent(() => import('./components/settings/SettingsScreen.vue'));
+const AgentTaskList = defineAsyncComponent(() => import('./components/AgentTaskList.vue'));
+const PlanPanel = defineAsyncComponent(() => import('./components/PlanPanel.vue'));
+const UsageLogsPage = defineAsyncComponent(() => import('./components/UsageLogsPage.vue'));
 import { collectWorkspaceChanges, hasWorkspaceChangeSignals } from './lib/workspaceChanges';
 import { collectAgentSummaries, collectAgentSummaryLinks } from './lib/messageGroups';
+import { extractTaskListFromMessage } from './lib/messageDerived';
 
 const {
   runs,
@@ -162,11 +167,13 @@ const runUsageTooltip = computed<string>(() => {
 const currentTaskList = computed<string | null>(() => {
   const list = messages.value;
   if (!list) return null;
+  // extractTaskListFromMessage is memoized per message object, so this scan
+  // only re-runs the regex for the one message that changed in a flush.
   for (let i = list.length - 1; i >= 0; i--) {
     const msg = list[i];
     if (msg.role !== 'assistant') continue;
-    const match = msg.content.match(/<task_list>([\s\S]*?)<\/task_list>/);
-    if (match) return match[1].trim();
+    const taskList = extractTaskListFromMessage(msg);
+    if (taskList) return taskList;
   }
   return null;
 });
@@ -583,6 +590,7 @@ onUnmounted(() => {
     <div v-if="sidePanelOpen" class="panel-backdrop" @click="sidePanelCollapsed = true"></div>
 
     <AddProjectModal
+      v-if="projects.showAddProjectModal.value"
       :show="projects.showAddProjectModal.value"
       :is-mac="isMac"
       :is-submitting="projects.isSubmittingProject.value"
@@ -594,6 +602,7 @@ onUnmounted(() => {
     />
 
     <SettingsScreen
+      v-if="permissions.showSettings.value"
       v-model:active-tab="settingsTab"
       :show="permissions.showSettings.value"
       :permissions="permissions.permissions.value"

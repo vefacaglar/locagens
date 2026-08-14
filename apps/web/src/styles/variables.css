@@ -284,4 +284,7 @@
   --agent-status-done-shadow: rgba(123, 216, 143, 0.1);
   --diff-add-bg: rgba(123, 216, 143, 0.08);
   --diff-del-bg: rgba(255, 138, 128, 0.08);
+  /* Stronger variants for character-level (inline) diff highlights */
+  --diff-add-hl: rgba(123, 216, 143, 0.22);
+  --diff-del-hl: rgba(255, 138, 128, 0.22);
 }

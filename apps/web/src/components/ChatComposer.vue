@@ -13,6 +13,7 @@ import type { AgentPreset } from '@locagens/shared';
 import ConfirmationCard from './ConfirmationCard.vue';
 import PermissionCard from './PermissionCard.vue';
 import QuestionCard from './QuestionCard.vue';
+import { messageTokenEstimate } from '../lib/messageDerived';
 
 const props = defineProps<{
   taskInput: string;
@@ -86,9 +87,10 @@ const draftTokens = computed(() => {
 const contextTokens = computed(() => {
   let total = 0; // system prompt estimate
   if (props.messages) {
+    // messageTokenEstimate is memoized per message object, so during streaming
+    // only the one changed message is re-tokenized instead of the whole chat.
     for (const msg of props.messages) {
-      if (msg.content) total += estimateTokens(msg.content);
-      if (msg.reasoningContent) total += estimateTokens(msg.reasoningContent);
+      total += messageTokenEstimate(msg);
     }
   }
   return total;

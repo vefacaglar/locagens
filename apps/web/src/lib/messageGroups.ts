@@ -1,5 +1,6 @@
 import type { RunMessage } from '@locagens/shared';
 import { formatJson } from './format';
+import { messageTokenEstimate } from './messageDerived';
 
 export interface MessageGroup {
   type: 'user' | 'assistant' | 'tool_group' | 'system' | 'coder_group';
@@ -31,7 +32,7 @@ export interface AgentSummary {
 // keyed by the message object is both correct and self-cleaning.
 const parsedToolCallsCache = new WeakMap<RunMessage, any[]>();
 
-function parseToolCalls(message: RunMessage): any[] {
+export function parseToolCalls(message: RunMessage): any[] {
   if (!message.rawResponse) return [];
   const cached = parsedToolCallsCache.get(message);
   if (cached) return cached;
@@ -104,9 +105,7 @@ function collectAgentSummariesInternal(groups: MessageGroup[], isRunning: boolea
         roleLabel: role === 'utility' ? 'Utility' : 'Coder',
         model,
         status: isRunning && index > lastNonCoderIdx ? 'running' : 'done',
-        tokenEstimate: children.reduce((sum, child) => sum + estimateTokens(
-          `${child.message.content || ''}${child.message.reasoningContent || ''}`
-        ), 0),
+        tokenEstimate: children.reduce((sum, child) => sum + messageTokenEstimate(child.message), 0),
         toolUseCount: children.reduce((sum, child) => {
           if (child.type !== 'tool_group') return sum;
           return sum + Math.max(child.toolCalls.length, 1);
@@ -123,13 +122,6 @@ export function lastNonCoderIndex(groups: MessageGroup[]): number {
   return -1;
 }
 
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  const charCount = text.length;
-  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-  return Math.round(Math.max(charCount / 3.7, wordCount * 1.3));
-}
-
 /**
  * Collapses runs of consecutive coder (sub-agent) groups into per-sub-agent
  * `coder_group` boxes — one window per delegated sub-agent — so each coder gets
@@ -143,6 +135,57 @@ function estimateTokens(text: string): number {
  */
 function isSubAgent(group: MessageGroup): boolean {
   return group.message.agentRole === 'coder' || group.message.agentRole === 'utility';
+}
+
+// Group objects are memoized so that re-grouping (which happens on every
+// streaming flush) hands unchanged groups back with the SAME object identity.
+// That lets Vue's props comparison bail out, so only the group containing the
+// streaming message actually re-renders instead of every ToolGroup in the
+// thread. Keys are the immutably-replaced message/group objects, so the caches
+// are self-cleaning (same invariant as parsedToolCallsCache above).
+const simpleGroupCache = new WeakMap<RunMessage, MessageGroup>();
+const toolGroupCache = new WeakMap<RunMessage, { responses: RunMessage[]; group: MessageGroup }>();
+const coderGroupCache = new WeakMap<MessageGroup, { children: MessageGroup[]; group: MessageGroup }>();
+
+function sameItems<T>(a: T[], b: T[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function makeSimpleGroup(type: MessageGroup['type'], msg: RunMessage, toolCalls: any[] = []): MessageGroup {
+  const cached = simpleGroupCache.get(msg);
+  if (cached && cached.type === type) return cached;
+  const group: MessageGroup = { type, id: msg.id, message: msg, toolCalls, toolResponses: [] };
+  simpleGroupCache.set(msg, group);
+  return group;
+}
+
+function makeToolGroup(msg: RunMessage, toolCalls: any[], toolResponses: RunMessage[]): MessageGroup {
+  const cached = toolGroupCache.get(msg);
+  if (cached && sameItems(cached.responses, toolResponses)) return cached.group;
+  const group: MessageGroup = { type: 'tool_group', id: msg.id, message: msg, toolCalls, toolResponses };
+  toolGroupCache.set(msg, { responses: toolResponses, group });
+  return group;
+}
+
+function makeCoderGroup(children: MessageGroup[]): MessageGroup {
+  const lead = children[0];
+  const cached = coderGroupCache.get(lead);
+  if (cached && sameItems(cached.children, children)) return cached.group;
+  const group: MessageGroup = {
+    type: 'coder_group',
+    id: `coder-${lead.id}`,
+    message: lead.message,
+    toolCalls: [],
+    toolResponses: [],
+    children,
+    title: lead.message.agentName || undefined
+  };
+  coderGroupCache.set(lead, { children, group });
+  return group;
 }
 
 function foldCoderGroups(flat: MessageGroup[]): MessageGroup[] {
@@ -168,16 +211,7 @@ function foldCoderGroups(flat: MessageGroup[]): MessageGroup[] {
       }
 
       for (const children of buckets.values()) {
-        const name = children[0].message.agentName;
-        result.push({
-          type: 'coder_group',
-          id: `coder-${children[0].id}`,
-          message: children[0].message,
-          toolCalls: [],
-          toolResponses: [],
-          children,
-          title: name || undefined
-        });
+        result.push(makeCoderGroup(children));
       }
     } else {
       result.push(flat[i]);
@@ -195,10 +229,10 @@ function buildFlatGroups(messages: RunMessage[]): MessageGroup[] {
     const msg = messages[i];
 
     if (msg.role === 'user') {
-      result.push({ type: 'user', id: msg.id, message: msg, toolCalls: [], toolResponses: [] });
+      result.push(makeSimpleGroup('user', msg));
       i++;
     } else if (msg.role === 'system') {
-      result.push({ type: 'system', id: msg.id, message: msg, toolCalls: [], toolResponses: [] });
+      result.push(makeSimpleGroup('system', msg));
       i++;
     } else if (msg.role === 'assistant') {
       const toolCalls = parseToolCalls(msg);
@@ -210,20 +244,14 @@ function buildFlatGroups(messages: RunMessage[]): MessageGroup[] {
           j++;
         }
 
-        result.push({ type: 'tool_group', id: msg.id, message: msg, toolCalls, toolResponses });
+        result.push(makeToolGroup(msg, toolCalls, toolResponses));
         i = j;
       } else {
-        result.push({ type: 'assistant', id: msg.id, message: msg, toolCalls: [], toolResponses: [] });
+        result.push(makeSimpleGroup('assistant', msg));
         i++;
       }
     } else if (msg.role === 'tool') {
-      result.push({
-        type: 'tool_group',
-        id: msg.id,
-        message: msg,
-        toolCalls: [{ function: { name: 'Workspace Tool Output', arguments: '{}' } }],
-        toolResponses: [msg]
-      });
+      result.push(makeToolGroup(msg, [{ function: { name: 'Workspace Tool Output', arguments: '{}' } }], [msg]));
       i++;
     } else {
       i++;

@@ -134,11 +134,15 @@ export function useAppShell() {
   }
 
   async function initialize() {
-    await chat.loadProviders();
-    await loadAgentPresets();
+    // These four loads are independent — fetch them in one parallel wave so
+    // startup costs one round-trip instead of four sequential ones.
+    await Promise.all([
+      chat.loadProviders(),
+      loadAgentPresets(),
+      projects.loadProjects(),
+      chat.loadRuns()
+    ]);
     settings.ensureDefaultModel();
-    await projects.loadProjects();
-    await chat.loadRuns();
 
     if (runs.value.length > 0) {
       const storedRunId = localStorage.getItem('activeRunId');
