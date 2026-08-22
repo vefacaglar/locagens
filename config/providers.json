@@ -1,97 +1,5 @@
 {
   "providers": {
-    "openai": {
-      "type": "openai-compatible",
-      "displayName": "OpenAI",
-      "baseUrl": "https://api.openai.com/v1",
-      "models": [
-        "gpt-5.5"
-      ],
-      "modelSettings": {
-        "gpt-5.5": {
-          "reasoning": {
-            "style": "openai-chat",
-            "options": [
-              {
-                "id": "low",
-                "value": "low"
-              },
-              {
-                "id": "medium",
-                "value": "medium"
-              },
-              {
-                "id": "high",
-                "value": "high"
-              }
-            ]
-          },
-          "reasoningEfforts": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "pricing": {
-            "tiers": [
-              {
-                "inputRate": 5,
-                "outputRate": 40,
-                "cacheReadRate": 0.5
-              }
-            ]
-          },
-          "contextLimit": 400000
-        }
-      }
-    },
-    "anthropic": {
-      "type": "anthropic",
-      "displayName": "Anthropic",
-      "baseUrl": "https://api.anthropic.com",
-      "models": [
-        "claude-sonnet-4-6",
-        "claude-opus-4-8",
-        "claude-haiku-4-5-20251001"
-      ],
-      "modelSettings": {
-        "claude-sonnet-4-6": {
-          "pricing": {
-            "tiers": [
-              {
-                "inputRate": 3,
-                "outputRate": 15,
-                "cacheReadRate": 0.3,
-                "cacheWriteRate": 3.75
-              }
-            ]
-          },
-          "contextLimit": 1000000
-        },
-        "claude-opus-4-8": {
-          "pricing": {
-            "tiers": [
-              {
-                "inputRate": 5,
-                "outputRate": 25,
-                "cacheReadRate": 0.5,
-                "cacheWriteRate": 6.25
-              }
-            ]
-          },
-          "contextLimit": 1000000
-        },
-        "claude-haiku-4-5-20251001": {
-          "pricing": {
-            "tiers": [
-              {
-                "inputRate": 1,
-                "outputRate": 5
-              }
-            ]
-          }
-        }
-      }
-    },
     "opencode": {
       "type": "openai-compatible",
       "displayName": "OpenCode",
@@ -558,7 +466,8 @@
           },
           "contextLimit": 1000000
         }
-      }
+      },
+      "apiKeyRef": "macos-keychain:opencode-go-anthropic"
     }
   },
   "agentPresets": {
