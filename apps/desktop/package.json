@@ -44,8 +44,8 @@
         "to": "api/server.bundle.cjs"
       },
       {
-        "from": "../db-writer/dist/db-writer",
-        "to": "db-writer/db-writer"
+        "from": "../db-writer/dist/db-writer.cjs",
+        "to": "db-writer/db-writer.cjs"
       },
       {
         "from": "../../config/providers.json",

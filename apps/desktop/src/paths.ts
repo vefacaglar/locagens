@@ -49,9 +49,9 @@ export function backendScript(): string {
   return path.join(process.resourcesPath, "api", "server.bundle.cjs");
 }
 
-/** Bundled Go SQLite writer sidecar (prod only). */
+/** Bundled Node.js SQLite writer sidecar script (prod only). */
 export function dbWriterBinary(): string {
-  return path.join(process.resourcesPath, "db-writer", "db-writer");
+  return path.join(process.resourcesPath, "db-writer", "db-writer.cjs");
 }
 
 export function sandboxRuntimeDir(): string {

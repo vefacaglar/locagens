@@ -11,7 +11,7 @@
     "dev:web": "pnpm --filter @locagens/web dev",
     "dev": "pnpm --recursive --parallel dev",
     "dev:desktop": "pnpm --filter @locagens/desktop start",
-    "build:db-writer": "mkdir -p .locagens-dev/go-cache && GOCACHE=\"$PWD/.locagens-dev/go-cache\" go -C apps/db-writer build -o dist/db-writer .",
+    "build:db-writer": "pnpm --filter @locagens/db-writer build",
     "build": "pnpm --recursive build",
     "dist": "pnpm run build:db-writer && pnpm --filter @locagens/shared build && pnpm --filter @locagens/web build && pnpm --filter @locagens/api run build:bundle && pnpm --filter @locagens/desktop run dist",
     "clean": "pnpm --recursive exec rm -rf dist node_modules"

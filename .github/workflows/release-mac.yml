@@ -43,12 +43,6 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: false
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -85,7 +79,7 @@ jobs:
             }
           "
 
-      - name: Build all packages (Go + web + api + Electron)
+      - name: Build all packages (db-writer + web + api + Electron)
         run: pnpm dist
 
       - name: List produced DMG

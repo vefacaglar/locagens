@@ -230,6 +230,6 @@ runs ──┬── messages     (1:N via run_id)
 
 - All timestamp columns use ISO-8601 text format (`TEXT`).
 - SQLite is configured with `busy_timeout = 10000`, `journal_mode = WAL`, and `synchronous = NORMAL` for concurrency.
-- A `DbWriterClient` background writer is used when not in `:memory:` mode to serialise writes.
+- A `DbWriterClient` background writer (the `@locagens/db-writer` Node.js sidecar process in `apps/db-writer`) is used when not in `:memory:` mode to serialise writes.
 - The `runs` table has a startup cleanup routine: runs stuck in `'created'`, `'generating'`, or `'awaiting_permission'` are marked `'failed'` and a system message is inserted.
 - Migration columns are added idempotently via `ALTER TABLE … ADD COLUMN` wrapped in try/catch.

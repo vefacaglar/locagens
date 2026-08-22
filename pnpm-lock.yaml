@@ -40,6 +40,21 @@ importers:
         specifier: ^5.4.5
         version: 5.9.3
 
+  apps/db-writer:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      esbuild:
+        specifier: ^0.28.0
+        version: 0.28.0
+      tsx:
+        specifier: ^4.7.1
+        version: 4.22.4
+      typescript:
+        specifier: ^5.4.5
+        version: 5.9.3
+
   apps/desktop:
     devDependencies:
       '@types/node':
@@ -2688,7 +2703,7 @@ snapshots:
 
   '@types/yauzl@2.10.3':
     dependencies:
-      '@types/node': 24.13.0
+      '@types/node': 22.19.19
     optional: true
 
   '@vitejs/plugin-vue@6.0.7(vite@8.0.16(@types/node@24.13.0)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.4))(vue@3.5.35(typescript@6.0.3))':

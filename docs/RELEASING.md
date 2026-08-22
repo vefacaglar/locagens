@@ -21,7 +21,7 @@ En temiz yol. Hem DMG üretilir hem de GitHub Release otomatik oluşturulur.
    git push origin v0.2.0
    ```
 4. GitHub Actions otomatik olarak tetiklenir:
-   - Go binary, shared paket, web ve API bundle derlenir
+   - db-writer (Node.js sidecar), shared paket, web ve API bundle derlenir
    - electron-builder DMG üretir
    - DMG dosyası yeni oluşturulan GitHub Release'e eklenir
    - Sürüm notları otomatik üretilir

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -28,12 +29,14 @@ function findWorkspaceRoot(): string {
 }
 
 function bundledWriterPath(): string | null {
-  const candidates = [
-    process.env.LOCAGENS_DB_WRITER_PATH,
-    process.env.LOCAGENS_DB_WRITER_PATH_ARM64,
-    process.env.LOCAGENS_DB_WRITER_PATH_X64
-  ].filter((p): p is string => !!p);
-  return candidates.find(p => fs.existsSync(p)) ?? null;
+  const explicit = process.env.LOCAGENS_DB_WRITER_PATH;
+  return explicit && fs.existsSync(explicit) ? explicit : null;
+}
+
+/** Resolves the tsx CLI shipped with the db-writer package (dev only). */
+function devTsxCli(wsRoot: string): string {
+  const requireFromWriter = createRequire(path.join(wsRoot, "apps/db-writer/package.json"));
+  return requireFromWriter.resolve("tsx/cli");
 }
 
 export class DbWriterClient {
@@ -153,21 +156,19 @@ export class DbWriterClient {
   private ensureStarted(): ChildProcessWithoutNullStreams {
     if (this.child && !this.child.killed) return this.child;
 
+    // The writer is a Node.js sidecar. Prod passes the bundled script via
+    // LOCAGENS_DB_WRITER_PATH; dev runs the TypeScript source through tsx.
+    // process.execPath is the Electron binary in packaged builds, so
+    // ELECTRON_RUN_AS_NODE makes it behave as plain Node (harmless on real Node).
     const explicit = bundledWriterPath();
-    const wsRoot = findWorkspaceRoot();
-    const command = explicit ?? "go";
-    const args = explicit ? [] : ["run", "."];
-    const cwd = explicit ? undefined : path.join(wsRoot, "apps/db-writer");
-    const goCache = process.env.GOCACHE || path.join(wsRoot, ".locagens-dev", "go-cache");
-    if (!explicit) {
-      fs.mkdirSync(goCache, { recursive: true });
-    }
+    const args = explicit
+      ? [explicit]
+      : [devTsxCli(findWorkspaceRoot()), path.join(findWorkspaceRoot(), "apps/db-writer/src/worker.ts")];
 
-    const child = spawn(command, args, {
-      cwd,
+    const child = spawn(process.execPath, args, {
       env: {
         ...process.env,
-        GOCACHE: goCache,
+        ELECTRON_RUN_AS_NODE: "1",
         LOCAGENS_DB_PATH: this.dbPath
       },
       stdio: ["pipe", "pipe", "pipe"]
