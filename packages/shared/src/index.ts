@@ -338,6 +338,25 @@ export interface SecurityStatus {
   };
 }
 
+// Skills are specialized instruction packs (SKILL.md) the main agent can load
+// on demand via load_skill. Discovered from user + project skill directories.
+export type SkillSource = "project" | "user";
+
+export interface SkillSummary {
+  name: string;
+  description: string;
+  source: SkillSource;
+}
+
+/** Settings → Skills list payload (catalog + folder roots for Open folder). */
+export interface SkillsListResponse {
+  skills: SkillSummary[];
+  roots: {
+    user: string;
+    project: string | null;
+  };
+}
+
 // "global" memories apply to every project; "project" memories only to one path.
 export type MemoryScope = "global" | "project";
 

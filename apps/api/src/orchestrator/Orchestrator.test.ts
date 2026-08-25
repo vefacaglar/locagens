@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert";
@@ -20,6 +21,7 @@ import {
   commandScansOutsideWorkspace,
   executeWorkspaceToolAsync,
   REMEMBER_TOOL,
+  LOAD_SKILL_TOOL,
   SET_TITLE_TOOL,
   UPDATE_PLAN_TOOL,
   WORKSPACE_TOOLS
@@ -305,6 +307,7 @@ test("Orchestrator Integration Tests", async (t) => {
       SET_TITLE_TOOL,
       ASK_QUESTION_TOOL,
       REMEMBER_TOOL,
+      LOAD_SKILL_TOOL,
       DELEGATE_TASKS_TOOL,
       DELEGATE_UTILITY_TOOL
     ];
@@ -1303,6 +1306,95 @@ test("Orchestrator Integration Tests", async (t) => {
 
     assert.ok(systemPromptUsed.includes("REMEMBERED CONTEXT"));
     assert.ok(systemPromptUsed.includes("Prefers 2-space indentation."));
+  });
+
+  await t.test("Orchestrator - load_skill returns body and catalog appears in prompt", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-orch-skill-"));
+    const userSkills = path.join(tmp, "skills");
+    const skillDir = path.join(userSkills, "demo-skill");
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      `---\nname: demo-skill\ndescription: "Demo skill for tests. USE FOR: demo."\n---\n# Demo\nFollow these steps.\n`,
+      "utf-8"
+    );
+
+    const { SkillRegistry } = await import("./skills/index.js");
+    const registry = new ProviderRegistry(testConfigPath);
+    const runRepo = new RunRepository(db);
+    const messageRepo = new MessageRepository(db);
+    const orchestrator = new Orchestrator(
+      runRepo,
+      messageRepo,
+      registry,
+      new PlanRepository(db),
+      new MemoryRepository(db),
+      new UsageLogRepository(db),
+      new SkillRegistry(userSkills)
+    );
+
+    const runId = "run-test-load-skill";
+    await runRepo.create({
+      id: runId,
+      title: "Load skill",
+      task: "Use the demo skill",
+      status: "created",
+      providerId: "test-provider",
+      providerDisplayName: "Test Provider",
+      model: "model-1",
+      mode: "accept_edits",
+      projectPath: process.cwd(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    let systemPromptUsed = "";
+    let callCount = 0;
+    globalThis.fetch = async (_url: any, options: any) => {
+      callCount++;
+      const parsed = JSON.parse(options.body);
+      const systemMessage = parsed.messages.find((m: any) => m.role === "system");
+      if (systemMessage) systemPromptUsed = systemMessage.content;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: "Loading skill.",
+                tool_calls: [{
+                  id: "call_load_skill_1",
+                  type: "function",
+                  function: {
+                    name: "load_skill",
+                    arguments: JSON.stringify({ name: "demo-skill" })
+                  }
+                }]
+              }
+            }]
+          })
+        } as any;
+      }
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { role: "assistant", content: "Done." } }] })
+      } as any;
+    };
+
+    await orchestrator.run(runId);
+
+    assert.ok(systemPromptUsed.includes("AVAILABLE SKILLS"));
+    assert.ok(systemPromptUsed.includes("demo-skill"));
+
+    const toolMsg = messageRepo.listByRunId(runId).find(m => m.role === "tool");
+    assert.ok(toolMsg);
+    const result = JSON.parse(toolMsg!.content);
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.name, "demo-skill");
+    assert.match(result.content, /Follow these steps/);
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 
   await t.test("Orchestrator - architect is blocked from executing delete_file directly when preset is active", async () => {

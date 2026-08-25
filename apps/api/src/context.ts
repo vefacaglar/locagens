@@ -18,6 +18,7 @@ import {
   IUsageLogRepository
 } from "./database/repositories.js";
 import { Orchestrator } from "./orchestrator/Orchestrator.js";
+import { SkillRegistry } from "./orchestrator/skills/index.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
 import { requireRegisteredProject } from "./security/projectPaths.js";
 
@@ -35,6 +36,7 @@ export interface AppContext {
   memoryRepo: IMemoryRepository;
   usageLogRepo: IUsageLogRepository;
   orchestrator: Orchestrator;
+  skillRegistry: SkillRegistry;
   settingsStore: AppSettingsStore;
   defaultProjectPath: string;
 }
@@ -48,7 +50,8 @@ export function createAppContext(): AppContext {
   const planRepo = new PlanRepository(db);
   const memoryRepo = new MemoryRepository(db);
   const usageLogRepo = new UsageLogRepository(db);
-  const orchestrator = new Orchestrator(runRepo, messageRepo, registry, planRepo, memoryRepo, usageLogRepo);
+  const skillRegistry = new SkillRegistry();
+  const orchestrator = new Orchestrator(runRepo, messageRepo, registry, planRepo, memoryRepo, usageLogRepo, skillRegistry);
   const settingsStore = new AppSettingsStore();
 
   return {
@@ -61,6 +64,7 @@ export function createAppContext(): AppContext {
     memoryRepo,
     usageLogRepo,
     orchestrator,
+    skillRegistry,
     settingsStore,
     defaultProjectPath: process.cwd()
   };

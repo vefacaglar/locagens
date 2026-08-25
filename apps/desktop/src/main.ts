@@ -129,6 +129,24 @@ ipcMain.handle("locagens:select-directory", async (event) => {
   return { path: selectedPath, name: path.basename(selectedPath) || "Workspace" };
 });
 
+// Opens a local folder/file in the OS file manager. Path must be absolute and
+// exist; the API only hands the renderer allowlisted skill (or similar) roots.
+ipcMain.handle("locagens:open-path", async (_event, targetPath: unknown) => {
+  if (typeof targetPath !== "string" || !targetPath.trim()) {
+    throw new Error("Path is required.");
+  }
+  const resolved = path.resolve(targetPath.trim());
+  if (!path.isAbsolute(resolved) || resolved.includes("\0")) {
+    throw new Error("Invalid path.");
+  }
+  if (!fs.existsSync(resolved)) {
+    throw new Error("Path does not exist.");
+  }
+  const err = await shell.openPath(resolved);
+  if (err) throw new Error(err);
+  return { ok: true as const };
+});
+
 function validateApiPath(value: unknown): string {
   const apiPath = String(value || "");
   if (!apiPath.startsWith("/api/") || /[\r\n\\]/.test(apiPath) || apiPath.includes("://")) {

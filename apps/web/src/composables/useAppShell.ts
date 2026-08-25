@@ -7,6 +7,7 @@ import { useComposerSettings } from './useComposerSettings';
 import { useProjects } from './useProjects';
 import { usePermissions } from './usePermissions';
 import { useMemories } from './useMemories';
+import { useSkills } from './useSkills';
 import { useAsyncResource } from './useAsyncResource';
 import { ACTIVE_STATUSES } from '../lib/format';
 import { STORAGE_KEYS } from '../lib/storageKeys';
@@ -50,6 +51,7 @@ export function useAppShell() {
   const projects = useProjects(runs);
   const permissions = usePermissions();
   const memories = useMemories();
+  const skills = useSkills();
 
   // Opening the settings screen loads all settings tabs so they are ready when
   // the user switches between them.
@@ -58,6 +60,7 @@ export function useAppShell() {
     await Promise.all([
       permissions.loadPermissions(),
       memories.loadMemories(),
+      skills.loadSkills(projects.activeProjectPath.value || undefined),
       loadProvidersConfig(),
       loadAgentPresets()
     ]);
@@ -173,6 +176,7 @@ export function useAppShell() {
     projects,
     permissions,
     memories,
+    skills,
     showSettings,
     openSettings,
     closeSettings,

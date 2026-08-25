@@ -12,5 +12,6 @@ export {
   formatCoderMemoryContext,
   formatMemoryContext,
   formatActivePlan,
+  formatSkillCatalog,
   getModeStrategy
 } from "./prompts/index.js";

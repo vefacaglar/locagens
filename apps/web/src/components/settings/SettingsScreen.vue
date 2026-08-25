@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset } from '@locagens/shared';
+import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset, SkillSummary } from '@locagens/shared';
 import { useIsMobile } from '../../composables/useIsMobile';
 import PermissionsTab from './PermissionsTab.vue';
 import ProvidersTab from './ProvidersTab.vue';
 import AgentPresetsTab from './AgentPresetsTab.vue';
 import MemoryTab from './MemoryTab.vue';
+import SkillsTab from './SkillsTab.vue';
 import ServerTab from './ServerTab.vue';
 
 const props = defineProps<{
@@ -18,6 +19,12 @@ const props = defineProps<{
   presets: AgentPreset[];
   memories: Memory[];
   memoriesLoading: boolean;
+  skills: SkillSummary[];
+  skillsLoading: boolean;
+  skillsUserRoot: string;
+  skillsProjectRoot: string | null;
+  skillsError?: string | null;
+  skillsStatusMessage?: string | null;
   activeProjectPath: string;
   activeProjectName: string;
   activeTab?: TabId;
@@ -33,12 +40,15 @@ const emit = defineEmits<{
   (e: 'update-memory', payload: { id: number; content: string }): void;
   (e: 'delete-memory', id: number): void;
   (e: 'clear-memories'): void;
+  (e: 'refresh-skills'): void;
+  (e: 'open-skills-folder', target: 'user' | 'project'): void;
   (e: 'update:activeTab', value: TabId): void;
 }>();
 
 const TABS = [
   { id: 'permissions', label: 'Permissions' },
   { id: 'memory', label: 'Memory' },
+  { id: 'skills', label: 'Skills' },
   { id: 'providers', label: 'Providers' },
   { id: 'agents', label: 'Agents' },
   { id: 'server', label: 'Server' }
@@ -173,6 +183,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 @update="emit('update-memory', $event)"
                 @delete="emit('delete-memory', $event)"
                 @clear-all="emit('clear-memories')"
+              />
+              <SkillsTab
+                v-else-if="localActiveTab === 'skills'"
+                :skills="skills"
+                :is-loading="skillsLoading"
+                :user-root="skillsUserRoot"
+                :project-root="skillsProjectRoot"
+                :active-project-path="activeProjectPath"
+                :active-project-name="activeProjectName"
+                :error="skillsError"
+                :status-message="skillsStatusMessage"
+                @refresh="emit('refresh-skills')"
+                @open-folder="emit('open-skills-folder', $event)"
               />
               <ProvidersTab
                 v-else-if="localActiveTab === 'providers'"

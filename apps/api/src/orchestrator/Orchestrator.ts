@@ -2,10 +2,11 @@ import type { Run, RunMessage, ChatMessage } from "@locagens/shared";
 import type { IRunRepository, IMessageRepository, IPlanRepository, IMemoryRepository, IUsageLogRepository } from "../database/repositories.js";
 import { ProviderRegistry } from "../providers/ProviderRegistry.js";
 import { eventBus } from "./eventBus.js";
-import { buildSystemPrompt, formatMemoryContext, formatActivePlan, getModeStrategy } from "./systemPrompt.js";
+import { buildSystemPrompt, formatMemoryContext, formatActivePlan, formatSkillCatalog, getModeStrategy } from "./systemPrompt.js";
 import { DELEGATE_TASKS_TOOL, DELEGATE_UTILITY_TOOL } from "./workspaceTools.js";
 import { availableSchemas } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
+import { SkillRegistry, type DiscoveredSkill } from "./skills/index.js";
 import { RunMessageStream } from "./RunMessageStream.js";
 import { PermissionCoordinator, type PermissionDecision } from "./PermissionCoordinator.js";
 import { QuestionCoordinator } from "./QuestionCoordinator.js";
@@ -24,12 +25,16 @@ export class Orchestrator {
   // ask_user_question flow (pause the run, collect the user's answer).
   private questions: QuestionCoordinator;
   // The capability surface passed to orchestrator-native tool handlers
-  // (set_chat_title / update_plan / ask_user_question / remember).
+  // (set_chat_title / update_plan / ask_user_question / remember / load_skill).
   private toolContext: OrchestratorToolContext;
   // The shared model-agnostic generation loop (main agent + every sub-agent).
   private agentLoop: AgentLoop;
   // Runs the architect's delegate_tasks / delegate_to_utility sub-agent fan-out.
   private delegation: DelegationCoordinator;
+  // Discovers SKILL.md packs for the main agent (catalog + load_skill).
+  private skillRegistry: SkillRegistry;
+  // Skills discovered for the in-flight drive(); empty when idle.
+  private driveSkills: DiscoveredSkill[] = [];
 
   constructor(
     private runRepo: IRunRepository,
@@ -37,8 +42,10 @@ export class Orchestrator {
     private registry: ProviderRegistry,
     private planRepo: IPlanRepository,
     private memoryRepo: IMemoryRepository,
-    private usageLogRepo: IUsageLogRepository
+    private usageLogRepo: IUsageLogRepository,
+    skillRegistry?: SkillRegistry
   ) {
+    this.skillRegistry = skillRegistry ?? new SkillRegistry();
     this.messages = new RunMessageStream(this.runRepo, this.messageRepo);
     this.permissions = new PermissionCoordinator(this.activeRuns, this.messages);
     this.questions = new QuestionCoordinator(this.activeRuns, this.messages);
@@ -47,6 +54,7 @@ export class Orchestrator {
       planRepo: this.planRepo,
       memoryRepo: this.memoryRepo,
       eventBus,
+      getSkills: () => this.driveSkills,
       requestUserAnswer: (runId, questions) => this.questions.request(runId, questions),
       isActive: (runId) => this.activeRuns.has(runId),
       setGenerating: (runId) => this.messages.emitStatus(runId, "generating")
@@ -212,6 +220,11 @@ export class Orchestrator {
       const activePlan = strategy.allowsMutation ? this.planRepo.getActive(runId) : null;
       const planContext = formatActivePlan(activePlan);
 
+      // Skills: name+description catalog in the prompt; full body via load_skill.
+      // Fresh discover per drive so new SKILL.md files appear between turns.
+      this.driveSkills = this.skillRegistry.discover(run.projectPath);
+      const skillCatalog = formatSkillCatalog(this.driveSkills);
+
       const systemPrompt = buildSystemPrompt({
         projectName: run.projectName,
         projectPath: run.projectPath,
@@ -219,7 +232,8 @@ export class Orchestrator {
         shouldReadProjectGuidance: run.mode !== "chat" && shouldReadProjectGuidance,
         delegation,
         memoryContext,
-        planContext
+        planContext,
+        skillCatalog
       });
 
       // When an approved plan exists, implementation is clearly expected. Weak
@@ -278,6 +292,7 @@ export class Orchestrator {
       this.activeRuns.delete(runId);
       this.permissions.clear(runId);
       this.questions.cancelPending(runId);
+      this.driveSkills = [];
     }
   }
 }

@@ -4,19 +4,21 @@ import { updatePlanTool } from "./updatePlan.js";
 import { setChatTitleTool } from "./setChatTitle.js";
 import { askUserQuestionTool } from "./askUserQuestion.js";
 import { rememberTool } from "./remember.js";
+import { loadSkillTool } from "./loadSkill.js";
 
 export type { OrchestratorTool, OrchestratorToolContext, QuestionAnswerInput } from "./types.js";
 
 /**
  * The orchestrator-native tools, in advertised order. update_plan leads (it used
- * to ride with plan mode's base tools), followed by the always-available trio.
+ * to ride with plan mode's base tools), followed by the always-available tools.
  * Adding a tool = one new module appended here.
  */
 export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   updatePlanTool,
   setChatTitleTool,
   askUserQuestionTool,
-  rememberTool
+  rememberTool,
+  loadSkillTool
 ];
 
 const BY_NAME = new Map<string, OrchestratorTool>(

@@ -2,6 +2,7 @@ import type { Run, UserQuestion } from "@locagens/shared";
 import type { ModeStrategy, ToolDef } from "../prompts/index.js";
 import type { IRunRepository, IPlanRepository, IMemoryRepository } from "../../database/repositories.js";
 import type { eventBus } from "../eventBus.js";
+import type { DiscoveredSkill } from "../skills/index.js";
 
 /** The user's reply to an ask_user_question request, aligned to the questions order. */
 export interface QuestionAnswerInput {
@@ -20,6 +21,8 @@ export interface OrchestratorToolContext {
   planRepo: IPlanRepository;
   memoryRepo: IMemoryRepository;
   eventBus: typeof eventBus;
+  /** Skills discovered for the active drive() (empty outside a run). */
+  getSkills(): DiscoveredSkill[];
   /** Pauses the run and waits for the user's answer (QuestionCoordinator). */
   requestUserAnswer(runId: string, questions: UserQuestion[]): Promise<QuestionAnswerInput>;
   /** Whether the run is still active (not cancelled). */

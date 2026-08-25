@@ -84,6 +84,15 @@ every `/api/*` route requires the process-local bearer token._
 
 ---
 
+## `skills.ts` — `registerSkillRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/skills` | List discovered skills + folder roots (optional `projectPath`) | `ctx.skillRegistry.listSummaries`, `userRoot`, `projectRoot` |
+| POST | `/api/skills/open-folder` | Resolve/create allowlisted skills dir (`user` \| `project`) | `ctx.skillRegistry.ensureUserRoot` / `ensureProjectRoot` |
+
+---
+
 ## `settings.ts` — `registerSettingsRoutes`
 
 | Method | Path | Description | Repo / Orchestrator Call |

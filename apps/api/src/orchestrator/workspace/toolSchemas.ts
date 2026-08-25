@@ -406,6 +406,29 @@ export const REMEMBER_TOOL = {
 };
 
 /**
+ * Loads a skill's full SKILL.md body by name when the task matches an entry in
+ * AVAILABLE SKILLS. Silent local disk read (allowlisted skill roots only); no
+ * permission prompt. Main agent only; sub-agents never get it.
+ */
+export const LOAD_SKILL_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "load_skill",
+    description: "Load a skill's full instructions by name when the task matches AVAILABLE SKILLS. Call before following a specialized workflow.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Skill name from AVAILABLE SKILLS."
+        }
+      },
+      required: ["name"]
+    }
+  }
+};
+
+/**
  * Architect-only tool (dual-model runs). Lets the architect model delegate one
  * or more self-contained coding tasks to coder sub-agents running the configured
  * coder model. Performs no direct filesystem/network I/O itself — the orchestrator

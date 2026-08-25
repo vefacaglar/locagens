@@ -28,6 +28,7 @@ const {
   projects,
   permissions,
   memories,
+  skills,
   showSettings,
   openSettings,
   closeSettings,
@@ -72,15 +73,23 @@ import { STORAGE_KEYS, runStorageKeys } from './lib/storageKeys';
 const { activeDialog } = useCustomDialog();
 const isMobile = useIsMobile();
 
-const settingsTab = ref<'permissions' | 'memory' | 'providers' | 'agents' | 'server'>('permissions');
+const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'providers' | 'agents' | 'server'>('permissions');
 
 async function handleOpenSettings(tab?: string) {
-  if (tab === 'permissions' || tab === 'memory' || tab === 'providers' || tab === 'agents' || tab === 'server') {
+  if (tab === 'permissions' || tab === 'memory' || tab === 'skills' || tab === 'providers' || tab === 'agents' || tab === 'server') {
     settingsTab.value = tab;
   } else {
     settingsTab.value = 'permissions';
   }
   await openSettings();
+}
+
+function refreshSkills() {
+  void skills.loadSkills(projects.activeProjectPath.value || undefined);
+}
+
+function openSkillsFolder(target: 'user' | 'project') {
+  void skills.openFolder(target, projects.activeProjectPath.value || undefined);
 }
 
 function handleEscape(e: KeyboardEvent) {
@@ -510,6 +519,12 @@ onUnmounted(() => {
       :presets="agentPresets"
       :memories="memories.memories.value"
       :memories-loading="memories.isLoading.value"
+      :skills="skills.skills.value"
+      :skills-loading="skills.isLoading.value"
+      :skills-user-root="skills.userRoot.value"
+      :skills-project-root="skills.projectRoot.value"
+      :skills-error="skills.error.value"
+      :skills-status-message="skills.statusMessage.value"
       :active-project-path="projects.activeProjectPath.value"
       :active-project-name="projects.activeProject.value?.name || ''"
       @close="closeSettings"
@@ -521,6 +536,8 @@ onUnmounted(() => {
       @update-memory="memories.updateMemory($event.id, $event.content)"
       @delete-memory="memories.deleteMemory"
       @clear-memories="memories.clearMemories"
+      @refresh-skills="refreshSkills"
+      @open-skills-folder="openSkillsFolder"
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

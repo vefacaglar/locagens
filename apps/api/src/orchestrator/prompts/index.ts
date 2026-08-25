@@ -15,6 +15,7 @@ import { fullAccessStrategy } from "./fullAccess.js";
 
 export type { ModeStrategy, DelegationContext, PromptContext, ToolDef } from "./types.js";
 export { formatMemoryContext, formatActivePlan } from "./shared.js";
+export { formatSkillCatalog } from "../skills/index.js";
 export { buildCoderSystemPrompt, buildUtilitySystemPrompt, buildVerifierSystemPrompt, formatCoderMemoryContext } from "./subAgents.js";
 
 const STRATEGIES: Record<string, ModeStrategy> = {
@@ -48,14 +49,16 @@ export interface SystemPromptOptions {
   memoryContext?: string;
   /** Pre-rendered APPROVED PLAN section (formatActivePlan). */
   planContext?: string;
+  /** Pre-rendered AVAILABLE SKILLS section (formatSkillCatalog). */
+  skillCatalog?: string;
 }
 
 /**
  * Builds the system prompt for a single-model workspace chat session. Picks the
  * mode strategy, then composes the shared sections around its prompt block:
  * global rules -> initial guidance -> mode section -> delegation -> plan ->
- * memory -> project context. A lightweight strategy (chat) returns its entire
- * prompt standalone, so no wrapping is applied.
+ * memory -> skills -> project context. A lightweight strategy (chat) returns its
+ * entire prompt standalone, so no wrapping is applied (skills still append).
  */
 export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   const {
@@ -65,13 +68,14 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
     shouldReadProjectGuidance = false,
     delegation,
     memoryContext = "",
-    planContext = ""
+    planContext = "",
+    skillCatalog = ""
   } = options;
   const strategy = getModeStrategy(mode);
   const ctx = { projectName, projectPath, shouldReadProjectGuidance, delegation, memoryContext };
 
   if (strategy.lightweight) {
-    return strategy.promptSection(ctx);
+    return strategy.promptSection(ctx) + skillCatalog;
   }
 
   let prompt = GLOBAL_RULES;
@@ -82,6 +86,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   if (delegation) prompt += delegationBlock(delegation);
   prompt += planContext;
   prompt += memoryContext;
+  prompt += skillCatalog;
   prompt += projectContextSuffix(projectName, projectPath);
 
   return prompt;

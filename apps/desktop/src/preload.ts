@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("__LOCAGENS_DESKTOP__", {
   restartBackend: () => ipcRenderer.invoke("locagens:restart-backend"),
   toggleMaximize: () => ipcRenderer.invoke("locagens:toggle-maximize"),
   selectDirectory: () => ipcRenderer.invoke("locagens:select-directory"),
+  openPath: (targetPath: string) => ipcRenderer.invoke("locagens:open-path", targetPath),
   apiRequest: (input: unknown) => ipcRenderer.invoke("locagens:api-request", input),
   subscribeRunEvents: (input: unknown) => ipcRenderer.invoke("locagens:subscribe-run-events", input),
   unsubscribeRunEvents: (subscriptionId: string) => ipcRenderer.invoke("locagens:unsubscribe-run-events", subscriptionId),

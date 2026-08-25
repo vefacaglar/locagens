@@ -105,27 +105,30 @@ move_file(source_path, destination_path)
 search_files(query, path?)
 run_command(command, network_domains?)
 fetch_url(url)
-update_plan(title, tasks, body?, start_new?)   plan mode only
-set_chat_title(title)
-delegate_tasks(tasks, parallel?)               preset build modes only
-delegate_to_utility(tasks, parallel?)          preset build modes only
-```
+  update_plan(title, tasks, body?, start_new?)   plan mode only
+  set_chat_title(title)
+  load_skill(name)                               main agent, every mode
+  delegate_tasks(tasks, parallel?)               preset build modes only
+  delegate_to_utility(tasks, parallel?)          preset build modes only
+  ```
 
-Rules:
+  Rules:
 
-```txt
-all paths are relative to the active project folder
-paths that resolve outside the workspace are rejected
-tool failures return JSON, and the model should react to them
-prefer read/search/list before editing when context is missing
-prefer edit_file for targeted changes to existing files
-```
+  ```txt
+  all paths are relative to the active project folder
+  paths that resolve outside the workspace are rejected
+  tool failures return JSON, and the model should react to them
+  prefer read/search/list before editing when context is missing
+  prefer edit_file for targeted changes to existing files
+  ```
 
-`run_command` and `fetch_url` are dangerous tools. They always route through the
-permission flow unless a matching standing grant exists. `update_plan` is
-internal bookkeeping only; it does not touch files or network and runs without a
-permission prompt. `set_chat_title` also runs silently because it only renames
-the run.
+  `run_command` and `fetch_url` are dangerous tools. They always route through the
+  permission flow unless a matching standing grant exists. `update_plan` is
+  internal bookkeeping only; it does not touch files or network and runs without a
+  permission prompt. `set_chat_title` also runs silently because it only renames
+  the run. `load_skill` loads a SKILL.md body from the user or project skills
+  directory (Settings → Skills); only name+description sit in the system prompt
+  until the model calls it.
 
 Commands run through the platform sandbox with workspace-only writes and no
 network by default. A networked command must declare its domains in advance;

@@ -1,4 +1,4 @@
-import type { ProviderMetadata, Run, RunMessage, Project, PermissionRule, Plan, AgentPreset, Memory, MemoryCategory, MemoryScope, AppSettings, PaginatedUsageLogs, RunUsageSummary, SecurityStatus } from '@locagens/shared';
+import type { ProviderMetadata, Run, RunMessage, Project, PermissionRule, Plan, AgentPreset, Memory, MemoryCategory, MemoryScope, AppSettings, PaginatedUsageLogs, RunUsageSummary, SecurityStatus, SkillsListResponse } from '@locagens/shared';
 
 interface DesktopApiResponse {
   status: number;
@@ -19,6 +19,7 @@ interface DesktopBridge {
   unsubscribeRunEvents(subscriptionId: string): Promise<unknown>;
   onRunEvent(listener: (event: DesktopRunEvent) => void): () => void;
   selectDirectory?: () => Promise<{ path: string; name: string } | null>;
+  openPath?: (targetPath: string) => Promise<{ ok: true }>;
   restartBackend?: () => Promise<unknown>;
   toggleMaximize?: () => Promise<unknown>;
 }
@@ -221,6 +222,36 @@ export const api = {
     requestJson<Memory>(`/api/memories/${id}`, { method: 'PUT', body: { content }, errorFallback: 'Failed to update memory.' }),
   deleteMemory: (id: number) => deleteQuiet(`/api/memories/${id}`),
   clearMemories: () => deleteQuiet('/api/memories'),
+
+  getSkills: (projectPath?: string) => {
+    const q = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return getJson<SkillsListResponse>(`/api/skills${q}`);
+  },
+  openSkillsFolder: async (target: 'user' | 'project', projectPath?: string) => {
+    const result = await requestJson<{ path: string; target: 'user' | 'project' }>(
+      '/api/skills/open-folder',
+      {
+        method: 'POST',
+        body: { target, projectPath },
+        errorFallback: 'Failed to resolve skills folder.'
+      }
+    );
+    const desktop = desktopBridge();
+    if (desktop?.openPath) {
+      await desktop.openPath(result.path);
+      return { ...result, opened: true as const };
+    }
+    // Browser / outdated desktop: copy path so the user can open it manually.
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(result.path);
+        return { ...result, opened: false as const, copied: true as const };
+      }
+    } catch {
+      /* ignore clipboard failures */
+    }
+    return { ...result, opened: false as const, copied: false as const };
+  },
 
   createRun: (payload: CreateRunPayload) =>
     requestJson<Run>('/api/runs', { method: 'POST', body: payload, errorFallback: 'Failed to start chat.' }),

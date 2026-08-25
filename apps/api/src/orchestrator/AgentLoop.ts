@@ -556,9 +556,9 @@ export class AgentLoop {
     const toolName = toolCall.function?.name;
 
     // Orchestrator-native tools (set_chat_title / update_plan / ask_user_question
-    // / remember) run silently here — no filesystem/network I/O, no permission
-    // gating. Each is a registered handler that owns its own per-mode rules (e.g.
-    // update_plan rejects outside plan mode). See orchestrator/tools.
+    // / remember / load_skill) run silently here — no permission gating. Each is
+    // a registered handler that owns its own per-mode rules (e.g. update_plan
+    // rejects outside plan mode). See orchestrator/tools.
     const nativeTool = getOrchestratorTool(toolName);
     if (nativeTool) {
       return nativeTool.execute(this.toolContext, runId, run, toolCall);

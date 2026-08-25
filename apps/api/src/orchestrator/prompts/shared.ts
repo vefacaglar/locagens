@@ -53,6 +53,9 @@ export function formatActivePlan(plan: Plan | null | undefined): string {
   return block;
 }
 
+// formatSkillCatalog lives in ../skills — re-exported from prompts/index for
+// callers that already import prompt helpers from the systemPrompt barrel.
+
 /** The shared base prompt + global rules used by every non-chat mode. */
 export const GLOBAL_RULES = `You are Locagens, a local-first AI assistant working in the user's active project workspace.
 

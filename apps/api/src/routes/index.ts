@@ -5,6 +5,7 @@ import { registerProjectRoutes } from "./projects.js";
 import { registerRunRoutes } from "./runs.js";
 import { registerPermissionRoutes } from "./permissions.js";
 import { registerMemoryRoutes } from "./memory.js";
+import { registerSkillRoutes } from "./skills.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerSecurityRoutes } from "./security.js";
 
@@ -16,6 +17,7 @@ export function registerRoutes(server: FastifyInstance, ctx: AppContext) {
   registerRunRoutes(server, ctx);
   registerPermissionRoutes(server, ctx);
   registerMemoryRoutes(server, ctx);
+  registerSkillRoutes(server, ctx);
   registerSettingsRoutes(server, ctx);
   registerSecurityRoutes(server);
 }

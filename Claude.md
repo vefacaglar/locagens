@@ -353,13 +353,14 @@ move_file(source_path, destination_path)
 search_files(query, path?)
 run_command(command)
 fetch_url(url)
-set_chat_title(title)
-ask_user_question(questions)                    main agent, every mode
-remember(scope, category, content, update_id?)  main agent, every mode
-update_plan(title, tasks, body?, start_new?)   plan mode only
-delegate_tasks(tasks, parallel?)               preset build modes only
-delegate_to_utility(tasks, parallel?)          preset build modes only
-```
+  set_chat_title(title)
+  ask_user_question(questions)                    main agent, every mode
+  remember(scope, category, content, update_id?)  main agent, every mode
+  load_skill(name)                                main agent, every mode
+  update_plan(title, tasks, body?, start_new?)   plan mode only
+  delegate_tasks(tasks, parallel?)               preset build modes only
+  delegate_to_utility(tasks, parallel?)          preset build modes only
+  ```
 
 Safety: every path resolves against the run's project directory and must stay
 inside it. Access outside the workspace is denied. Tool failures are returned
@@ -378,12 +379,30 @@ running. Its standing grants are scoped per host (approving one site does not
 approve the whole web). Because it is the only async tool, the orchestrator
 executes tools through `executeWorkspaceToolAsync`.
 
-`set_chat_title`, `ask_user_question`, `remember`, `update_plan`,
+`set_chat_title`, `ask_user_question`, `remember`, `load_skill`, `update_plan`,
 `delegate_tasks`, and `delegate_to_utility` are orchestrator tools. They do not
 execute through the filesystem helper directly: title and plan update local
-run/plan state, `remember` writes a memory row, `ask_user_question` pauses the
-run for user input, and delegation starts nested `runAgentLoop()` calls in the
-same run.
+run/plan state, `remember` writes a memory row, `load_skill` returns a SKILL.md
+body from allowlisted skill roots, `ask_user_question` pauses the run for user
+input, and delegation starts nested `runAgentLoop()` calls in the same run.
+
+### Skills (`load_skill`)
+
+Skills are Agent-Skills-compatible folders with a `SKILL.md` (YAML frontmatter
+`name` + `description`, then markdown body). Discovered from:
+
+```txt
+user:    ~/Library/Application Support/Locagens/skills/<name>/SKILL.md   (macOS)
+         ~/.config/locagens/skills/… or %APPDATA%/Locagens/skills/…
+project: <workspace>/.locagens/skills/<name>/SKILL.md
+```
+
+On each drive(), the main agent gets an AVAILABLE SKILLS catalog (name +
+description only). Matching work should call `load_skill(name)` to pull the full
+body. Project skills override user skills with the same name. Managed in
+**Settings → Skills** (list + Open folder; add skills by dropping SKILL.md on
+disk). Sub-agents do not receive skills. Override user root with
+`LOCAGENS_SKILLS_PATH`.
 
 Do not add git integration or further network tools without an explicit request.
 

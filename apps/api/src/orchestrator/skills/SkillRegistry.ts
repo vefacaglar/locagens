@@ -1,0 +1,170 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { SkillSummary } from "@locagens/shared";
+import { parseSkillMd } from "./parseSkillMd.js";
+import type { DiscoveredSkill } from "./types.js";
+
+const SKILL_FILE = "SKILL.md";
+const PROJECT_SKILLS_SEGMENTS = [".locagens", "skills"] as const;
+
+/**
+ * Discovers Agent-Skills-compatible SKILL.md packs from the user skill root and
+ * the active project's .locagens/skills directory. Project skills override user
+ * skills with the same name. Paths stay inside allowlisted roots (symlink-safe).
+ */
+export class SkillRegistry {
+  private readonly userRootOverride?: string;
+
+  constructor(userRootOverride?: string) {
+    this.userRootOverride = userRootOverride;
+  }
+
+  /** Absolute user-level skills directory (created on demand by ensureUserRoot). */
+  userRoot(): string {
+    if (this.userRootOverride) return path.resolve(this.userRootOverride);
+    if (process.env.LOCAGENS_SKILLS_PATH) {
+      return path.resolve(process.env.LOCAGENS_SKILLS_PATH);
+    }
+    const appDirName = "Locagens";
+    if (process.platform === "darwin") {
+      return path.join(os.homedir(), "Library", "Application Support", appDirName, "skills");
+    }
+    if (process.platform === "win32") {
+      return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), appDirName, "skills");
+    }
+    return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "locagens", "skills");
+  }
+
+  /** Project skill root, or null when no project path is set. */
+  projectRoot(projectPath?: string | null): string | null {
+    if (!projectPath?.trim()) return null;
+    try {
+      const base = fs.realpathSync.native(projectPath.trim());
+      return path.join(base, ...PROJECT_SKILLS_SEGMENTS);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Ensures the user skills directory exists; returns its absolute path. */
+  ensureUserRoot(): string {
+    const root = this.userRoot();
+    fs.mkdirSync(root, { recursive: true });
+    return fs.realpathSync.native(root);
+  }
+
+  /**
+   * Ensures the project skills directory exists under a registered project.
+   * Returns null when projectPath is missing or not a real directory.
+   */
+  ensureProjectRoot(projectPath: string): string | null {
+    const root = this.projectRoot(projectPath);
+    if (!root) return null;
+    fs.mkdirSync(root, { recursive: true });
+    try {
+      return fs.realpathSync.native(root);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Discovers skills for a run. User skills load first; project skills override
+   * the same name. Invalid SKILL.md files are skipped.
+   */
+  discover(projectPath?: string | null): DiscoveredSkill[] {
+    const byName = new Map<string, DiscoveredSkill>();
+
+    for (const skill of this.scanRoot(this.userRoot(), "user")) {
+      byName.set(skill.name, skill);
+    }
+
+    const projectRoot = this.projectRoot(projectPath);
+    if (projectRoot) {
+      for (const skill of this.scanRoot(projectRoot, "project")) {
+        byName.set(skill.name, skill);
+      }
+    }
+
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Public catalog rows for Settings / prompt injection. */
+  listSummaries(projectPath?: string | null): SkillSummary[] {
+    return this.discover(projectPath).map(({ name, description, source }) => ({
+      name,
+      description,
+      source
+    }));
+  }
+
+  private scanRoot(root: string, source: "user" | "project"): DiscoveredSkill[] {
+    let entries: fs.Dirent[];
+    try {
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return [];
+      const realRoot = fs.realpathSync.native(root);
+      entries = fs.readdirSync(realRoot, { withFileTypes: true });
+      return this.readEntries(realRoot, entries, source);
+    } catch {
+      return [];
+    }
+  }
+
+  private readEntries(realRoot: string, entries: fs.Dirent[], source: "user" | "project"): DiscoveredSkill[] {
+    const skills: DiscoveredSkill[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".")) continue;
+
+      const skillDir = path.join(realRoot, entry.name);
+      let realDir: string;
+      try {
+        realDir = fs.realpathSync.native(skillDir);
+      } catch {
+        continue;
+      }
+      if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) continue;
+      if (!fs.statSync(realDir).isDirectory()) continue;
+
+      const skillFile = path.join(realDir, SKILL_FILE);
+      let realFile: string;
+      try {
+        realFile = fs.realpathSync.native(skillFile);
+      } catch {
+        continue;
+      }
+      if (!realFile.startsWith(realDir + path.sep) && realFile !== path.join(realDir, SKILL_FILE)) {
+        // File must live directly in the skill dir (no escape via symlink).
+        if (path.dirname(realFile) !== realDir) continue;
+      }
+      if (!fs.statSync(realFile).isFile()) continue;
+
+      let raw: string;
+      try {
+        raw = fs.readFileSync(realFile, "utf-8");
+      } catch {
+        continue;
+      }
+
+      const parsed = parseSkillMd(raw);
+      if (!parsed) continue;
+
+      skills.push({
+        name: parsed.name,
+        description: parsed.description,
+        source,
+        dir: realDir,
+        body: parsed.body
+      });
+    }
+    return skills;
+  }
+}
+
+/** Look up a skill by name from a discovered list (case-insensitive). */
+export function findSkill(skills: DiscoveredSkill[], name: string): DiscoveredSkill | undefined {
+  const key = String(name || "").trim().toLowerCase();
+  if (!key) return undefined;
+  return skills.find(s => s.name === key);
+}

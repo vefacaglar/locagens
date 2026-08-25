@@ -37,8 +37,9 @@ optional architect/coder/utility agent presets
 build, plan, and full-access modes
 workspace filesystem + web search tools
 ask_user_question multiple-choice flow
-two-tier persistent memory (global + project)
-permission flow for commands and URL fetches
+  two-tier persistent memory (global + project)
+  skill loading (SKILL.md packs via load_skill; Settings → Skills)
+  permission flow for commands and URL fetches
 SSE live updates
 run/message/project/permission/memory/usage persistence
 right-hand plan panel
