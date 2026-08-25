@@ -9,6 +9,7 @@ import { usePermissions } from './usePermissions';
 import { useMemories } from './useMemories';
 import { useSkills } from './useSkills';
 import { useMcpServers } from './useMcpServers';
+import { usePlugins } from './usePlugins';
 import { useAsyncResource } from './useAsyncResource';
 import { ACTIVE_STATUSES } from '../lib/format';
 import { STORAGE_KEYS } from '../lib/storageKeys';
@@ -54,6 +55,7 @@ export function useAppShell() {
   const memories = useMemories();
   const skills = useSkills();
   const mcp = useMcpServers();
+  const plugins = usePlugins();
 
   // Opening the settings screen loads all settings tabs so they are ready when
   // the user switches between them.
@@ -64,6 +66,7 @@ export function useAppShell() {
       memories.loadMemories(),
       skills.loadSkills(projects.activeProjectPath.value || undefined),
       mcp.loadServers(projects.activeProjectPath.value || undefined),
+      plugins.loadPlugins(projects.activeProjectPath.value || undefined),
       loadProvidersConfig(),
       loadAgentPresets()
     ]);
@@ -181,6 +184,7 @@ export function useAppShell() {
     memories,
     skills,
     mcp,
+    plugins,
     showSettings,
     openSettings,
     closeSettings,

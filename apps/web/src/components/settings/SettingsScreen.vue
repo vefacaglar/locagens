@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset, SkillSummary, McpServerInfo, McpServerConfig } from '@locagens/shared';
+import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset, SkillSummary, McpServerInfo, McpServerConfig, PluginManifest, PluginTemplate, InstallPluginPayload, PluginScope } from '@locagens/shared';
 import { useIsMobile } from '../../composables/useIsMobile';
 import PermissionsTab from './PermissionsTab.vue';
 import ProvidersTab from './ProvidersTab.vue';
@@ -8,6 +8,7 @@ import AgentPresetsTab from './AgentPresetsTab.vue';
 import MemoryTab from './MemoryTab.vue';
 import SkillsTab from './SkillsTab.vue';
 import McpTab from './McpTab.vue';
+import PluginsTab from './PluginsTab.vue';
 import ServerTab from './ServerTab.vue';
 
 const props = defineProps<{
@@ -32,6 +33,14 @@ const props = defineProps<{
   mcpSaving?: boolean;
   mcpError?: string | null;
   mcpStatusMessage?: string | null;
+  plugins?: PluginManifest[];
+  pluginTemplates?: PluginTemplate[];
+  pluginsUserDir?: string;
+  pluginsProjectDir?: string | null;
+  pluginsLoading?: boolean;
+  pluginsInstalling?: boolean;
+  pluginsError?: string | null;
+  pluginsStatusMessage?: string | null;
   activeProjectPath: string;
   activeProjectName: string;
   activeTab?: TabId;
@@ -57,6 +66,10 @@ const emit = defineEmits<{
   (e: 'delete-mcp-server', name: string): void;
   (e: 'restart-mcp-server', name: string): void;
   (e: 'toggle-mcp-server', payload: { name: string; enabled: boolean }): void;
+  (e: 'refresh-plugins'): void;
+  (e: 'install-plugin', payload: InstallPluginPayload): void;
+  (e: 'toggle-plugin', payload: { id: string; enabled: boolean; scope: PluginScope }): void;
+  (e: 'delete-plugin', payload: { id: string; scope: PluginScope }): void;
   (e: 'update:activeTab', value: TabId): void;
 }>();
 
@@ -64,6 +77,7 @@ const TABS = [
   { id: 'permissions', label: 'Permissions' },
   { id: 'memory', label: 'Memory' },
   { id: 'skills', label: 'Skills' },
+  { id: 'plugins', label: 'Plugins' },
   { id: 'mcp', label: 'MCP' },
   { id: 'providers', label: 'Providers' },
   { id: 'agents', label: 'Agents' },
@@ -216,6 +230,23 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 @create-skill="emit('create-skill', $event)"
                 @delete-skill="emit('delete-skill', $event)"
                 @open-folder="emit('open-skills-folder', $event)"
+              />
+              <PluginsTab
+                v-else-if="localActiveTab === 'plugins'"
+                :plugins="plugins || []"
+                :templates="pluginTemplates || []"
+                :user-plugins-dir="pluginsUserDir || ''"
+                :project-plugins-dir="pluginsProjectDir || null"
+                :is-loading="!!pluginsLoading"
+                :is-installing="!!pluginsInstalling"
+                :error="pluginsError || null"
+                :status-message="pluginsStatusMessage || null"
+                :active-project-path="activeProjectPath"
+                :active-project-name="activeProjectName"
+                @refresh="emit('refresh-plugins')"
+                @install="emit('install-plugin', $event)"
+                @toggle="emit('toggle-plugin', $event)"
+                @delete="emit('delete-plugin', $event)"
               />
               <McpTab
                 v-else-if="localActiveTab === 'mcp'"

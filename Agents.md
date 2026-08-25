@@ -130,6 +130,11 @@ fetch_url(url)
   directory (Settings → Skills); only name+description sit in the system prompt
   until the model calls it.
 
+Plugins (Settings → Plugins) can register bundled MCP servers, custom tools,
+and lifecycle hooks (`onSessionStart`, `preToolUse`, `postToolUse`, `preCompact`).
+For instance, `context-mode` (mksglu/context-mode) sandboxes long tool outputs
+to save up to 98% context window tokens and indexes session events into local SQLite.
+
 Commands run through the platform sandbox with workspace-only writes and no
 network by default. A networked command must declare its domains in advance;
 standing grants match the exact command and exact normalized domain set.

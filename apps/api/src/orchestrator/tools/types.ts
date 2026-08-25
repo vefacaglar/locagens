@@ -5,6 +5,7 @@ import type { eventBus } from "../eventBus.js";
 import type { DiscoveredSkill } from "../skills/index.js";
 
 import type { McpClientManager } from "../mcp/index.js";
+import type { PluginRegistry, PluginHookRunner } from "../plugins/index.js";
 
 /** The user's reply to an ask_user_question request, aligned to the questions order. */
 export interface QuestionAnswerInput {
@@ -24,6 +25,8 @@ export interface OrchestratorToolContext {
   memoryRepo: IMemoryRepository;
   eventBus: typeof eventBus;
   mcpManager?: McpClientManager;
+  pluginRegistry?: PluginRegistry;
+  pluginHookRunner?: PluginHookRunner;
   /** Skills discovered for the active drive() (empty outside a run). */
   getSkills(): DiscoveredSkill[];
   /** Pauses the run and waits for the user's answer (QuestionCoordinator). */

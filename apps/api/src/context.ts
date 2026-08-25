@@ -20,6 +20,7 @@ import {
 import { Orchestrator } from "./orchestrator/Orchestrator.js";
 import { SkillRegistry } from "./orchestrator/skills/index.js";
 import { McpClientManager, McpConfigStore } from "./orchestrator/mcp/index.js";
+import { PluginRegistry, PluginHookRunner } from "./orchestrator/plugins/index.js";
 import { ProcessManager } from "./orchestrator/processes/ProcessManager.js";
 import { SymbolIndexer } from "./orchestrator/symbols/index.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
@@ -41,6 +42,8 @@ export interface AppContext {
   orchestrator: Orchestrator;
   skillRegistry: SkillRegistry;
   mcpManager: McpClientManager;
+  pluginRegistry: PluginRegistry;
+  pluginHookRunner: PluginHookRunner;
   processManager: ProcessManager;
   symbolIndexer: SymbolIndexer;
   settingsStore: AppSettingsStore;
@@ -58,6 +61,8 @@ export function createAppContext(): AppContext {
   const usageLogRepo = new UsageLogRepository(db);
   const skillRegistry = new SkillRegistry();
   const mcpManager = new McpClientManager(new McpConfigStore());
+  const pluginRegistry = new PluginRegistry();
+  const pluginHookRunner = new PluginHookRunner();
   const processManager = new ProcessManager();
   const symbolIndexer = new SymbolIndexer();
   const orchestrator = new Orchestrator(
@@ -68,7 +73,9 @@ export function createAppContext(): AppContext {
     memoryRepo,
     usageLogRepo,
     skillRegistry,
-    mcpManager
+    mcpManager,
+    pluginRegistry,
+    pluginHookRunner
   );
   const settingsStore = new AppSettingsStore();
 
@@ -84,6 +91,8 @@ export function createAppContext(): AppContext {
     orchestrator,
     skillRegistry,
     mcpManager,
+    pluginRegistry,
+    pluginHookRunner,
     processManager,
     symbolIndexer,
     settingsStore,

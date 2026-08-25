@@ -32,6 +32,7 @@ const {
   memories,
   skills,
   mcp,
+  plugins,
   showSettings,
   openSettings,
   closeSettings,
@@ -76,10 +77,10 @@ import { STORAGE_KEYS, runStorageKeys } from './lib/storageKeys';
 const { activeDialog, showConfirm } = useCustomDialog();
 const isMobile = useIsMobile();
 
-const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'mcp' | 'providers' | 'agents' | 'server'>('permissions');
+const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'plugins' | 'mcp' | 'providers' | 'agents' | 'server'>('permissions');
 
 async function handleOpenSettings(tab?: string) {
-  if (tab === 'permissions' || tab === 'memory' || tab === 'skills' || tab === 'mcp' || tab === 'providers' || tab === 'agents' || tab === 'server') {
+  if (tab === 'permissions' || tab === 'memory' || tab === 'skills' || tab === 'plugins' || tab === 'mcp' || tab === 'providers' || tab === 'agents' || tab === 'server') {
     settingsTab.value = tab;
   } else {
     settingsTab.value = 'permissions';
@@ -127,9 +128,15 @@ async function deleteMcpServer(name: string) {
   await mcp.deleteServer(name, projects.activeProjectPath.value || undefined);
 }
 
+async function deletePlugin(payload: { id: string; scope: any }) {
+  if (!(await showConfirm(`Are you sure you want to delete plugin "${payload.id}"?`))) return;
+  await plugins.deletePlugin(payload.id, payload.scope, projects.activeProjectPath.value || undefined);
+}
+
 watch(() => projects.activeProjectPath.value, (newPath) => {
   if (showSettings.value) {
     void skills.loadSkills(newPath || undefined);
+    void plugins.loadPlugins(newPath || undefined);
     void mcp.loadServers(newPath || undefined);
   }
 });
@@ -588,6 +595,14 @@ onUnmounted(() => {
       :mcp-saving="mcp.isSaving.value"
       :mcp-error="mcp.error.value"
       :mcp-status-message="mcp.statusMessage.value"
+      :plugins="plugins.plugins.value"
+      :plugin-templates="plugins.templates.value"
+      :plugins-user-dir="plugins.userPluginsDir.value"
+      :plugins-project-dir="plugins.projectPluginsDir.value"
+      :plugins-loading="plugins.isLoading.value"
+      :plugins-installing="plugins.isInstalling.value"
+      :plugins-error="plugins.error.value"
+      :plugins-status-message="plugins.statusMessage.value"
       :active-project-path="projects.activeProjectPath.value"
       :active-project-name="projects.activeProject.value?.name || ''"
       @close="closeSettings"
@@ -609,6 +624,10 @@ onUnmounted(() => {
       @delete-mcp-server="deleteMcpServer"
       @restart-mcp-server="mcp.restartServer($event, projects.activeProjectPath.value || undefined)"
       @toggle-mcp-server="mcp.toggleServer($event.name, $event.enabled, projects.activeProjectPath.value || undefined)"
+      @refresh-plugins="plugins.loadPlugins(projects.activeProjectPath.value || undefined)"
+      @install-plugin="plugins.installPlugin"
+      @toggle-plugin="plugins.togglePlugin($event.id, $event.enabled, $event.scope, projects.activeProjectPath.value || undefined)"
+      @delete-plugin="deletePlugin"
     />
 
     <!-- Terminal / Dev Servers Drawer -->

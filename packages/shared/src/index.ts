@@ -542,4 +542,85 @@ export interface SymbolsResponse {
   symbols: CodeSymbol[];
 }
 
+// ============================================================================
+// Plugin & Hook Types
+// ============================================================================
+
+export type PluginScope = "user" | "project" | "builtin";
+
+export interface PluginToolDefinition {
+  name: string;
+  description: string;
+  parameters: {
+    type: "object";
+    properties: Record<string, any>;
+    required?: string[];
+  };
+  handler?: string;
+}
+
+export interface PluginHooksConfig {
+  onSessionStart?: string;
+  preToolUse?: string;
+  postToolUse?: string;
+  preCompact?: string;
+}
+
+export interface PluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author?: string;
+  homepage?: string;
+  scope: PluginScope;
+  enabled: boolean;
+  mcpServers?: Record<string, Omit<McpServerConfig, "name" | "scope" | "projectPath">>;
+  tools?: PluginToolDefinition[];
+  hooks?: PluginHooksConfig;
+  systemPrompt?: string;
+  dir?: string;
+  installedAt?: string;
+}
+
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author?: string;
+  homepage?: string;
+  scope: PluginScope;
+  enabled: boolean;
+  toolCount: number;
+  hasHooks: boolean;
+  hasMcp: boolean;
+  hasSystemPrompt: boolean;
+}
+
+export interface PluginTemplate {
+  id: string;
+  name: string;
+  description: string;
+  author?: string;
+  homepage?: string;
+  manifest: Omit<PluginManifest, "scope" | "enabled" | "dir" | "installedAt">;
+}
+
+export interface PluginsResponse {
+  plugins: PluginManifest[];
+  templates: PluginTemplate[];
+  userPluginsDir: string;
+  projectPluginsDir: string | null;
+}
+
+export interface InstallPluginPayload {
+  source: "npm" | "github" | "local" | "template";
+  uri: string;
+  scope: "user" | "project";
+  projectPath?: string;
+  customManifest?: Partial<PluginManifest>;
+}
+
+
 

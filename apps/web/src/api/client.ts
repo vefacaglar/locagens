@@ -20,7 +20,12 @@ import type {
   ProcessInfo,
   ProcessesResponse,
   ProcessLogsResponse,
-  SymbolsResponse
+  SymbolsResponse,
+  PluginManifest,
+  PluginTemplate,
+  PluginsResponse,
+  InstallPluginPayload,
+  PluginScope
 } from '@locagens/shared';
 
 interface DesktopApiResponse {
@@ -325,6 +330,32 @@ export const api = {
       body: { enabled, projectPath },
       errorFallback: 'Failed to toggle MCP server.'
     }),
+
+  getPlugins: (projectPath?: string) => {
+    const q = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return getJson<PluginsResponse>(`/api/plugins${q}`);
+  },
+  getPluginTemplates: () =>
+    getJson<{ templates: PluginTemplate[] }>('/api/plugins/templates'),
+  installPlugin: (payload: InstallPluginPayload) =>
+    requestJson<{ success: true; plugin: PluginManifest }>('/api/plugins/install', {
+      method: 'POST',
+      body: payload,
+      errorFallback: 'Failed to install plugin.'
+    }),
+  togglePlugin: (id: string, enabled: boolean, scope?: PluginScope, projectPath?: string) =>
+    requestJson<{ success: true; plugin: PluginManifest }>(`/api/plugins/${encodeURIComponent(id)}/toggle`, {
+      method: 'POST',
+      body: { enabled, scope, projectPath },
+      errorFallback: 'Failed to toggle plugin.'
+    }),
+  deletePlugin: (id: string, scope?: PluginScope, projectPath?: string) => {
+    const q = `?scope=${scope || 'user'}${projectPath ? `&projectPath=${encodeURIComponent(projectPath)}` : ''}`;
+    return requestJson<{ success: true; deleted: boolean }>(`/api/plugins/${encodeURIComponent(id)}${q}`, {
+      method: 'DELETE',
+      errorFallback: 'Failed to delete plugin.'
+    });
+  },
 
   createRun: (payload: CreateRunPayload) =>
     requestJson<Run>('/api/runs', { method: 'POST', body: payload, errorFallback: 'Failed to start chat.' }),

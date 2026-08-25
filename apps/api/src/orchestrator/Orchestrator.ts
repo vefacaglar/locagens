@@ -8,6 +8,7 @@ import { availableSchemas } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
 import { SkillRegistry, type DiscoveredSkill } from "./skills/index.js";
 import { McpClientManager, McpConfigStore, adaptMcpToolsToSchemas } from "./mcp/index.js";
+import { PluginRegistry, PluginHookRunner } from "./plugins/index.js";
 import { RunMessageStream } from "./RunMessageStream.js";
 import { PermissionCoordinator, type PermissionDecision } from "./PermissionCoordinator.js";
 import { QuestionCoordinator } from "./QuestionCoordinator.js";
@@ -36,6 +37,10 @@ export class Orchestrator {
   private skillRegistry: SkillRegistry;
   // Manages active MCP servers and tools.
   private mcpManager: McpClientManager;
+  // Manages installed plugins and discovery.
+  private pluginRegistry: PluginRegistry;
+  // Runs plugin lifecycle hooks.
+  private pluginHookRunner: PluginHookRunner;
   // Skills discovered for the in-flight drive(); empty when idle.
   private driveSkills: DiscoveredSkill[] = [];
 
@@ -47,10 +52,14 @@ export class Orchestrator {
     private memoryRepo: IMemoryRepository,
     private usageLogRepo: IUsageLogRepository,
     skillRegistry?: SkillRegistry,
-    mcpManager?: McpClientManager
+    mcpManager?: McpClientManager,
+    pluginRegistry?: PluginRegistry,
+    pluginHookRunner?: PluginHookRunner
   ) {
     this.skillRegistry = skillRegistry ?? new SkillRegistry();
     this.mcpManager = mcpManager ?? new McpClientManager(new McpConfigStore());
+    this.pluginRegistry = pluginRegistry ?? new PluginRegistry();
+    this.pluginHookRunner = pluginHookRunner ?? new PluginHookRunner();
     this.messages = new RunMessageStream(this.runRepo, this.messageRepo);
     this.permissions = new PermissionCoordinator(this.activeRuns, this.messages);
     this.questions = new QuestionCoordinator(this.activeRuns, this.messages);
@@ -60,6 +69,8 @@ export class Orchestrator {
       memoryRepo: this.memoryRepo,
       eventBus,
       mcpManager: this.mcpManager,
+      pluginRegistry: this.pluginRegistry,
+      pluginHookRunner: this.pluginHookRunner,
       getSkills: () => this.driveSkills,
       requestUserAnswer: (runId, questions) => this.questions.request(runId, questions),
       isActive: (runId) => this.activeRuns.has(runId),
@@ -215,10 +226,31 @@ export class Orchestrator {
       // mode). Sub-agents never get these. See orchestrator/tools.
       const nativeTools = [...withUtility, ...availableSchemas(strategy)];
 
+      // Active plugins for this context
+      const activePlugins = this.pluginRegistry.getActivePlugins(run.projectPath);
+
       // Active MCP tools from enabled MCP servers for this context.
       const mcpTools = await this.mcpManager.getAllActiveTools(run.projectPath);
       const mcpSchemas = adaptMcpToolsToSchemas(mcpTools);
-      const tools = [...nativeTools, ...mcpSchemas];
+
+      // Custom tool schemas defined by active plugins
+      const pluginTools: any[] = [];
+      for (const plugin of activePlugins) {
+        if (plugin.tools) {
+          for (const t of plugin.tools) {
+            pluginTools.push({
+              type: "function" as const,
+              function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.parameters
+              }
+            });
+          }
+        }
+      }
+
+      const tools = [...nativeTools, ...mcpSchemas, ...pluginTools];
 
       // Durable memories for this run's context (all global + this project's),
       // injected into the system prompt so the model honors them from the start.
@@ -236,7 +268,7 @@ export class Orchestrator {
       this.driveSkills = this.skillRegistry.discover(run.projectPath);
       const skillCatalog = formatSkillCatalog(this.driveSkills);
 
-      const systemPrompt = buildSystemPrompt({
+      let systemPrompt = buildSystemPrompt({
         projectName: run.projectName,
         projectPath: run.projectPath,
         mode: run.mode,
@@ -246,6 +278,18 @@ export class Orchestrator {
         planContext,
         skillCatalog
       });
+
+      // Run onSessionStart hook for active plugins (e.g. context-mode prompt instructions)
+      const sessionStartResult = await this.pluginHookRunner.runSessionStart({
+        runId,
+        projectPath: run.projectPath,
+        projectName: run.projectName,
+        systemPrompt
+      }, activePlugins);
+
+      if (sessionStartResult.systemPromptSupplement) {
+        systemPrompt += `\n\n${sessionStartResult.systemPromptSupplement}`;
+      }
 
       // When an approved plan exists, implementation is clearly expected. Weak
       // architects sometimes just say "I'll start now" and end the turn without

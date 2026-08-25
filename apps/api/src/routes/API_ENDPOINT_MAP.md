@@ -107,6 +107,18 @@ every `/api/*` route requires the process-local bearer token._
 
 ---
 
+## `plugins.ts` — `registerPluginRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/plugins` | List discovered plugins + built-in templates (context-mode etc.) | `ctx.pluginRegistry.discover`, `getTemplates`, `userRoot`, `projectRoot` |
+| GET | `/api/plugins/templates` | List built-in quick plugin templates | `ctx.pluginRegistry.getTemplates()` |
+| POST | `/api/plugins/install` | Install plugin from template, GitHub repo, NPM package, or JSON | `ctx.pluginRegistry.install`, auto-registers bundled MCP servers |
+| POST | `/api/plugins/:id/toggle` | Enable or disable a plugin | `ctx.pluginRegistry.toggle` |
+| DELETE | `/api/plugins/:id` | Delete a plugin directory from user or project root | `ctx.pluginRegistry.delete` |
+
+---
+
 ## `processes.ts` — `registerProcessRoutes`
 
 | Method | Path | Description | Repo / Orchestrator Call |

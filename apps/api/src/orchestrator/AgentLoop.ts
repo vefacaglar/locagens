@@ -494,9 +494,28 @@ export class AgentLoop {
       toolCalls
     });
 
+    const activePlugins = this.toolContext.pluginRegistry?.getActivePlugins(run.projectPath) || [];
+
     for (const tc of toolCalls) {
       turn.checkCancelled();
-      const result = await this.runToolCall(turn.runId, run, tc, turn.opts.agentRole, state);
+      let result = await this.runToolCall(turn.runId, run, tc, turn.opts.agentRole, state);
+
+      if (this.toolContext.pluginHookRunner && activePlugins.length > 0) {
+        let args: Record<string, any> = {};
+        try {
+          args = JSON.parse(tc.function?.arguments || "{}");
+        } catch {
+          args = {};
+        }
+        const postHook = await this.toolContext.pluginHookRunner.runPostToolUse({
+          runId: turn.runId,
+          projectPath: run.projectPath,
+          toolName: tc.function?.name,
+          args,
+          rawResult: result
+        }, activePlugins);
+        result = postHook.result;
+      }
 
       this.messages.emitMessage(turn.runId, {
         id: randomId("msg-tool"),
@@ -554,6 +573,34 @@ export class AgentLoop {
     // of branching on run.mode directly.
     const strategy = getModeStrategy(run.mode);
     const toolName = toolCall.function?.name;
+
+    const activePlugins = this.toolContext.pluginRegistry?.getActivePlugins(run.projectPath) || [];
+
+    // Pre-tool-use hook execution
+    if (this.toolContext.pluginHookRunner && activePlugins.length > 0) {
+      let args: Record<string, any> = {};
+      try {
+        args = JSON.parse(toolCall.function?.arguments || "{}");
+      } catch {
+        args = {};
+      }
+      const preHook = await this.toolContext.pluginHookRunner.runPreToolUse({
+        runId,
+        projectPath: run.projectPath,
+        toolName,
+        args
+      }, activePlugins);
+
+      if (!preHook.proceed) {
+        if (preHook.handledResult !== undefined) {
+          return preHook.handledResult;
+        }
+        return deny(preHook.error || "Tool call blocked by plugin.");
+      }
+      if (preHook.modifiedArgs) {
+        toolCall.function.arguments = JSON.stringify(preHook.modifiedArgs);
+      }
+    }
 
     // Orchestrator-native tools (set_chat_title / update_plan / ask_user_question
     // / remember / load_skill) run silently here — no permission gating. Each is
