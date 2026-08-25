@@ -144,3 +144,23 @@ test("SkillRegistry.installSkillMd rejects invalid content", () => {
   assert.throws(() => registry.installSkillMd("user", "not a skill"), /Invalid SKILL/);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test("SkillRegistry.deleteSkill removes skill directory safely", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-skills-del-"));
+  const userRoot = path.join(tmp, "user-skills");
+  const registry = new SkillRegistry(userRoot);
+
+  writeSkill(userRoot, "to-delete", "Skill to be deleted");
+  assert.equal(registry.discover().length, 1);
+
+  const deleted = registry.deleteSkill("user", "to-delete");
+  assert.equal(deleted, true);
+  assert.equal(registry.discover().length, 0);
+
+  const deleteNonExistent = registry.deleteSkill("user", "non-existent");
+  assert.equal(deleteNonExistent, false);
+
+  assert.throws(() => registry.deleteSkill("user", "../escape"), /Invalid skill name/);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

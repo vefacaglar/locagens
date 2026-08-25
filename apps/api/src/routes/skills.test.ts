@@ -73,3 +73,62 @@ test("POST /api/skills/install rejects invalid SKILL.md", async () => {
   await server.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test("DELETE /api/skills/:name deletes skill", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-skills-route-del-"));
+  const userRoot = path.join(tmp, "skills");
+  const server = Fastify();
+  registerSkillRoutes(server, makeCtx(userRoot));
+  await server.ready();
+
+  // Install first
+  const content = `---
+name: del-test
+description: "To be deleted"
+---
+# Body
+`;
+  await server.inject({
+    method: "POST",
+    url: "/api/skills/install",
+    payload: { target: "user", content }
+  });
+
+  const listBefore = await server.inject({ method: "GET", url: "/api/skills" });
+  assert.equal(listBefore.json().skills.length, 1);
+
+  const delRes = await server.inject({
+    method: "DELETE",
+    url: "/api/skills/del-test",
+    payload: { target: "user" }
+  });
+  assert.equal(delRes.statusCode, 200);
+  assert.equal(delRes.json().success, true);
+  assert.equal(delRes.json().deleted, true);
+
+  const listAfter = await server.inject({ method: "GET", url: "/api/skills" });
+  assert.equal(listAfter.json().skills.length, 0);
+
+  await server.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("POST /api/skills/open-folder returns allowlisted folder path", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-skills-route-folder-"));
+  const userRoot = path.join(tmp, "skills");
+  const server = Fastify();
+  registerSkillRoutes(server, makeCtx(userRoot));
+  await server.ready();
+
+  const res = await server.inject({
+    method: "POST",
+    url: "/api/skills/open-folder",
+    payload: { target: "user" }
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().target, "user");
+  assert.ok(fs.existsSync(res.json().path));
+
+  await server.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

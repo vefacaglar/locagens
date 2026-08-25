@@ -43,6 +43,9 @@ const emit = defineEmits<{
   (e: 'clear-memories'): void;
   (e: 'refresh-skills'): void;
   (e: 'install-skill-file', payload: { target: 'user' | 'project'; file: File }): void;
+  (e: 'create-skill', payload: { target: 'user' | 'project'; name: string; description: string; body: string }): void;
+  (e: 'delete-skill', payload: { target: 'user' | 'project'; name: string }): void;
+  (e: 'open-skills-folder', target: 'user' | 'project'): void;
   (e: 'update:activeTab', value: TabId): void;
 }>();
 
@@ -198,6 +201,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 :status-message="skillsStatusMessage"
                 @refresh="emit('refresh-skills')"
                 @install-file="emit('install-skill-file', $event)"
+                @create-skill="emit('create-skill', $event)"
+                @delete-skill="emit('delete-skill', $event)"
+                @open-folder="emit('open-skills-folder', $event)"
               />
               <ProvidersTab
                 v-else-if="localActiveTab === 'providers'"

@@ -90,6 +90,7 @@ every `/api/*` route requires the process-local bearer token._
 |--------|------|-------------|--------------------------|
 | GET | `/api/skills` | List discovered skills + folder roots (optional `projectPath`) | `ctx.skillRegistry.listSummaries`, `userRoot`, `projectRoot` |
 | POST | `/api/skills/install` | Install SKILL.md text into user/project skills (`target`, `content`, optional `projectPath`) | `ctx.skillRegistry.installSkillMd` |
+| DELETE | `/api/skills/:name` | Delete a skill from user or project root (`target`, optional `projectPath`) | `ctx.skillRegistry.deleteSkill` |
 | POST | `/api/skills/open-folder` | Resolve/create allowlisted skills dir (`user` \| `project`) | `ctx.skillRegistry.ensureUserRoot` / `ensureProjectRoot` |
 
 ---

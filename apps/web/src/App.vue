@@ -70,7 +70,7 @@ import { useIsMobile } from './composables/useIsMobile';
 import { usePlanApproval } from './composables/usePlanApproval';
 import { STORAGE_KEYS, runStorageKeys } from './lib/storageKeys';
 
-const { activeDialog } = useCustomDialog();
+const { activeDialog, showConfirm } = useCustomDialog();
 const isMobile = useIsMobile();
 
 const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'providers' | 'agents' | 'server'>('permissions');
@@ -95,6 +95,35 @@ function installSkillFile(payload: { target: 'user' | 'project'; file: File }) {
     projects.activeProjectPath.value || undefined
   );
 }
+
+function createSkill(payload: { target: 'user' | 'project'; name: string; description: string; body: string }) {
+  void skills.createSkill({
+    ...payload,
+    projectPath: projects.activeProjectPath.value || undefined
+  });
+}
+
+async function deleteSkill(payload: { target: 'user' | 'project'; name: string }) {
+  if (!(await showConfirm(`Are you sure you want to delete skill "${payload.name}"?`))) return;
+  await skills.deleteSkill(
+    payload.target,
+    payload.name,
+    projects.activeProjectPath.value || undefined
+  );
+}
+
+function openSkillsFolder(target: 'user' | 'project') {
+  void skills.openFolder(
+    target,
+    projects.activeProjectPath.value || undefined
+  );
+}
+
+watch(() => projects.activeProjectPath.value, (newPath) => {
+  if (showSettings.value) {
+    void skills.loadSkills(newPath || undefined);
+  }
+});
 
 function handleEscape(e: KeyboardEvent) {
   if (e.key === 'Escape' && activeDialog.value) {
@@ -543,6 +572,9 @@ onUnmounted(() => {
       @clear-memories="memories.clearMemories"
       @refresh-skills="refreshSkills"
       @install-skill-file="installSkillFile"
+      @create-skill="createSkill"
+      @delete-skill="deleteSkill"
+      @open-skills-folder="openSkillsFolder"
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

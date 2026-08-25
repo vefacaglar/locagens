@@ -234,6 +234,12 @@ export const api = {
       body: payload,
       errorFallback: 'Failed to install skill.'
     }),
+  deleteSkill: (payload: { target: 'user' | 'project'; name: string; projectPath?: string }) =>
+    requestJson<{ success: true; deleted: boolean }>(`/api/skills/${encodeURIComponent(payload.name)}`, {
+      method: 'DELETE',
+      body: { target: payload.target, projectPath: payload.projectPath },
+      errorFallback: 'Failed to delete skill.'
+    }),
   openSkillsFolder: async (target: 'user' | 'project', projectPath?: string) => {
     const result = await requestJson<{ path: string; target: 'user' | 'project' }>(
       '/api/skills/open-folder',

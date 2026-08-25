@@ -92,10 +92,11 @@ export class SkillRegistry {
 
   /** Public catalog rows for Settings / prompt injection. */
   listSummaries(projectPath?: string | null): SkillSummary[] {
-    return this.discover(projectPath).map(({ name, description, source }) => ({
+    return this.discover(projectPath).map(({ name, description, source, body }) => ({
       name,
       description,
-      source
+      source,
+      body
     }));
   }
 
@@ -158,8 +159,62 @@ export class SkillRegistry {
     return {
       name: parsed.name,
       description: parsed.description,
-      source: target
+      source: target,
+      body: parsed.body
     };
+  }
+
+  /**
+   * Deletes a skill folder under the user or project skills root.
+   * Ensures the target path stays inside the allowlisted skills root.
+   */
+  deleteSkill(
+    target: "user" | "project",
+    name: string,
+    projectPath?: string | null
+  ): boolean {
+    const rawName = typeof name === "string" ? name.trim().toLowerCase() : "";
+    if (!rawName) throw new Error("Skill name is required.");
+    if (
+      !/^[a-z0-9][a-z0-9/_-]*$/.test(rawName) ||
+      rawName.includes("..") ||
+      rawName.startsWith("/") ||
+      rawName.endsWith("/")
+    ) {
+      throw new Error("Invalid skill name.");
+    }
+    const folderName = rawName.includes("/") ? rawName.split("/").pop()! : rawName;
+    if (!folderName) {
+      throw new Error("Invalid skill name.");
+    }
+
+    const root =
+      target === "user"
+        ? this.userRoot()
+        : (() => {
+            if (!projectPath?.trim()) throw new Error("projectPath is required for project skills.");
+            const dir = this.projectRoot(projectPath);
+            if (!dir) throw new Error("Invalid project skills path.");
+            return dir;
+          })();
+
+    if (!fs.existsSync(root)) return false;
+
+    const realRoot = fs.realpathSync.native(root);
+    const resolvedDir = path.resolve(realRoot, folderName);
+    if (resolvedDir !== realRoot && !resolvedDir.startsWith(realRoot + path.sep)) {
+      throw new Error("Skill path escapes the skills directory.");
+    }
+
+    if (!fs.existsSync(resolvedDir)) return false;
+
+    const realDir = fs.realpathSync.native(resolvedDir);
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
+      throw new Error("Skill directory resolves outside the skills root.");
+    }
+
+    fs.rmSync(resolvedDir, { recursive: true, force: true });
+    return true;
   }
 
   private scanRoot(root: string, source: "user" | "project"): DiscoveredSkill[] {

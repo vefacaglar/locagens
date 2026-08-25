@@ -125,4 +125,49 @@ export function registerSkillRoutes(server: FastifyInstance, ctx: AppContext) {
 
     return { path: dir, target: "project" as const };
   });
+
+  /**
+   * Deletes a skill by name from user or project skills root.
+   */
+  server.delete("/api/skills/:name", async (request, reply) => {
+    const params = request.params as { name?: string };
+    const query = (request.query || {}) as { target?: string; projectPath?: string };
+    const body = (request.body || {}) as { target?: string; projectPath?: string };
+
+    const name = typeof params.name === "string" ? params.name.trim() : "";
+    if (!name) {
+      reply.status(400);
+      return { error: "Skill name is required" };
+    }
+
+    const targetParam = body.target ?? query.target;
+    const target = targetParam === "project" ? "project" : targetParam === "user" ? "user" : null;
+    if (!target) {
+      reply.status(400);
+      return { error: 'target must be "user" or "project"' };
+    }
+
+    let projectPath: string | undefined;
+    if (target === "project") {
+      const raw = typeof (body.projectPath ?? query.projectPath) === "string" ? (body.projectPath ?? query.projectPath)!.trim() : "";
+      if (!raw) {
+        reply.status(400);
+        return { error: "projectPath is required for project skills" };
+      }
+      try {
+        projectPath = requireRegisteredProject(ctx.projectRepo, raw);
+      } catch (err: any) {
+        reply.status(400);
+        return { error: err?.message ?? "Invalid project path" };
+      }
+    }
+
+    try {
+      const deleted = ctx.skillRegistry.deleteSkill(target, name, projectPath);
+      return { success: true as const, deleted };
+    } catch (err: any) {
+      reply.status(400);
+      return { error: err?.message ?? "Failed to delete skill" };
+    }
+  });
 }

@@ -85,6 +85,61 @@ export function useSkills() {
     return installSkill(target, content, projectPath);
   }
 
+  async function createSkill(payload: {
+    target: 'user' | 'project';
+    name: string;
+    description: string;
+    body: string;
+    projectPath?: string;
+  }): Promise<boolean> {
+    const slug = payload.name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    const desc = payload.description.trim().replace(/"/g, '\\"');
+    const body = payload.body.trim();
+    const content = `---\nname: ${slug}\ndescription: "${desc}"\n---\n${body}\n`;
+    return installSkill(payload.target, content, payload.projectPath);
+  }
+
+  async function deleteSkill(
+    target: 'user' | 'project',
+    name: string,
+    projectPath?: string
+  ): Promise<boolean> {
+    statusMessage.value = null;
+    error.value = null;
+    try {
+      await api.deleteSkill({
+        target,
+        name,
+        projectPath: target === 'project' ? projectPath : undefined
+      });
+      statusMessage.value = `Deleted skill “${name}”.`;
+      await loadSkills(projectPath);
+      return true;
+    } catch (err: any) {
+      error.value = err?.message ?? 'Failed to delete skill.';
+      return false;
+    }
+  }
+
+  async function openFolder(target: 'user' | 'project', projectPath?: string): Promise<string | null> {
+    statusMessage.value = null;
+    error.value = null;
+    try {
+      const result = await api.openSkillsFolder(target, projectPath);
+      if (result.opened) {
+        statusMessage.value = `Opened ${result.path}`;
+      } else if (result.copied) {
+        statusMessage.value = `Path copied: ${result.path}`;
+      } else {
+        statusMessage.value = result.path;
+      }
+      return result.path;
+    } catch (err: any) {
+      error.value = err?.message ?? 'Failed to open skills folder.';
+      return null;
+    }
+  }
+
   return {
     skills,
     userRoot,
@@ -95,6 +150,9 @@ export function useSkills() {
     statusMessage,
     loadSkills,
     installSkill,
-    installSkillFile
+    installSkillFile,
+    createSkill,
+    deleteSkill,
+    openFolder
   };
 }
