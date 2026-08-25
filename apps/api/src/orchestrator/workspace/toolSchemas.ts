@@ -175,6 +175,28 @@ export const WORKSPACE_TOOLS = [
   {
     type: "function" as const,
     function: {
+      name: "search_symbols",
+      description: "Search functions, classes, interfaces, and types across the codebase by name, kind, or signature.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Symbol name or substring to find (e.g. 'executeCommand', 'AuthService', 'User')."
+          },
+          kind: {
+            type: "string",
+            description: "Optional symbol kind: 'function', 'class', 'interface', 'type', 'variable'.",
+            enum: ["function", "class", "interface", "type", "variable"]
+          }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "run_command",
       description: "Run a shell command in the workspace. Requires user approval.",
       parameters: {

@@ -270,30 +270,84 @@ async function handleDrop(e: DragEvent) {
 }
 
 // --- @ Mention Autocomplete ---
+import type { MentionItem } from './chat/MentionDropdown.vue';
+import type { CodeSymbol } from '@locagens/shared';
+
 const showMentionDropdown = ref(false);
 const mentionQuery = ref('');
 const projectFiles = ref<string[]>([]);
+const projectSymbols = ref<CodeSymbol[]>([]);
 const mentionSelectedIndex = ref(0);
 const mentionStartIndex = ref(-1);
 
-async function loadProjectFiles() {
+async function loadProjectMentions() {
   if (!props.activeProjectPath) return;
   try {
-    const res = await api.getProjectFiles(props.activeProjectPath);
-    projectFiles.value = res?.files || [];
+    const [filesRes, symbolsRes] = await Promise.all([
+      api.getProjectFiles(props.activeProjectPath),
+      api.getProjectSymbols(props.activeProjectPath)
+    ]);
+    projectFiles.value = filesRes?.files || [];
+    projectSymbols.value = symbolsRes?.symbols || [];
   } catch {
-    projectFiles.value = [];
+    /* ignore */
   }
 }
 
 watch(() => props.activeProjectPath, () => {
-  void loadProjectFiles();
+  void loadProjectMentions();
 }, { immediate: true });
 
-const filteredMentionFiles = computed(() => {
+function getMentionFileIcon(file: string): string {
+  const ext = file.split('.').pop()?.toLowerCase() || '';
+  if (['ts', 'js', 'vue', 'jsx', 'tsx'].includes(ext)) return '⚡';
+  if (['json', 'yaml', 'yml', 'toml'].includes(ext)) return '⚙️';
+  if (['md', 'txt', 'doc'].includes(ext)) return '📝';
+  if (['css', 'scss', 'less'].includes(ext)) return '🎨';
+  if (['html', 'svg'].includes(ext)) return '🌐';
+  if (['py', 'rb', 'go', 'rs', 'java', 'c', 'cpp'].includes(ext)) return '💻';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return '🖼️';
+  return '📄';
+}
+
+const mentionItems = computed<MentionItem[]>(() => {
   const q = mentionQuery.value.toLowerCase().trim();
-  if (!q) return projectFiles.value.slice(0, 50);
-  return projectFiles.value.filter((f) => f.toLowerCase().includes(q)).slice(0, 50);
+  const list: MentionItem[] = [];
+
+  // 1. Matching symbols
+  for (const s of projectSymbols.value) {
+    if (!q || s.name.toLowerCase().includes(q) || s.filePath.toLowerCase().includes(q)) {
+      list.push({
+        type: 'symbol',
+        name: s.name,
+        subText: `${s.filePath}:${s.line}`,
+        icon: s.kind === 'function' ? 'ƒ' : (s.kind === 'class' ? '©' : (s.kind === 'interface' ? 'ℹ' : '◈')),
+        kind: s.kind,
+        filePath: s.filePath,
+        line: s.line,
+        symbol: s
+      });
+      if (list.length >= 25) break;
+    }
+  }
+
+  // 2. Matching files
+  for (const f of projectFiles.value) {
+    if (!q || f.toLowerCase().includes(q)) {
+      const fileName = f.split('/').pop() || f;
+      const fileDir = f.split('/').slice(0, -1).join('/');
+      list.push({
+        type: 'file',
+        name: fileName,
+        subText: fileDir,
+        icon: getMentionFileIcon(f),
+        filePath: f
+      });
+      if (list.length >= 60) break;
+    }
+  }
+
+  return list;
 });
 
 function handleTextareaInput(e: Event) {
@@ -311,7 +365,7 @@ function handleTextareaInput(e: Event) {
     mentionStartIndex.value = cursor - atMatch[1].length - 1;
     mentionSelectedIndex.value = 0;
     if (projectFiles.value.length === 0) {
-      void loadProjectFiles();
+      void loadProjectMentions();
     }
   } else {
     showMentionDropdown.value = false;
@@ -319,19 +373,22 @@ function handleTextareaInput(e: Event) {
   adjustHeight();
 }
 
-function handleSelectMention(filePath: string) {
+function handleSelectMention(item: MentionItem) {
   const text = props.taskInput || '';
   const start = mentionStartIndex.value;
   if (start >= 0) {
     const before = text.slice(0, start);
     const after = text.slice(start + mentionQuery.value.length + 1);
-    const newText = `${before}@${filePath} ${after}`;
+    const insertTag = item.type === 'symbol'
+      ? `@${item.filePath}#L${item.line} `
+      : `@${item.filePath} `;
+    const newText = `${before}${insertTag}${after}`;
     emit('update:taskInput', newText);
     showMentionDropdown.value = false;
     nextTick(() => {
       if (textarea.value) {
         textarea.value.focus();
-        const newCursor = start + filePath.length + 2;
+        const newCursor = start + insertTag.length;
         textarea.value.setSelectionRange(newCursor, newCursor);
       }
     });
@@ -339,20 +396,20 @@ function handleSelectMention(filePath: string) {
 }
 
 function handleTextareaKeyDown(e: KeyboardEvent) {
-  if (showMentionDropdown.value && filteredMentionFiles.value.length > 0) {
+  if (showMentionDropdown.value && mentionItems.value.length > 0) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      mentionSelectedIndex.value = (mentionSelectedIndex.value + 1) % filteredMentionFiles.value.length;
+      mentionSelectedIndex.value = (mentionSelectedIndex.value + 1) % mentionItems.value.length;
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      mentionSelectedIndex.value = (mentionSelectedIndex.value - 1 + filteredMentionFiles.value.length) % filteredMentionFiles.value.length;
+      mentionSelectedIndex.value = (mentionSelectedIndex.value - 1 + mentionItems.value.length) % mentionItems.value.length;
       return;
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
-      const selected = filteredMentionFiles.value[mentionSelectedIndex.value];
+      const selected = mentionItems.value[mentionSelectedIndex.value];
       if (selected) {
         handleSelectMention(selected);
         return;
@@ -739,7 +796,7 @@ onBeforeUnmount(() => {
         <!-- @ Mention File Dropdown -->
         <MentionDropdown
           :is-open="showMentionDropdown"
-          :files="filteredMentionFiles"
+          :items="mentionItems"
           :selected-index="mentionSelectedIndex"
           @select="handleSelectMention"
           @close="showMentionDropdown = false"

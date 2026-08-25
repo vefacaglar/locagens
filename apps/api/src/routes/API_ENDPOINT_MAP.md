@@ -119,6 +119,14 @@ every `/api/*` route requires the process-local bearer token._
 
 ---
 
+## `symbols.ts` — `registerSymbolRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/projects/symbols` | Search functions, classes, interfaces across workspace | `ctx.symbolIndexer.search(...)` |
+
+---
+
 ## `settings.ts` — `registerSettingsRoutes`
 
 | Method | Path | Description | Repo / Orchestrator Call |

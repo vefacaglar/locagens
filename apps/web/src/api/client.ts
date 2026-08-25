@@ -19,7 +19,8 @@ import type {
   McpServersResponse,
   ProcessInfo,
   ProcessesResponse,
-  ProcessLogsResponse
+  ProcessLogsResponse,
+  SymbolsResponse
 } from '@locagens/shared';
 
 interface DesktopApiResponse {
@@ -210,6 +211,11 @@ export const api = {
   getProjectFiles: (path: string, query?: string) => {
     const q = query ? `&query=${encodeURIComponent(query)}` : '';
     return getJson<{ files: string[] }>(`/api/projects/files?path=${encodeURIComponent(path)}${q}`);
+  },
+  getProjectSymbols: (path: string, query?: string, kind?: string) => {
+    const q = query ? `&query=${encodeURIComponent(query)}` : '';
+    const k = kind ? `&kind=${encodeURIComponent(kind)}` : '';
+    return getJson<SymbolsResponse>(`/api/projects/symbols?path=${encodeURIComponent(path)}${q}${k}`);
   },
   getPermissions: () => getJson<PermissionRule[]>('/api/permissions'),
   getUsageLogs: (params?: {

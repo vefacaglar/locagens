@@ -1,57 +1,49 @@
 <script setup lang="ts">
+import type { CodeSymbol } from '@locagens/shared';
+
+export interface MentionItem {
+  type: 'file' | 'symbol';
+  name: string;
+  subText: string;
+  icon: string;
+  kind?: string;
+  filePath: string;
+  line?: number;
+  symbol?: CodeSymbol;
+}
+
 const props = defineProps<{
-  files: string[];
+  items: MentionItem[];
   selectedIndex: number;
   isOpen: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: 'select', file: string): void;
+  (e: 'select', item: MentionItem): void;
   (e: 'close'): void;
 }>();
-
-function getFileIcon(file: string): string {
-  const ext = file.split('.').pop()?.toLowerCase() || '';
-  if (['ts', 'js', 'vue', 'jsx', 'tsx'].includes(ext)) return '⚡';
-  if (['json', 'yaml', 'yml', 'toml'].includes(ext)) return '⚙️';
-  if (['md', 'txt', 'doc'].includes(ext)) return '📝';
-  if (['css', 'scss', 'less'].includes(ext)) return '🎨';
-  if (['html', 'svg'].includes(ext)) return '🌐';
-  if (['py', 'rb', 'go', 'rs', 'java', 'c', 'cpp'].includes(ext)) return '💻';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return '🖼️';
-  return '📄';
-}
-
-function getFileName(file: string): string {
-  return file.split('/').pop() || file;
-}
-
-function getFileDir(file: string): string {
-  const parts = file.split('/');
-  parts.pop();
-  return parts.join('/');
-}
 </script>
 
 <template>
-  <div v-if="isOpen && files.length > 0" class="mention-dropdown">
+  <div v-if="isOpen && items.length > 0" class="mention-dropdown">
     <div class="mention-dropdown-header">
-      <span class="mention-header-title">Files (@mention)</span>
+      <span class="mention-header-title">Files & Symbols (@mention)</span>
       <span class="mention-header-hint">↑↓ navigate · ↵ select · esc dismiss</span>
     </div>
     <div class="mention-list">
       <button
-        v-for="(file, idx) in files"
-        :key="file"
+        v-for="(item, idx) in items"
+        :key="`${item.type}-${item.filePath}-${item.name}-${idx}`"
         type="button"
         class="mention-item"
         :class="{ active: idx === selectedIndex }"
-        @mousedown.prevent="emit('select', file)"
+        @mousedown.prevent="emit('select', item)"
       >
-        <span class="mention-icon">{{ getFileIcon(file) }}</span>
+        <span class="mention-icon">{{ item.icon }}</span>
         <div class="mention-details truncate">
-          <span class="mention-name">{{ getFileName(file) }}</span>
-          <span v-if="getFileDir(file)" class="mention-dir truncate">{{ getFileDir(file) }}</span>
+          <span class="mention-name">{{ item.name }}</span>
+          <span v-if="item.kind" class="mention-kind-badge" :class="item.kind">{{ item.kind }}</span>
+          <span v-if="item.subText" class="mention-dir truncate">{{ item.subText }}</span>
         </div>
       </button>
     </div>
@@ -64,8 +56,8 @@ function getFileDir(file: string): string {
   bottom: calc(100% + 8px);
   left: 12px;
   width: calc(100% - 24px);
-  max-width: 440px;
-  max-height: 240px;
+  max-width: 480px;
+  max-height: 260px;
   background: var(--surface, #1e1e1e);
   border: 1px solid var(--border, #333);
   border-radius: 8px;
@@ -145,6 +137,34 @@ function getFileDir(file: string): string {
   font-weight: 500;
   color: var(--text-primary, #fff);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.mention-kind-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.mention-kind-badge.function {
+  background: rgba(160, 100, 255, 0.2);
+  color: #b088ff;
+}
+
+.mention-kind-badge.class {
+  background: rgba(56, 139, 253, 0.2);
+  color: #58a6ff;
+}
+
+.mention-kind-badge.interface {
+  background: rgba(46, 160, 67, 0.2);
+  color: #3fb950;
+}
+
+.mention-kind-badge.type {
+  background: rgba(210, 153, 34, 0.2);
+  color: #d29922;
 }
 
 .mention-dir {

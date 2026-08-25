@@ -21,6 +21,7 @@ import { Orchestrator } from "./orchestrator/Orchestrator.js";
 import { SkillRegistry } from "./orchestrator/skills/index.js";
 import { McpClientManager, McpConfigStore } from "./orchestrator/mcp/index.js";
 import { ProcessManager } from "./orchestrator/processes/ProcessManager.js";
+import { SymbolIndexer } from "./orchestrator/symbols/index.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
 import { requireRegisteredProject } from "./security/projectPaths.js";
 
@@ -41,6 +42,7 @@ export interface AppContext {
   skillRegistry: SkillRegistry;
   mcpManager: McpClientManager;
   processManager: ProcessManager;
+  symbolIndexer: SymbolIndexer;
   settingsStore: AppSettingsStore;
   defaultProjectPath: string;
 }
@@ -57,6 +59,7 @@ export function createAppContext(): AppContext {
   const skillRegistry = new SkillRegistry();
   const mcpManager = new McpClientManager(new McpConfigStore());
   const processManager = new ProcessManager();
+  const symbolIndexer = new SymbolIndexer();
   const orchestrator = new Orchestrator(
     runRepo,
     messageRepo,
@@ -82,6 +85,7 @@ export function createAppContext(): AppContext {
     skillRegistry,
     mcpManager,
     processManager,
+    symbolIndexer,
     settingsStore,
     defaultProjectPath: process.cwd()
   };

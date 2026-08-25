@@ -527,3 +527,19 @@ export interface McpPrompt {
   }>;
 }
 
+export type SymbolKind = 'function' | 'class' | 'interface' | 'type' | 'variable' | 'component';
+
+export interface CodeSymbol {
+  name: string;
+  kind: SymbolKind;
+  filePath: string;
+  line: number;
+  preview: string;
+  containerName?: string;
+}
+
+export interface SymbolsResponse {
+  symbols: CodeSymbol[];
+}
+
+

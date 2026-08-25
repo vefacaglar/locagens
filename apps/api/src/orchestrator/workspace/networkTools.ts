@@ -5,6 +5,7 @@ import { commandScansOutsideWorkspace } from "./permissionPreview.js";
 import { executeWorkspaceTool } from "./fileToolExecutor.js";
 import { safeFetchText } from "../../security/SafeHttpClient.js";
 import { commandSandbox, normalizeCommandTimeout, normalizeNetworkDomains } from "../../security/CommandSandbox.js";
+import { SymbolIndexer } from "../symbols/index.js";
 
 /**
  * The async tools (shell + network) and the orchestrator's execution entry
@@ -19,6 +20,21 @@ import { commandSandbox, normalizeCommandTimeout, normalizeNetworkDomains } from
  * call this so web fetches resolve.
  */
 export async function executeWorkspaceToolAsync(run: Run, toolCall: ToolCall): Promise<string> {
+  if (toolCall.function.name === "search_symbols") {
+    try {
+      const args = JSON.parse(toolCall.function.arguments);
+      const baseDir = path.resolve(run.projectPath || process.cwd());
+      const indexer = new SymbolIndexer();
+      const matches = await indexer.search(
+        baseDir,
+        typeof args.query === "string" ? args.query : "",
+        args.kind
+      );
+      return JSON.stringify({ success: true, count: matches.length, symbols: matches });
+    } catch (err: any) {
+      return JSON.stringify({ success: false, error: err.message });
+    }
+  }
   if (toolCall.function.name === "run_command") {
     try {
       const args = JSON.parse(toolCall.function.arguments);
