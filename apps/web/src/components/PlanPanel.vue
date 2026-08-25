@@ -10,6 +10,7 @@ import ReasoningPanel from './ReasoningPanel.vue';
 import ThemedButton from './ui/ThemedButton.vue';
 import DiffView from './DiffView.vue';
 import Spinner from './ui/Spinner.vue';
+import WebPreview from './chat/WebPreview.vue';
 import { api } from '../api/client';
 import { runStorageKeys } from '../lib/storageKeys';
 import { lineDiff, type DiffRow } from '../lib/diff';
@@ -59,7 +60,7 @@ function handleMouseUp() {
   emit('resize-end');
 }
 
-type StaticTab = 'plan' | 'agents' | 'review';
+type StaticTab = 'plan' | 'agents' | 'review' | 'preview';
 type PanelTab = StaticTab | `file:${string}`;
 
 const activeTab = ref<PanelTab>('plan');
@@ -372,6 +373,7 @@ const tabs = computed(() => {
   if (plan.value) list.push({ id: 'plan', label: 'Plan' });
   if (agents.value.length) list.push({ id: 'agents', label: 'Agents' });
   if (changes.value.length || isGitRepo.value) list.push({ id: 'review', label: 'Review' });
+  list.push({ id: 'preview', label: 'Preview' });
   for (const id of openFileTabs.value) {
     const change = changes.value.find(c => c.id === id);
     if (change) list.push({ id: `file:${id}`, label: shortPath(change.path) });
@@ -1195,6 +1197,10 @@ defineExpose({
           No inline diff is available for this change.
         </p>
       </section>
+
+      <section v-else-if="activeTab === 'preview'" class="panel-section preview-panel-section">
+        <WebPreview />
+      </section>
     </div>
 
     <footer v-if="showActions && plan && activeTab === 'plan'" class="plan-panel-actions">
@@ -1277,6 +1283,13 @@ defineExpose({
     opacity: 1 !important;
     pointer-events: none !important;
   }
+}
+
+.preview-panel-section {
+  padding: 0 !important;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .workspace-panel-header {
