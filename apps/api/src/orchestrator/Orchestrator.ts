@@ -7,6 +7,7 @@ import { DELEGATE_TASKS_TOOL, DELEGATE_UTILITY_TOOL } from "./workspaceTools.js"
 import { availableSchemas } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
 import { SkillRegistry, type DiscoveredSkill } from "./skills/index.js";
+import { McpClientManager, McpConfigStore, adaptMcpToolsToSchemas } from "./mcp/index.js";
 import { RunMessageStream } from "./RunMessageStream.js";
 import { PermissionCoordinator, type PermissionDecision } from "./PermissionCoordinator.js";
 import { QuestionCoordinator } from "./QuestionCoordinator.js";
@@ -33,6 +34,8 @@ export class Orchestrator {
   private delegation: DelegationCoordinator;
   // Discovers SKILL.md packs for the main agent (catalog + load_skill).
   private skillRegistry: SkillRegistry;
+  // Manages active MCP servers and tools.
+  private mcpManager: McpClientManager;
   // Skills discovered for the in-flight drive(); empty when idle.
   private driveSkills: DiscoveredSkill[] = [];
 
@@ -43,9 +46,11 @@ export class Orchestrator {
     private planRepo: IPlanRepository,
     private memoryRepo: IMemoryRepository,
     private usageLogRepo: IUsageLogRepository,
-    skillRegistry?: SkillRegistry
+    skillRegistry?: SkillRegistry,
+    mcpManager?: McpClientManager
   ) {
     this.skillRegistry = skillRegistry ?? new SkillRegistry();
+    this.mcpManager = mcpManager ?? new McpClientManager(new McpConfigStore());
     this.messages = new RunMessageStream(this.runRepo, this.messageRepo);
     this.permissions = new PermissionCoordinator(this.activeRuns, this.messages);
     this.questions = new QuestionCoordinator(this.activeRuns, this.messages);
@@ -54,6 +59,7 @@ export class Orchestrator {
       planRepo: this.planRepo,
       memoryRepo: this.memoryRepo,
       eventBus,
+      mcpManager: this.mcpManager,
       getSkills: () => this.driveSkills,
       requestUserAnswer: (runId, questions) => this.questions.request(runId, questions),
       isActive: (runId) => this.activeRuns.has(runId),
@@ -207,7 +213,12 @@ export class Orchestrator {
       // The orchestrator-native tools the strategy allows: update_plan (plan
       // mode only) plus set_chat_title / ask_user_question / remember (every
       // mode). Sub-agents never get these. See orchestrator/tools.
-      const tools = [...withUtility, ...availableSchemas(strategy)];
+      const nativeTools = [...withUtility, ...availableSchemas(strategy)];
+
+      // Active MCP tools from enabled MCP servers for this context.
+      const mcpTools = await this.mcpManager.getAllActiveTools(run.projectPath);
+      const mcpSchemas = adaptMcpToolsToSchemas(mcpTools);
+      const tools = [...nativeTools, ...mcpSchemas];
 
       // Durable memories for this run's context (all global + this project's),
       // injected into the system prompt so the model honors them from the start.

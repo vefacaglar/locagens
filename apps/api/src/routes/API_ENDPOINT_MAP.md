@@ -95,6 +95,18 @@ every `/api/*` route requires the process-local bearer token._
 
 ---
 
+## `mcp.ts` — `registerMcpRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/mcp/servers` | List configured MCP servers, connection status and tools | `ctx.mcpManager.getStatusList(projectPath)` |
+| POST | `/api/mcp/servers` | Save/create MCP server configuration | `ctx.mcpManager.getConfigStore().saveConfig`, `restartServer` |
+| DELETE | `/api/mcp/servers/:name` | Remove an MCP server configuration | `ctx.mcpManager.deleteServer` |
+| POST | `/api/mcp/servers/:name/restart` | Restart/reconnect an MCP server process | `ctx.mcpManager.restartServer` |
+| POST | `/api/mcp/servers/:name/toggle` | Enable or disable an MCP server | `ctx.mcpManager.toggleServer` |
+
+---
+
 ## `settings.ts` — `registerSettingsRoutes`
 
 | Method | Path | Description | Repo / Orchestrator Call |

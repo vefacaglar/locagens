@@ -4,6 +4,8 @@ import type { IRunRepository, IPlanRepository, IMemoryRepository } from "../../d
 import type { eventBus } from "../eventBus.js";
 import type { DiscoveredSkill } from "../skills/index.js";
 
+import type { McpClientManager } from "../mcp/index.js";
+
 /** The user's reply to an ask_user_question request, aligned to the questions order. */
 export interface QuestionAnswerInput {
   selections: string[][];  // chosen option labels per question
@@ -21,6 +23,7 @@ export interface OrchestratorToolContext {
   planRepo: IPlanRepository;
   memoryRepo: IMemoryRepository;
   eventBus: typeof eventBus;
+  mcpManager?: McpClientManager;
   /** Skills discovered for the active drive() (empty outside a run). */
   getSkills(): DiscoveredSkill[];
   /** Pauses the run and waits for the user's answer (QuestionCoordinator). */

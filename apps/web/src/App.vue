@@ -29,6 +29,7 @@ const {
   permissions,
   memories,
   skills,
+  mcp,
   showSettings,
   openSettings,
   closeSettings,
@@ -73,10 +74,10 @@ import { STORAGE_KEYS, runStorageKeys } from './lib/storageKeys';
 const { activeDialog, showConfirm } = useCustomDialog();
 const isMobile = useIsMobile();
 
-const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'providers' | 'agents' | 'server'>('permissions');
+const settingsTab = ref<'permissions' | 'memory' | 'skills' | 'mcp' | 'providers' | 'agents' | 'server'>('permissions');
 
 async function handleOpenSettings(tab?: string) {
-  if (tab === 'permissions' || tab === 'memory' || tab === 'skills' || tab === 'providers' || tab === 'agents' || tab === 'server') {
+  if (tab === 'permissions' || tab === 'memory' || tab === 'skills' || tab === 'mcp' || tab === 'providers' || tab === 'agents' || tab === 'server') {
     settingsTab.value = tab;
   } else {
     settingsTab.value = 'permissions';
@@ -119,9 +120,15 @@ function openSkillsFolder(target: 'user' | 'project') {
   );
 }
 
+async function deleteMcpServer(name: string) {
+  if (!(await showConfirm(`Are you sure you want to delete MCP server "${name}"?`))) return;
+  await mcp.deleteServer(name, projects.activeProjectPath.value || undefined);
+}
+
 watch(() => projects.activeProjectPath.value, (newPath) => {
   if (showSettings.value) {
     void skills.loadSkills(newPath || undefined);
+    void mcp.loadServers(newPath || undefined);
   }
 });
 
@@ -559,6 +566,11 @@ onUnmounted(() => {
       :skills-error="skills.error.value"
       :skills-status-message="skills.statusMessage.value"
       :skills-installing="skills.isInstalling.value"
+      :mcp-servers="mcp.servers.value"
+      :mcp-loading="mcp.isLoading.value"
+      :mcp-saving="mcp.isSaving.value"
+      :mcp-error="mcp.error.value"
+      :mcp-status-message="mcp.statusMessage.value"
       :active-project-path="projects.activeProjectPath.value"
       :active-project-name="projects.activeProject.value?.name || ''"
       @close="closeSettings"
@@ -575,6 +587,11 @@ onUnmounted(() => {
       @create-skill="createSkill"
       @delete-skill="deleteSkill"
       @open-skills-folder="openSkillsFolder"
+      @refresh-mcp="mcp.loadServers(projects.activeProjectPath.value || undefined)"
+      @save-mcp-server="mcp.saveServer($event, projects.activeProjectPath.value || undefined)"
+      @delete-mcp-server="deleteMcpServer"
+      @restart-mcp-server="mcp.restartServer($event, projects.activeProjectPath.value || undefined)"
+      @toggle-mcp-server="mcp.toggleServer($event.name, $event.enabled, projects.activeProjectPath.value || undefined)"
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

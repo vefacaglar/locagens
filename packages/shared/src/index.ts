@@ -429,3 +429,53 @@ export interface RunUsageSummary {
     outputTokens: number;
   }>;
 }
+
+// ============================================================================
+// Model Context Protocol (MCP) Types
+// ============================================================================
+
+export type McpTransportType = "stdio" | "sse";
+export type McpServerScope = "user" | "project";
+export type McpConnectionStatus = "connected" | "connecting" | "disconnected" | "error" | "disabled";
+
+export interface McpToolParameter {
+  type: string;
+  description?: string;
+  [key: string]: any;
+}
+
+export interface McpToolDefinition {
+  name: string;
+  originalName: string;
+  serverName: string;
+  description?: string;
+  inputSchema?: {
+    type?: string;
+    properties?: Record<string, McpToolParameter>;
+    required?: string[];
+    [key: string]: any;
+  };
+}
+
+export interface McpServerConfig {
+  name: string;
+  scope: McpServerScope;
+  transport: McpTransportType;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  enabled: boolean;
+  projectPath?: string;
+}
+
+export interface McpServerInfo {
+  config: McpServerConfig;
+  status: McpConnectionStatus;
+  error?: string | null;
+  tools: McpToolDefinition[];
+}
+
+export interface McpServersResponse {
+  servers: McpServerInfo[];
+}

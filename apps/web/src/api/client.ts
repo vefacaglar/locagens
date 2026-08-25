@@ -1,4 +1,23 @@
-import type { ProviderMetadata, Run, RunMessage, Project, PermissionRule, Plan, AgentPreset, Memory, MemoryCategory, MemoryScope, AppSettings, PaginatedUsageLogs, RunUsageSummary, SecurityStatus, SkillsListResponse } from '@locagens/shared';
+import type {
+  ProviderMetadata,
+  Run,
+  RunMessage,
+  Project,
+  PermissionRule,
+  Plan,
+  AgentPreset,
+  Memory,
+  MemoryCategory,
+  MemoryScope,
+  AppSettings,
+  PaginatedUsageLogs,
+  RunUsageSummary,
+  SecurityStatus,
+  SkillsListResponse,
+  McpServerConfig,
+  McpServerInfo,
+  McpServersResponse
+} from '@locagens/shared';
 
 interface DesktopApiResponse {
   status: number;
@@ -264,6 +283,35 @@ export const api = {
     }
     return { ...result, opened: false as const, copied: false as const };
   },
+
+  getMcpServers: (projectPath?: string) => {
+    const q = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return getJson<McpServersResponse>(`/api/mcp/servers${q}`);
+  },
+  saveMcpServer: (config: McpServerConfig) =>
+    requestJson<{ success: true; server: McpServerInfo }>('/api/mcp/servers', {
+      method: 'POST',
+      body: config,
+      errorFallback: 'Failed to save MCP server.'
+    }),
+  deleteMcpServer: (name: string, projectPath?: string) =>
+    requestJson<{ success: true; deleted: boolean }>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      body: { projectPath },
+      errorFallback: 'Failed to delete MCP server.'
+    }),
+  restartMcpServer: (name: string, projectPath?: string) =>
+    requestJson<{ success: true; server: McpServerInfo }>(`/api/mcp/servers/${encodeURIComponent(name)}/restart`, {
+      method: 'POST',
+      body: { projectPath },
+      errorFallback: 'Failed to restart MCP server.'
+    }),
+  toggleMcpServer: (name: string, enabled: boolean, projectPath?: string) =>
+    requestJson<{ success: true; server: McpServerInfo }>(`/api/mcp/servers/${encodeURIComponent(name)}/toggle`, {
+      method: 'POST',
+      body: { enabled, projectPath },
+      errorFallback: 'Failed to toggle MCP server.'
+    }),
 
   createRun: (payload: CreateRunPayload) =>
     requestJson<Run>('/api/runs', { method: 'POST', body: payload, errorFallback: 'Failed to start chat.' }),

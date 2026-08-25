@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset, SkillSummary } from '@locagens/shared';
+import type { Memory, MemoryCategory, MemoryScope, PermissionRule, ProviderMetadata, AgentPreset, SkillSummary, McpServerInfo, McpServerConfig } from '@locagens/shared';
 import { useIsMobile } from '../../composables/useIsMobile';
 import PermissionsTab from './PermissionsTab.vue';
 import ProvidersTab from './ProvidersTab.vue';
 import AgentPresetsTab from './AgentPresetsTab.vue';
 import MemoryTab from './MemoryTab.vue';
 import SkillsTab from './SkillsTab.vue';
+import McpTab from './McpTab.vue';
 import ServerTab from './ServerTab.vue';
 
 const props = defineProps<{
@@ -26,6 +27,11 @@ const props = defineProps<{
   skillsError?: string | null;
   skillsStatusMessage?: string | null;
   skillsInstalling?: boolean;
+  mcpServers?: McpServerInfo[];
+  mcpLoading?: boolean;
+  mcpSaving?: boolean;
+  mcpError?: string | null;
+  mcpStatusMessage?: string | null;
   activeProjectPath: string;
   activeProjectName: string;
   activeTab?: TabId;
@@ -46,6 +52,11 @@ const emit = defineEmits<{
   (e: 'create-skill', payload: { target: 'user' | 'project'; name: string; description: string; body: string }): void;
   (e: 'delete-skill', payload: { target: 'user' | 'project'; name: string }): void;
   (e: 'open-skills-folder', target: 'user' | 'project'): void;
+  (e: 'refresh-mcp'): void;
+  (e: 'save-mcp-server', config: McpServerConfig): void;
+  (e: 'delete-mcp-server', name: string): void;
+  (e: 'restart-mcp-server', name: string): void;
+  (e: 'toggle-mcp-server', payload: { name: string; enabled: boolean }): void;
   (e: 'update:activeTab', value: TabId): void;
 }>();
 
@@ -53,6 +64,7 @@ const TABS = [
   { id: 'permissions', label: 'Permissions' },
   { id: 'memory', label: 'Memory' },
   { id: 'skills', label: 'Skills' },
+  { id: 'mcp', label: 'MCP' },
   { id: 'providers', label: 'Providers' },
   { id: 'agents', label: 'Agents' },
   { id: 'server', label: 'Server' }
@@ -204,6 +216,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 @create-skill="emit('create-skill', $event)"
                 @delete-skill="emit('delete-skill', $event)"
                 @open-folder="emit('open-skills-folder', $event)"
+              />
+              <McpTab
+                v-else-if="localActiveTab === 'mcp'"
+                :servers="mcpServers || []"
+                :is-loading="!!mcpLoading"
+                :is-saving="!!mcpSaving"
+                :error="mcpError || null"
+                :status-message="mcpStatusMessage || null"
+                :active-project-path="activeProjectPath"
+                :active-project-name="activeProjectName"
+                @refresh="emit('refresh-mcp')"
+                @save="emit('save-mcp-server', $event)"
+                @delete="emit('delete-mcp-server', $event)"
+                @restart="emit('restart-mcp-server', $event)"
+                @toggle="emit('toggle-mcp-server', $event)"
               />
               <ProvidersTab
                 v-else-if="localActiveTab === 'providers'"

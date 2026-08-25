@@ -564,6 +564,20 @@ export class AgentLoop {
       return nativeTool.execute(this.toolContext, runId, run, toolCall);
     }
 
+    // MCP tools (namespaced with mcp__<server>__<tool>)
+    if (toolName.startsWith("mcp__")) {
+      if (this.toolContext.mcpManager) {
+        let args: Record<string, any> = {};
+        try {
+          args = JSON.parse(toolCall.function.arguments || "{}");
+        } catch {
+          args = {};
+        }
+        return this.toolContext.mcpManager.callTool(toolName, args, run.projectPath);
+      }
+      return deny(`MCP tool "${toolName}" called but MCP manager is not configured.`);
+    }
+
     // Delegation fans out to coder/utility sub-agents; the orchestrator runs
     // their loops itself (the sub-agents' own tool calls are gated normally).
     // Gated by mode FIRST: runs can switch modes mid-thread, so a model

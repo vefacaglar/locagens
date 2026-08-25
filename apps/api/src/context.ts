@@ -19,6 +19,7 @@ import {
 } from "./database/repositories.js";
 import { Orchestrator } from "./orchestrator/Orchestrator.js";
 import { SkillRegistry } from "./orchestrator/skills/index.js";
+import { McpClientManager, McpConfigStore } from "./orchestrator/mcp/index.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
 import { requireRegisteredProject } from "./security/projectPaths.js";
 
@@ -37,6 +38,7 @@ export interface AppContext {
   usageLogRepo: IUsageLogRepository;
   orchestrator: Orchestrator;
   skillRegistry: SkillRegistry;
+  mcpManager: McpClientManager;
   settingsStore: AppSettingsStore;
   defaultProjectPath: string;
 }
@@ -51,7 +53,17 @@ export function createAppContext(): AppContext {
   const memoryRepo = new MemoryRepository(db);
   const usageLogRepo = new UsageLogRepository(db);
   const skillRegistry = new SkillRegistry();
-  const orchestrator = new Orchestrator(runRepo, messageRepo, registry, planRepo, memoryRepo, usageLogRepo, skillRegistry);
+  const mcpManager = new McpClientManager(new McpConfigStore());
+  const orchestrator = new Orchestrator(
+    runRepo,
+    messageRepo,
+    registry,
+    planRepo,
+    memoryRepo,
+    usageLogRepo,
+    skillRegistry,
+    mcpManager
+  );
   const settingsStore = new AppSettingsStore();
 
   return {
@@ -65,6 +77,7 @@ export function createAppContext(): AppContext {
     usageLogRepo,
     orchestrator,
     skillRegistry,
+    mcpManager,
     settingsStore,
     defaultProjectPath: process.cwd()
   };
