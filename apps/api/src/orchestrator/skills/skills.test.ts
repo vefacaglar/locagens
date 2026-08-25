@@ -114,3 +114,33 @@ test("formatSkillCatalog is empty without skills and lists names when present", 
   assert.match(text, /- a \(user\): Alpha skill/);
   assert.match(text, /- b \(project\): Beta skill/);
 });
+
+test("SkillRegistry.installSkillMd writes SKILL.md under user root", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-skills-install-"));
+  const userRoot = path.join(tmp, "user-skills");
+  const registry = new SkillRegistry(userRoot);
+
+  const content = `---
+name: installed-skill
+description: "Installed via API"
+---
+# Hello
+Do stuff.
+`;
+  const summary = registry.installSkillMd("user", content);
+  assert.equal(summary.name, "installed-skill");
+  assert.equal(summary.source, "user");
+
+  const written = fs.readFileSync(path.join(userRoot, "installed-skill", "SKILL.md"), "utf-8");
+  assert.match(written, /Do stuff/);
+  assert.equal(registry.discover().length, 1);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("SkillRegistry.installSkillMd rejects invalid content", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-skills-bad-"));
+  const registry = new SkillRegistry(path.join(tmp, "skills"));
+  assert.throws(() => registry.installSkillMd("user", "not a skill"), /Invalid SKILL/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

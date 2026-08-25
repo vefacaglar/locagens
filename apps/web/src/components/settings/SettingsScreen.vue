@@ -25,6 +25,7 @@ const props = defineProps<{
   skillsProjectRoot: string | null;
   skillsError?: string | null;
   skillsStatusMessage?: string | null;
+  skillsInstalling?: boolean;
   activeProjectPath: string;
   activeProjectName: string;
   activeTab?: TabId;
@@ -41,7 +42,7 @@ const emit = defineEmits<{
   (e: 'delete-memory', id: number): void;
   (e: 'clear-memories'): void;
   (e: 'refresh-skills'): void;
-  (e: 'open-skills-folder', target: 'user' | 'project'): void;
+  (e: 'install-skill-file', payload: { target: 'user' | 'project'; file: File }): void;
   (e: 'update:activeTab', value: TabId): void;
 }>();
 
@@ -188,6 +189,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 v-else-if="localActiveTab === 'skills'"
                 :skills="skills"
                 :is-loading="skillsLoading"
+                :is-installing="skillsInstalling"
                 :user-root="skillsUserRoot"
                 :project-root="skillsProjectRoot"
                 :active-project-path="activeProjectPath"
@@ -195,7 +197,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
                 :error="skillsError"
                 :status-message="skillsStatusMessage"
                 @refresh="emit('refresh-skills')"
-                @open-folder="emit('open-skills-folder', $event)"
+                @install-file="emit('install-skill-file', $event)"
               />
               <ProvidersTab
                 v-else-if="localActiveTab === 'providers'"

@@ -99,6 +99,69 @@ export class SkillRegistry {
     }));
   }
 
+  /**
+   * Installs a SKILL.md into the user or project skills root. Parses frontmatter
+   * for the folder name, writes under <root>/<name>/SKILL.md. Overwrites an
+   * existing skill with the same name.
+   */
+  installSkillMd(
+    target: "user" | "project",
+    content: string,
+    projectPath?: string | null
+  ): SkillSummary {
+    const raw = typeof content === "string" ? content : "";
+    if (!raw.trim()) throw new Error("SKILL.md content is empty.");
+    if (raw.length > 120_000) throw new Error("SKILL.md is too large (max ~120KB).");
+
+    const parsed = parseSkillMd(raw);
+    if (!parsed) {
+      throw new Error(
+        'Invalid SKILL.md. Need YAML frontmatter with name and description, e.g.\n---\nname: my-skill\ndescription: "..."\n---\n'
+      );
+    }
+
+    const root =
+      target === "user"
+        ? this.ensureUserRoot()
+        : (() => {
+            if (!projectPath?.trim()) throw new Error("projectPath is required for project skills.");
+            const dir = this.ensureProjectRoot(projectPath);
+            if (!dir) throw new Error("Could not create project skills folder.");
+            return dir;
+          })();
+
+    // Folder name follows the skill name (slug). Reject path segments.
+    const folderName = parsed.name.includes("/") ? parsed.name.split("/").pop()! : parsed.name;
+    if (!folderName || folderName.includes("..") || folderName.includes(path.sep)) {
+      throw new Error("Invalid skill name.");
+    }
+
+    const skillDir = path.join(root, folderName);
+    const skillFile = path.join(skillDir, SKILL_FILE);
+
+    // Ensure the write stays inside the skills root (no symlink escape).
+    const realRoot = fs.realpathSync.native(root);
+    const resolvedDir = path.resolve(realRoot, folderName);
+    if (resolvedDir !== realRoot && !resolvedDir.startsWith(realRoot + path.sep)) {
+      throw new Error("Skill path escapes the skills directory.");
+    }
+
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    // Refuse if skillDir is a symlink pointing outside (mkdir may have followed).
+    const realDir = fs.realpathSync.native(resolvedDir);
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
+      throw new Error("Skill directory resolves outside the skills root.");
+    }
+
+    fs.writeFileSync(skillFile, raw.replace(/^\uFEFF/, ""), "utf-8");
+
+    return {
+      name: parsed.name,
+      description: parsed.description,
+      source: target
+    };
+  }
+
   private scanRoot(root: string, source: "user" | "project"): DiscoveredSkill[] {
     let entries: fs.Dirent[];
     try {

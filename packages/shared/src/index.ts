@@ -346,6 +346,7 @@ export interface SkillSummary {
   name: string;
   description: string;
   source: SkillSource;
+  body?: string;
 }
 
 /** Settings → Skills list payload (catalog + folder roots for Open folder). */

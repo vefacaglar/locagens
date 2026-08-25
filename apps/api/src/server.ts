@@ -8,6 +8,8 @@ import { isAllowedControlPlaneOrigin, registerOriginPolicy } from "./security/or
 async function start() {
   const apiToken = requireApiToken();
   const server = Fastify({
+    // SKILL.md install posts full file text as JSON (browser file picker).
+    bodyLimit: 256 * 1024,
     logger: {
       redact: ["req.headers.authorization"]
     }

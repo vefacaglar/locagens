@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import type { SkillSummary } from '@locagens/shared';
 import ThemedButton from '../ui/ThemedButton.vue';
 
 const props = defineProps<{
   skills: SkillSummary[];
   isLoading: boolean;
+  isInstalling?: boolean;
   userRoot: string;
   projectRoot: string | null;
   activeProjectPath: string;
@@ -16,12 +17,37 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'refresh'): void;
-  (e: 'open-folder', target: 'user' | 'project'): void;
+  (e: 'install-file', payload: { target: 'user' | 'project'; file: File }): void;
 }>();
 
 const userSkills = computed(() => props.skills.filter(s => s.source === 'user'));
 const projectSkills = computed(() => props.skills.filter(s => s.source === 'project'));
-const canOpenProject = computed(() => !!props.activeProjectPath);
+const canInstallProject = computed(() => !!props.activeProjectPath);
+
+const userInput = ref<HTMLInputElement | null>(null);
+const projectInput = ref<HTMLInputElement | null>(null);
+
+function pickUser() {
+  userInput.value?.click();
+}
+function pickProject() {
+  if (!canInstallProject.value) return;
+  projectInput.value?.click();
+}
+
+function onUserFiles(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (file) emit('install-file', { target: 'user', file });
+}
+
+function onProjectFiles(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (file) emit('install-file', { target: 'project', file });
+}
 </script>
 
 <template>
@@ -30,12 +56,13 @@ const canOpenProject = computed(() => !!props.activeProjectPath);
       <div>
         <h3 class="settings-section-title">Skills</h3>
         <p class="settings-section-desc">
-          Specialized instruction packs the assistant can load with
-          <code>load_skill</code>. Add a folder containing
-          <code>SKILL.md</code>, then refresh.
+          Specialized instruction packs the assistant loads with
+          <code>load_skill</code>. Use <strong>Add skill</strong> to pick a
+          <code>SKILL.md</code> from disk (works in the browser and desktop app);
+          it is copied into the app skills folder.
         </p>
       </div>
-      <ThemedButton variant="secondary" size="sm" :disabled="isLoading" @click="emit('refresh')">
+      <ThemedButton variant="secondary" size="sm" :disabled="isLoading || isInstalling" @click="emit('refresh')">
         Refresh
       </ThemedButton>
     </header>
@@ -43,14 +70,34 @@ const canOpenProject = computed(() => !!props.activeProjectPath);
     <p v-if="error" class="skills-banner skills-banner-error">{{ error }}</p>
     <p v-else-if="statusMessage" class="skills-banner">{{ statusMessage }}</p>
 
+    <input
+      ref="userInput"
+      type="file"
+      class="skills-file-input"
+      accept=".md,text/markdown,text/plain"
+      @change="onUserFiles"
+    />
+    <input
+      ref="projectInput"
+      type="file"
+      class="skills-file-input"
+      accept=".md,text/markdown,text/plain"
+      @change="onProjectFiles"
+    />
+
     <div v-if="isLoading" class="settings-empty">Loading…</div>
 
     <template v-else>
       <section class="skills-group">
         <div class="skills-group-head">
           <h4 class="skills-group-title">User skills</h4>
-          <ThemedButton variant="secondary" size="sm" @click="emit('open-folder', 'user')">
-            Open folder
+          <ThemedButton
+            variant="primary"
+            size="sm"
+            :disabled="isInstalling"
+            @click="pickUser"
+          >
+            {{ isInstalling ? 'Installing…' : 'Add skill' }}
           </ThemedButton>
         </div>
         <p v-if="userRoot" class="skills-path" :title="userRoot">{{ userRoot }}</p>
@@ -61,8 +108,8 @@ const canOpenProject = computed(() => !!props.activeProjectPath);
           </li>
         </ul>
         <p v-else class="skills-empty-hint">
-          No user skills yet. Open the folder and add
-          <code>my-skill/SKILL.md</code>.
+          No user skills yet. Click <strong>Add skill</strong> and choose a
+          <code>SKILL.md</code> file.
         </p>
       </section>
 
@@ -73,17 +120,17 @@ const canOpenProject = computed(() => !!props.activeProjectPath);
             <span v-if="activeProjectName" class="skills-project-label">· {{ activeProjectName }}</span>
           </h4>
           <ThemedButton
-            variant="secondary"
+            variant="primary"
             size="sm"
-            :disabled="!canOpenProject"
-            :title="canOpenProject ? 'Open project skills folder' : 'Select a project first'"
-            @click="emit('open-folder', 'project')"
+            :disabled="!canInstallProject || isInstalling"
+            :title="canInstallProject ? 'Install SKILL.md into this project' : 'Select a project first'"
+            @click="pickProject"
           >
-            Open folder
+            {{ isInstalling ? 'Installing…' : 'Add skill' }}
           </ThemedButton>
         </div>
         <p v-if="projectRoot" class="skills-path" :title="projectRoot">{{ projectRoot }}</p>
-        <p v-else-if="!canOpenProject" class="skills-empty-hint">
+        <p v-else-if="!canInstallProject" class="skills-empty-hint">
           Select a project to manage project-scoped skills
           (<code>.locagens/skills</code>).
         </p>
@@ -93,9 +140,9 @@ const canOpenProject = computed(() => !!props.activeProjectPath);
             <span class="skills-desc">{{ skill.description }}</span>
           </li>
         </ul>
-        <p v-else-if="canOpenProject" class="skills-empty-hint">
-          No project skills yet. Open the folder and add
-          <code>my-skill/SKILL.md</code>.
+        <p v-else-if="canInstallProject" class="skills-empty-hint">
+          No project skills yet. Click <strong>Add skill</strong> and choose a
+          <code>SKILL.md</code> file.
         </p>
       </section>
 
@@ -113,6 +160,18 @@ description: "USE FOR: … DO NOT USE FOR: …"
 </template>
 
 <style scoped>
+.skills-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .skills-banner {
   margin: 0 0 14px;
   padding: 10px 12px;

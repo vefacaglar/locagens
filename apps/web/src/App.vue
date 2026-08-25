@@ -88,8 +88,12 @@ function refreshSkills() {
   void skills.loadSkills(projects.activeProjectPath.value || undefined);
 }
 
-function openSkillsFolder(target: 'user' | 'project') {
-  void skills.openFolder(target, projects.activeProjectPath.value || undefined);
+function installSkillFile(payload: { target: 'user' | 'project'; file: File }) {
+  void skills.installSkillFile(
+    payload.target,
+    payload.file,
+    projects.activeProjectPath.value || undefined
+  );
 }
 
 function handleEscape(e: KeyboardEvent) {
@@ -525,6 +529,7 @@ onUnmounted(() => {
       :skills-project-root="skills.projectRoot.value"
       :skills-error="skills.error.value"
       :skills-status-message="skills.statusMessage.value"
+      :skills-installing="skills.isInstalling.value"
       :active-project-path="projects.activeProjectPath.value"
       :active-project-name="projects.activeProject.value?.name || ''"
       @close="closeSettings"
@@ -537,7 +542,7 @@ onUnmounted(() => {
       @delete-memory="memories.deleteMemory"
       @clear-memories="memories.clearMemories"
       @refresh-skills="refreshSkills"
-      @open-skills-folder="openSkillsFolder"
+      @install-skill-file="installSkillFile"
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

@@ -227,6 +227,13 @@ export const api = {
     const q = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
     return getJson<SkillsListResponse>(`/api/skills${q}`);
   },
+  /** Install a SKILL.md (full file text) into user or project skills. */
+  installSkill: (payload: { target: 'user' | 'project'; content: string; projectPath?: string }) =>
+    requestJson<{ success: true; skill: import('@locagens/shared').SkillSummary }>('/api/skills/install', {
+      method: 'POST',
+      body: payload,
+      errorFallback: 'Failed to install skill.'
+    }),
   openSkillsFolder: async (target: 'user' | 'project', projectPath?: string) => {
     const result = await requestJson<{ path: string; target: 'user' | 'project' }>(
       '/api/skills/open-folder',
@@ -241,7 +248,6 @@ export const api = {
       await desktop.openPath(result.path);
       return { ...result, opened: true as const };
     }
-    // Browser / outdated desktop: copy path so the user can open it manually.
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(result.path);
