@@ -20,6 +20,7 @@ import {
 import { Orchestrator } from "./orchestrator/Orchestrator.js";
 import { SkillRegistry } from "./orchestrator/skills/index.js";
 import { McpClientManager, McpConfigStore } from "./orchestrator/mcp/index.js";
+import { ProcessManager } from "./orchestrator/processes/ProcessManager.js";
 import { AppSettingsStore } from "./config/AppSettingsStore.js";
 import { requireRegisteredProject } from "./security/projectPaths.js";
 
@@ -39,6 +40,7 @@ export interface AppContext {
   orchestrator: Orchestrator;
   skillRegistry: SkillRegistry;
   mcpManager: McpClientManager;
+  processManager: ProcessManager;
   settingsStore: AppSettingsStore;
   defaultProjectPath: string;
 }
@@ -54,6 +56,7 @@ export function createAppContext(): AppContext {
   const usageLogRepo = new UsageLogRepository(db);
   const skillRegistry = new SkillRegistry();
   const mcpManager = new McpClientManager(new McpConfigStore());
+  const processManager = new ProcessManager();
   const orchestrator = new Orchestrator(
     runRepo,
     messageRepo,
@@ -78,6 +81,7 @@ export function createAppContext(): AppContext {
     orchestrator,
     skillRegistry,
     mcpManager,
+    processManager,
     settingsStore,
     defaultProjectPath: process.cwd()
   };

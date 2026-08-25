@@ -107,6 +107,18 @@ every `/api/*` route requires the process-local bearer token._
 
 ---
 
+## `processes.ts` — `registerProcessRoutes`
+
+| Method | Path | Description | Repo / Orchestrator Call |
+|--------|------|-------------|--------------------------|
+| GET | `/api/processes` | List active/stopped background processes | `ctx.processManager.list(projectPath)` |
+| POST | `/api/processes/spawn` | Start a background command/server | `ctx.processManager.spawnProcess(...)` |
+| POST | `/api/processes/:id/kill` | Terminate a running process | `ctx.processManager.kill(id)` |
+| POST | `/api/processes/:id/restart` | Restart a background process | `ctx.processManager.restart(id)` |
+| GET | `/api/processes/:id/logs` | Fetch stdout/stderr logs for a process | `ctx.processManager.getLogs(id)` |
+
+---
+
 ## `settings.ts` — `registerSettingsRoutes`
 
 | Method | Path | Description | Repo / Orchestrator Call |
@@ -122,3 +134,4 @@ every `/api/*` route requires the process-local bearer token._
 |--------|------|-------------|--------------------------|
 | GET | `/api/security/status` | Report local API and command-sandbox readiness | `commandSandbox.status()` |
 | POST | `/api/security/sandbox/setup` | Install the Windows sandbox runtime after explicit UI confirmation | `commandSandbox.installWindows()` |
+

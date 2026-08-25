@@ -6,11 +6,13 @@ defineProps<{
   currentProjectName: string;
   visibleTitle: string;
   showSidePanelToggle: boolean;
+  runningProcessesCount?: number;
 }>();
 
 const emit = defineEmits<{
   (e: 'toggle-sidebar'): void;
   (e: 'open-side-panel'): void;
+  (e: 'toggle-terminal'): void;
 }>();
 </script>
 
@@ -43,6 +45,17 @@ const emit = defineEmits<{
         </div>
       </div>
       <div class="header-actions">
+        <button
+          class="panel-toggle-btn terminal-toggle-btn"
+          :class="{ 'has-running': (runningProcessesCount ?? 0) > 0 }"
+          type="button"
+          :title="(runningProcessesCount ?? 0) > 0 ? `${runningProcessesCount} server(s) running - Open Terminal` : 'Open Dev Servers & Terminal'"
+          @click="emit('toggle-terminal')"
+        >
+          <span class="terminal-bolt-icon">⚡</span>
+          <span v-if="(runningProcessesCount ?? 0) > 0" class="running-count-badge">{{ runningProcessesCount }}</span>
+        </button>
+
         <button
           v-if="showSidePanelToggle"
           class="panel-toggle-btn"
@@ -124,4 +137,39 @@ const emit = defineEmits<{
   flex: 1;
   min-width: 0;
 }
+
+.terminal-toggle-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.terminal-bolt-icon {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.terminal-toggle-btn.has-running .terminal-bolt-icon {
+  color: #3fb950;
+}
+
+.running-count-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: #238636;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
 </style>
+

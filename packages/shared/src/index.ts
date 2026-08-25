@@ -479,3 +479,51 @@ export interface McpServerInfo {
 export interface McpServersResponse {
   servers: McpServerInfo[];
 }
+
+export type ProcessStatus = 'running' | 'stopped' | 'error';
+
+export interface ProcessInfo {
+  id: string;
+  command: string;
+  projectPath: string;
+  status: ProcessStatus;
+  startedAt: string;
+  stoppedAt?: string | null;
+  exitCode?: number | null;
+  pid?: number;
+}
+
+export interface ProcessLogEntry {
+  timestamp: string;
+  stream: 'stdout' | 'stderr' | 'system';
+  text: string;
+}
+
+export interface ProcessesResponse {
+  processes: ProcessInfo[];
+}
+
+export interface ProcessLogsResponse {
+  process: ProcessInfo;
+  logs: ProcessLogEntry[];
+}
+
+export interface McpResource {
+  uri: string;
+  name: string;
+  serverName: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface McpPrompt {
+  name: string;
+  serverName: string;
+  description?: string;
+  arguments?: Array<{
+    name: string;
+    description?: string;
+    required?: boolean;
+  }>;
+}
+

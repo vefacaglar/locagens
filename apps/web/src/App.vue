@@ -15,6 +15,8 @@ const SettingsScreen = defineAsyncComponent(() => import('./components/settings/
 const AgentTaskList = defineAsyncComponent(() => import('./components/AgentTaskList.vue'));
 const PlanPanel = defineAsyncComponent(() => import('./components/PlanPanel.vue'));
 const UsageLogsPage = defineAsyncComponent(() => import('./components/UsageLogsPage.vue'));
+const TerminalDrawer = defineAsyncComponent(() => import('./components/chat/TerminalDrawer.vue'));
+import { useProcesses } from './composables/useProcesses';
 import { collectWorkspaceChanges, hasWorkspaceChangeSignals } from './lib/workspaceChanges';
 import { collectAgentSummaries, collectAgentSummaryLinks } from './lib/messageGroups';
 import { extractTaskListFromMessage } from './lib/messageDerived';
@@ -278,6 +280,19 @@ watch([hasSidePanelContent, sidePanelOpen], ([hasContent, isOpen]) => {
   }, SIDE_PANEL_TRANSITION_MS);
 }, { immediate: true });
 
+// --- Background Processes & Terminal Drawer ---
+const showTerminalDrawer = ref(false);
+const processesManager = useProcesses(() => projects.activeProjectPath.value);
+
+function toggleTerminalDrawer() {
+  showTerminalDrawer.value = !showTerminalDrawer.value;
+  if (showTerminalDrawer.value) {
+    processesManager.startPolling();
+  } else {
+    processesManager.stopPolling();
+  }
+}
+
 // Watch and persist sidePanelCollapsed changes on desktop, keyed by activeRunId
 watch(sidePanelCollapsed, (val) => {
   if (!isMobile.value && activeRunId.value) {
@@ -446,8 +461,10 @@ onUnmounted(() => {
         :current-project-name="currentProjectName"
         :visible-title="visibleTitle"
         :show-side-panel-toggle="showSidePanelToggle"
+        :running-processes-count="processesManager.runningCount.value"
         @toggle-sidebar="toggleSidebar"
         @open-side-panel="sidePanelCollapsed = false"
+        @toggle-terminal="toggleTerminalDrawer"
       />
 
       <div v-if="activeRun" class="header-fade-overlay"></div>
@@ -592,6 +609,21 @@ onUnmounted(() => {
       @delete-mcp-server="deleteMcpServer"
       @restart-mcp-server="mcp.restartServer($event, projects.activeProjectPath.value || undefined)"
       @toggle-mcp-server="mcp.toggleServer($event.name, $event.enabled, projects.activeProjectPath.value || undefined)"
+    />
+
+    <!-- Terminal / Dev Servers Drawer -->
+    <TerminalDrawer
+      :is-open="showTerminalDrawer"
+      :processes="processesManager.processes.value"
+      :active-process="processesManager.activeProcess.value"
+      :logs="processesManager.logs.value"
+      :is-spawning="processesManager.isSpawning.value"
+      :error="processesManager.error.value"
+      @close="toggleTerminalDrawer"
+      @select="processesManager.selectProcess"
+      @spawn="processesManager.spawn"
+      @kill="processesManager.kill"
+      @restart="processesManager.restart"
     />
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

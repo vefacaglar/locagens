@@ -16,7 +16,10 @@ import type {
   SkillsListResponse,
   McpServerConfig,
   McpServerInfo,
-  McpServersResponse
+  McpServersResponse,
+  ProcessInfo,
+  ProcessesResponse,
+  ProcessLogsResponse
 } from '@locagens/shared';
 
 interface DesktopApiResponse {
@@ -369,5 +372,29 @@ export const api = {
     return response.json() as Promise<{ success: boolean; models?: string[]; error?: string }>;
   },
   getSecurityStatus: () => getJson<SecurityStatus>('/api/security/status'),
-  installWindowsSandbox: () => requestJson<SecurityStatus>('/api/security/sandbox/setup', { method: 'POST', body: { confirmed: true }, errorFallback: 'Sandbox setup failed.' })
+  installWindowsSandbox: () => requestJson<SecurityStatus>('/api/security/sandbox/setup', { method: 'POST', body: { confirmed: true }, errorFallback: 'Sandbox setup failed.' }),
+
+  // Background Processes & Terminal
+  getProcesses: (projectPath?: string) => {
+    const q = projectPath ? `?projectPath=${encodeURIComponent(projectPath)}` : '';
+    return getJson<ProcessesResponse>(`/api/processes${q}`);
+  },
+  spawnProcess: (command: string, projectPath?: string, env?: Record<string, string>) =>
+    requestJson<{ process: ProcessInfo }>('/api/processes/spawn', {
+      method: 'POST',
+      body: { command, projectPath, env },
+      errorFallback: 'Failed to start background process.'
+    }),
+  killProcess: (id: string) =>
+    requestJson<{ success: boolean }>(`/api/processes/${encodeURIComponent(id)}/kill`, {
+      method: 'POST',
+      errorFallback: 'Failed to stop process.'
+    }),
+  restartProcess: (id: string) =>
+    requestJson<{ process: ProcessInfo }>(`/api/processes/${encodeURIComponent(id)}/restart`, {
+      method: 'POST',
+      errorFallback: 'Failed to restart process.'
+    }),
+  getProcessLogs: (id: string) =>
+    getJson<ProcessLogsResponse>(`/api/processes/${encodeURIComponent(id)}/logs`)
 };

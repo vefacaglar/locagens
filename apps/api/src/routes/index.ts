@@ -7,6 +7,7 @@ import { registerPermissionRoutes } from "./permissions.js";
 import { registerMemoryRoutes } from "./memory.js";
 import { registerSkillRoutes } from "./skills.js";
 import { registerMcpRoutes } from "./mcp.js";
+import { registerProcessRoutes } from "./processes.js";
 import { registerSettingsRoutes } from "./settings.js";
 import { registerSecurityRoutes } from "./security.js";
 
@@ -20,6 +21,7 @@ export function registerRoutes(server: FastifyInstance, ctx: AppContext) {
   registerMemoryRoutes(server, ctx);
   registerSkillRoutes(server, ctx);
   registerMcpRoutes(server, ctx);
+  registerProcessRoutes(server, ctx);
   registerSettingsRoutes(server, ctx);
   registerSecurityRoutes(server);
 }
