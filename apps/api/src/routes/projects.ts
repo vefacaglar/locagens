@@ -48,6 +48,52 @@ export function registerProjectRoutes(server: FastifyInstance, ctx: AppContext) 
     return ctx.projectRepo.list();
   });
 
+  // List workspace files for @-mention autocompletion
+  server.get("/api/projects/files", async (request, reply) => {
+    const { path: rawPath, query } = request.query as { path?: string; query?: string };
+    if (!rawPath) {
+      reply.status(400);
+      return { error: "Missing required query parameter: path" };
+    }
+
+    try {
+      const canonicalPath = requireRegisteredProject(ctx.projectRepo, rawPath);
+      let fileList: string[] = [];
+
+      try {
+        const out = await git(canonicalPath, ["ls-files", "-co", "--exclude-standard"]);
+        fileList = out.split("\n").map((f) => f.trim()).filter(Boolean);
+      } catch {
+        const walk = (dir: string, base: string, depth = 0): string[] => {
+          if (depth > 5 || fileList.length > 500) return [];
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          const res: string[] = [];
+          for (const ent of entries) {
+            if (ent.name.startsWith(".") || ent.name === "node_modules" || ent.name === "dist" || ent.name === "build") continue;
+            const rel = base ? `${base}/${ent.name}` : ent.name;
+            if (ent.isDirectory()) {
+              res.push(...walk(path.join(dir, ent.name), rel, depth + 1));
+            } else if (ent.isFile()) {
+              res.push(rel);
+            }
+          }
+          return res;
+        };
+        fileList = walk(canonicalPath, "");
+      }
+
+      const q = (query || "").trim().toLowerCase();
+      if (q) {
+        fileList = fileList.filter((f) => f.toLowerCase().includes(q));
+      }
+
+      return { files: fileList.slice(0, 150) };
+    } catch (err: any) {
+      reply.status(400);
+      return { error: err?.message || "Failed to list project files" };
+    }
+  });
+
   // Create/add a project manually.
   server.post("/api/projects", async (request, reply) => {
     const { path: projectPath, name: projectName } = request.body as {

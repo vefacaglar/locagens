@@ -204,6 +204,10 @@ export const api = {
   getRunUsage: (runId: string) => getJson<RunUsageSummary>(`/api/runs/${runId}/usage`),
   getRunPending: (runId: string) => getJson<{ permissionRequest: any | null; questionRequest: any | null }>(`/api/runs/${runId}/pending`),
   getProjects: () => getJson<Project[]>('/api/projects'),
+  getProjectFiles: (path: string, query?: string) => {
+    const q = query ? `&query=${encodeURIComponent(query)}` : '';
+    return getJson<{ files: string[] }>(`/api/projects/files?path=${encodeURIComponent(path)}${q}`);
+  },
   getPermissions: () => getJson<PermissionRule[]>('/api/permissions'),
   getUsageLogs: (params?: {
     limit?: number;

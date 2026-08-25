@@ -13,6 +13,8 @@ import type { AgentPreset } from '@locagens/shared';
 import ConfirmationCard from './ConfirmationCard.vue';
 import PermissionCard from './PermissionCard.vue';
 import QuestionCard from './QuestionCard.vue';
+import MentionDropdown from './chat/MentionDropdown.vue';
+import { api } from '../api/client';
 import { messageTokenEstimate } from '../lib/messageDerived';
 
 const props = defineProps<{
@@ -213,6 +215,160 @@ function readFileAsDataURL(file: File): Promise<string> {
 
 function removeAttachment(idx: number) {
   attachedFiles.value.splice(idx, 1);
+}
+
+// --- Image Paste & Drag-and-Drop ---
+async function handlePaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        const content = await readFileAsDataURL(file);
+        const now = new Date();
+        const timestamp = `${now.getHours()}${now.getMinutes()}${now.getSeconds()}`;
+        attachedFiles.value.push({
+          name: `screenshot-${timestamp}.png`,
+          content,
+          extension: 'png',
+          isImage: true
+        });
+      }
+    }
+  }
+}
+
+const isDragging = ref(false);
+function handleDragOver(e: DragEvent) {
+  e.preventDefault();
+  isDragging.value = true;
+}
+function handleDragLeave(e: DragEvent) {
+  e.preventDefault();
+  isDragging.value = false;
+}
+async function handleDrop(e: DragEvent) {
+  e.preventDefault();
+  isDragging.value = false;
+  const files = e.dataTransfer?.files;
+  if (!files || files.length === 0) return;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const extension = file.name.split('.').pop() || '';
+    const isImage = file.type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension.toLowerCase());
+    const content = isImage ? await readFileAsDataURL(file) : await readFileAsText(file);
+    attachedFiles.value.push({
+      name: file.name,
+      content,
+      extension,
+      isImage
+    });
+  }
+}
+
+// --- @ Mention Autocomplete ---
+const showMentionDropdown = ref(false);
+const mentionQuery = ref('');
+const projectFiles = ref<string[]>([]);
+const mentionSelectedIndex = ref(0);
+const mentionStartIndex = ref(-1);
+
+async function loadProjectFiles() {
+  if (!props.activeProjectPath) return;
+  try {
+    const res = await api.getProjectFiles(props.activeProjectPath);
+    projectFiles.value = res?.files || [];
+  } catch {
+    projectFiles.value = [];
+  }
+}
+
+watch(() => props.activeProjectPath, () => {
+  void loadProjectFiles();
+}, { immediate: true });
+
+const filteredMentionFiles = computed(() => {
+  const q = mentionQuery.value.toLowerCase().trim();
+  if (!q) return projectFiles.value.slice(0, 50);
+  return projectFiles.value.filter((f) => f.toLowerCase().includes(q)).slice(0, 50);
+});
+
+function handleTextareaInput(e: Event) {
+  const el = e.target as HTMLTextAreaElement;
+  const val = el.value;
+  emit('update:taskInput', val);
+
+  const cursor = el.selectionStart;
+  const textBeforeCursor = val.slice(0, cursor);
+  const atMatch = textBeforeCursor.match(/@([a-zA-Z0-9_\-\./]*)$/);
+
+  if (atMatch && props.activeProjectPath) {
+    showMentionDropdown.value = true;
+    mentionQuery.value = atMatch[1];
+    mentionStartIndex.value = cursor - atMatch[1].length - 1;
+    mentionSelectedIndex.value = 0;
+    if (projectFiles.value.length === 0) {
+      void loadProjectFiles();
+    }
+  } else {
+    showMentionDropdown.value = false;
+  }
+  adjustHeight();
+}
+
+function handleSelectMention(filePath: string) {
+  const text = props.taskInput || '';
+  const start = mentionStartIndex.value;
+  if (start >= 0) {
+    const before = text.slice(0, start);
+    const after = text.slice(start + mentionQuery.value.length + 1);
+    const newText = `${before}@${filePath} ${after}`;
+    emit('update:taskInput', newText);
+    showMentionDropdown.value = false;
+    nextTick(() => {
+      if (textarea.value) {
+        textarea.value.focus();
+        const newCursor = start + filePath.length + 2;
+        textarea.value.setSelectionRange(newCursor, newCursor);
+      }
+    });
+  }
+}
+
+function handleTextareaKeyDown(e: KeyboardEvent) {
+  if (showMentionDropdown.value && filteredMentionFiles.value.length > 0) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionSelectedIndex.value = (mentionSelectedIndex.value + 1) % filteredMentionFiles.value.length;
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionSelectedIndex.value = (mentionSelectedIndex.value - 1 + filteredMentionFiles.value.length) % filteredMentionFiles.value.length;
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      const selected = filteredMentionFiles.value[mentionSelectedIndex.value];
+      if (selected) {
+        handleSelectMention(selected);
+        return;
+      }
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      showMentionDropdown.value = false;
+      return;
+    }
+  }
+
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
 }
 
 function handleSend() {
@@ -572,7 +728,23 @@ onBeforeUnmount(() => {
         <span class="queued-text truncate">{{ queuedTaskInput }}</span>
       </div>
 
-      <div class="composer-input-box" style="position: relative; z-index: 2;">
+      <div
+        class="composer-input-box"
+        style="position: relative; z-index: 2;"
+        :class="{ 'drag-over': isDragging }"
+        @dragover.prevent="handleDragOver"
+        @dragleave="handleDragLeave"
+        @drop.prevent="handleDrop"
+      >
+        <!-- @ Mention File Dropdown -->
+        <MentionDropdown
+          :is-open="showMentionDropdown"
+          :files="filteredMentionFiles"
+          :selected-index="mentionSelectedIndex"
+          @select="handleSelectMention"
+          @close="showMentionDropdown = false"
+        />
+
         <!-- Attached Files List -->
         <div v-if="attachedFiles.length > 0" class="composer-attachments">
           <div
@@ -605,9 +777,10 @@ onBeforeUnmount(() => {
           ref="textarea"
           rows="1"
           :value="taskInput"
-          :placeholder="isRunning ? 'Queue a follow-up...' : 'Type a message...'"
-          @input="emit('update:taskInput', ($event.target as HTMLTextAreaElement).value)"
-          @keydown.enter.exact.prevent="handleSend"
+          :placeholder="isRunning ? 'Queue a follow-up...' : (activeProjectPath ? 'Type a message... (type @ to reference files)' : 'Type a message...')"
+          @input="handleTextareaInput"
+          @keydown="handleTextareaKeyDown"
+          @paste="handlePaste"
         />
         <button
           class="composer-send-btn"
@@ -1144,6 +1317,11 @@ onBeforeUnmount(() => {
 @keyframes pulseDot {
   0% { opacity: 0.4; }
   100% { opacity: 1; }
+}
+
+.composer-input-box.drag-over {
+  border-color: var(--accent, #648cff) !important;
+  background: color-mix(in srgb, var(--accent, #648cff) 8%, var(--surface)) !important;
 }
 
 .composer-input-box textarea {
