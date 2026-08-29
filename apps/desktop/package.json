@@ -48,10 +48,6 @@
         "to": "db-writer/db-writer.cjs"
       },
       {
-        "from": "../../config/providers.json",
-        "to": "config/providers.json"
-      },
-      {
         "from": "../api/node_modules/@anthropic-ai/sandbox-runtime/vendor",
         "to": "sandbox-runtime/vendor"
       }

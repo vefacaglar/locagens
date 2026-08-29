@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert";
+import { appSupportDir, defaultProviderConfigPath } from "@locagens/shared";
 import { PRESERVE_API_KEY_VALUE, ProviderRegistry } from "./ProviderRegistry.js";
 import { InMemoryProviderSecretStore } from "./ProviderSecretStore.js";
 import { OpenAICompatibleProvider } from "./OpenAICompatibleProvider.js";
@@ -514,6 +516,109 @@ test("Provider Registry and Model Providers Unit Tests", async (t) => {
       if (prevEnv === undefined) delete process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
       else process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH = prevEnv;
       cleanup();
+    }
+  });
+
+  await t.test("defaultProviderConfigPath lives in OS app-support, not the project", () => {
+    const prev = process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+    delete process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+    try {
+      assert.strictEqual(defaultProviderConfigPath(), path.join(appSupportDir(), "providers.json"));
+    } finally {
+      if (prev === undefined) delete process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+      else process.env.LOCAGENS_PROVIDER_CONFIG_PATH = prev;
+    }
+  });
+
+  await t.test("ProviderRegistry seeds app-support config from seed + leftover overlay", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-providers-"));
+  const dest = path.join(dir, "providers.json");
+  const seed = path.join(dir, "seed.json");
+  const overlay = path.join(dir, "providers.user.json");
+  fs.writeFileSync(seed, JSON.stringify({
+    providers: {
+      "predef-a": { type: "openai-compatible", displayName: "A", baseUrl: "http://a", models: ["m1"] },
+      "predef-b": { type: "openai-compatible", displayName: "B", baseUrl: "http://b", models: ["m2"] }
+    }
+  }));
+  fs.writeFileSync(overlay, JSON.stringify({
+    providers: {
+      "predef-a": { type: "openai-compatible", displayName: "A edited", baseUrl: "http://a", models: ["m1", "m1b"] },
+      "custom-x": { type: "openai-compatible", displayName: "X", baseUrl: "http://x", models: ["mx"] }
+    },
+    removedProviders: ["predef-b"]
+  }));
+
+  const prevConfig = process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+  const prevSeed = process.env.LOCAGENS_PROVIDER_SEED_PATH;
+  const prevUser = process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+  process.env.LOCAGENS_PROVIDER_CONFIG_PATH = dest;
+  process.env.LOCAGENS_PROVIDER_SEED_PATH = seed;
+  delete process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+
+  try {
+    const reg = new ProviderRegistry(undefined, new InMemoryProviderSecretStore());
+    assert.deepStrictEqual(Object.keys(reg.getEditableConfigs()).sort(), ["custom-x", "predef-a"]);
+    assert.deepStrictEqual(reg.getEditableConfigs()["predef-a"].models, ["m1", "m1b"]);
+
+    const saved = JSON.parse(fs.readFileSync(dest, "utf-8"));
+    assert.deepStrictEqual(Object.keys(saved.providers).sort(), ["custom-x", "predef-a"]);
+    assert.strictEqual(saved.removedProviders, undefined);
+
+    reg.saveConfigs({
+      "custom-x": { type: "openai-compatible", displayName: "X", baseUrl: "http://x", apiKey: "", models: ["mx"] }
+    } as any);
+    assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(seed, "utf-8")).providers).sort(), ["predef-a", "predef-b"]);
+    assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(dest, "utf-8")).providers), ["custom-x"]);
+  } finally {
+    if (prevConfig === undefined) delete process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+    else process.env.LOCAGENS_PROVIDER_CONFIG_PATH = prevConfig;
+    if (prevSeed === undefined) delete process.env.LOCAGENS_PROVIDER_SEED_PATH;
+    else process.env.LOCAGENS_PROVIDER_SEED_PATH = prevSeed;
+    if (prevUser === undefined) delete process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+    else process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH = prevUser;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  });
+
+  await t.test("ProviderRegistry falls back to the workspace's config/providers.json seed when no seed env var is set", () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-workspace-"));
+    const appSupportDirPath = fs.mkdtempSync(path.join(os.tmpdir(), "locagens-appsupport-"));
+    const dest = path.join(appSupportDirPath, "providers.json");
+    const configDir = path.join(workspaceRoot, "config");
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(path.join(workspaceRoot, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+    fs.writeFileSync(path.join(configDir, "providers.json"), JSON.stringify({
+      providers: {
+        "predef-a": { type: "openai-compatible", displayName: "A", baseUrl: "http://a", models: ["m1"] }
+      }
+    }));
+
+    const prevConfig = process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+    const prevSeed = process.env.LOCAGENS_PROVIDER_SEED_PATH;
+    const prevUser = process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+    const prevCwd = process.cwd();
+    process.env.LOCAGENS_PROVIDER_CONFIG_PATH = dest;
+    delete process.env.LOCAGENS_PROVIDER_SEED_PATH;
+    delete process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+    process.chdir(configDir);
+
+    try {
+      const reg = new ProviderRegistry(undefined, new InMemoryProviderSecretStore());
+      assert.deepStrictEqual(Object.keys(reg.getEditableConfigs()), ["predef-a"]);
+
+      const saved = JSON.parse(fs.readFileSync(dest, "utf-8"));
+      assert.deepStrictEqual(Object.keys(saved.providers), ["predef-a"]);
+    } finally {
+      process.chdir(prevCwd);
+      if (prevConfig === undefined) delete process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+      else process.env.LOCAGENS_PROVIDER_CONFIG_PATH = prevConfig;
+      if (prevSeed === undefined) delete process.env.LOCAGENS_PROVIDER_SEED_PATH;
+      else process.env.LOCAGENS_PROVIDER_SEED_PATH = prevSeed;
+      if (prevUser === undefined) delete process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH;
+      else process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH = prevUser;
+      fs.rmSync(workspaceRoot, { recursive: true, force: true });
+      fs.rmSync(appSupportDirPath, { recursive: true, force: true });
     }
   });
 });

@@ -28,7 +28,7 @@ Fastify backend
 SQLite persistence
 OpenAI-compatible provider adapter
 Anthropic provider adapter
-committed config/providers.json catalog with writable user overlay
+provider config in OS app settings (not the project)
 API keys kept in the OS keychain, never in JSON
 per-model context limits and tiered pricing -> local cost / usage logs
 reasoning-effort conversion per model (reasoningWire)
@@ -76,8 +76,6 @@ locagens/
   packages/
     shared/
       src/
-  config/
-    providers.json
   Agents.md
   Claude.md
   README.md
@@ -85,24 +83,30 @@ locagens/
 
 ## Provider Configuration
 
-Provider settings live in a committed, version-controlled catalog at
-`config/providers.json` (providers, models, per-model settings, pricing, and
-agent presets — never secrets), so every clone shares the same setup. API keys
-are never written to JSON: on macOS the key is stored in the Keychain and the
-file keeps only a non-secret `apiKeyRef` pointer.
+Provider settings live in the OS application-support directory, not in the
+project:
 
 ```txt
-config/providers.json   committed catalog (NO secrets)
-OS keychain             holds the actual API key, referenced by apiKeyRef
+macOS    ~/Library/Application Support/Locagens/providers.json
+Windows  %APPDATA%\Locagens\providers.json
+Linux    ~/.config/locagens/providers.json
 ```
 
-`LOCAGENS_PROVIDER_CONFIG_PATH` overrides the catalog path (used by tests). When
-`LOCAGENS_PROVIDER_USER_CONFIG_PATH` is set, the registry treats
-`config/providers.json` as a read-only base and merges a writable user overlay on
-top (the user's custom providers, edits, and removal tombstones); saves write
-only the overlay, so app updates can refresh the base catalog without losing the
-user's own providers. In the packaged desktop app the overlay lives at
-`<userData>/providers.user.json`.
+API keys are never written to JSON: on macOS the key is stored in the Keychain
+and the file keeps only a non-secret `apiKeyRef` pointer.
+
+```txt
+OS app-support/providers.json   live config (NO secrets)
+OS keychain                     holds the actual API key, referenced by apiKeyRef
+```
+
+`LOCAGENS_PROVIDER_CONFIG_PATH` overrides this path (used by tests). On first
+run, if the OS file is missing, the registry seeds it from
+`LOCAGENS_PROVIDER_SEED_PATH` if set, and flattens any leftover
+`providers.user.json` overlay into that single file. After that, saves never
+touch the project. There is no in-repo seed catalog — a fresh checkout (or a
+packaged build) starts with an empty provider list until providers are added
+via Settings.
 
 Example:
 
@@ -137,9 +141,9 @@ Cost is computed locally from these rates and the provider's reported token
 counts, then stored per call in `usage_logs`. A model with no configured pricing
 costs 0.
 
-`config/providers.json` may also include `agentPresets`, which define an
-architect provider/model, coder provider/model, `maxSubAgents`, and optionally a
-utility provider/model.
+The provider file may also include `agentPresets`, which define an architect
+provider/model, coder provider/model, `maxSubAgents`, and optionally a utility
+provider/model.
 
 ## Modes
 

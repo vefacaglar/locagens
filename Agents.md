@@ -204,11 +204,12 @@ startup cleanup for runs left in active states
 error persistence without discarding prior messages
 ```
 
-Provider settings live in local configuration outside the project by default.
-On macOS, provider secrets live in Keychain and the JSON config keeps only a
-secret reference. Public provider lists expose only safe metadata; the local
-settings API returns masked provider config and can preserve existing secrets
-while saving edits.
+Provider settings live in the OS application-support directory
+(`~/Library/Application Support/Locagens/providers.json` on macOS), never in
+the project. On macOS, provider secrets live in Keychain and the JSON config
+keeps only a secret reference. Public provider lists expose only safe metadata;
+the local settings API returns masked provider config and can preserve existing
+secrets while saving edits.
 
 ---
 

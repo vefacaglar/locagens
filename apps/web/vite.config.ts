@@ -1,27 +1,14 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
+import { defaultSettingsPath } from '@locagens/shared'
 
 // The backend port lives in settings.json (the same file the Settings screen
 // edits). Read it here so the dev frontend connects to the configured port
 // without a hardcoded value. Mirrors AppSettingsStore on the backend.
-function resolveSettingsPath(): string {
-  if (process.env.LOCAGENS_SETTINGS_PATH) return process.env.LOCAGENS_SETTINGS_PATH
-  const appDirName = 'Locagens'
-  if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', appDirName, 'settings.json')
-  }
-  if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), appDirName, 'settings.json')
-  }
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'locagens', 'settings.json')
-}
-
 function resolveBackendPort(): number {
   try {
-    const parsed = JSON.parse(fs.readFileSync(resolveSettingsPath(), 'utf-8'))
+    const parsed = JSON.parse(fs.readFileSync(defaultSettingsPath(), 'utf-8'))
     const port = Number(parsed?.port)
     if (Number.isInteger(port) && port >= 1 && port <= 65535) return port
   } catch {

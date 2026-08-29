@@ -8,11 +8,12 @@ export const isDev = !app.isPackaged;
 export const DEFAULT_PORT = 4321;
 
 /**
- * Root directory holding settings.json + locagens.db for the current
- * environment. Dev and prod are deliberately separate so the installed app and
- * a local dev build never share data (and can run at the same time):
+ * Root directory holding locagens.db for the current environment. Dev and prod
+ * are deliberately separate so the installed app and a local dev build never
+ * share data (and can run at the same time):
  *   - dev:  <repo>/.locagens-dev   (git-ignored)
  *   - prod: app userData           (~/Library/Application Support/Locagens)
+ * settings.json and providers.json always live in OS userData.
  */
 export function dataDir(): string {
   if (isDev) {
@@ -23,23 +24,19 @@ export function dataDir(): string {
 }
 
 export function settingsPath(): string {
-  return path.join(dataDir(), "settings.json");
+  return path.join(app.getPath("userData"), "settings.json");
 }
 
 export function dbPath(): string {
   return path.join(dataDir(), "locagens.db");
 }
 
-/**
- * Writable user overlay: the user's custom providers, their edits to predefined
- * ones, and removal tombstones. Lives in the data dir so it survives app updates
- * (the predefined base ships read-only in the bundle and is refreshed on update).
- */
-export function userProviderConfig(): string {
-  return path.join(dataDir(), "providers.user.json");
+/** Live provider config — always OS userData, never the project tree. */
+export function providerConfig(): string {
+  return path.join(app.getPath("userData"), "providers.json");
 }
 
-/** The committed predefined catalog bundled into the app (prod, read-only). */
+/** Bundled catalog used only to seed userData on first run. */
 export function bundledProviderConfig(): string {
   return path.join(process.resourcesPath, "config", "providers.json");
 }

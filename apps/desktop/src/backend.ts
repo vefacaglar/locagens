@@ -4,9 +4,9 @@ import {
   bundledProviderConfig,
   dbPath,
   dbWriterBinary,
+  providerConfig,
   settingsPath,
   sandboxRuntimeDir,
-  userProviderConfig,
 } from "./paths";
 
 let child: UtilityProcess | null = null;
@@ -15,10 +15,8 @@ let readyPromise: Promise<void> | null = null;
 /**
  * Env passed to the forked backend. The settings file is the source of truth
  * for the port; PORT is passed too as a belt-and-suspenders default. DB lives
- * next to settings in the env-specific data dir. Provider config is two-layer:
- * the predefined catalog is read straight from the read-only bundle (refreshed
- * on every app update), while the user's own providers/edits go to a writable
- * overlay in the data dir that updates never touch.
+ * next to settings in the env-specific data dir. Provider config is a single
+ * writable file in OS userData; the bundled catalog is only a first-run seed.
  */
 function backendEnv(port: number, apiToken: string): Record<string, string> {
   return {
@@ -29,8 +27,8 @@ function backendEnv(port: number, apiToken: string): Record<string, string> {
     LOCAGENS_DB_PATH: dbPath(),
     LOCAGENS_DB_WRITER_PATH: dbWriterBinary(),
     LOCAGENS_SANDBOX_RUNTIME_DIR: sandboxRuntimeDir(),
-    LOCAGENS_PROVIDER_CONFIG_PATH: bundledProviderConfig(),
-    LOCAGENS_PROVIDER_USER_CONFIG_PATH: userProviderConfig(),
+    LOCAGENS_PROVIDER_CONFIG_PATH: providerConfig(),
+    LOCAGENS_PROVIDER_SEED_PATH: bundledProviderConfig(),
   };
 }
 

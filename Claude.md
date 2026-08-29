@@ -77,7 +77,7 @@ apps/
         OpenAICompatibleProvider.ts
         AnthropicProvider.ts
         ProviderFactory.ts     type -> adapter
-        ProviderRegistry.ts    loads providers.local.json, provider configs, presets
+        ProviderRegistry.ts    loads OS app-support providers.json, presets
       database/
         db.ts                  Connection + schema + migrations + startup cleanup
         repositories.ts        Barrel: re-exports every repository + interface
@@ -123,8 +123,7 @@ apps/
 packages/
   shared/src/index.ts          Shared TS contracts (Run, RunMessage, events, ...)
 
-config/providers.json          Shared provider/model/pricing catalog (committed; NO secrets)
-providers.local.json           Legacy local config (git-ignored; superseded by config/providers.json)
+OS app-support/providers.json  Live provider/model/pricing config (NOT in the project; NO secrets)
 locagens.db                    Local SQLite file (git-ignored)
 ```
 
@@ -149,11 +148,13 @@ presentational and communicate via props/emits.
 
 ## Provider Configuration
 
-Provider settings live in a **committed, version-controlled catalog** so every
-clone shares the same providers, models, and pricing without re-entering them:
+Provider settings live in the **OS application-support directory**, never in the
+project:
 
 ```txt
-config/providers.json   (committed; providers + models + modelSettings + agentPresets — NO secrets)
+macOS    ~/Library/Application Support/Locagens/providers.json
+Windows  %APPDATA%\Locagens\providers.json
+Linux    ~/.config/locagens/providers.json
 ```
 
 `LOCAGENS_PROVIDER_CONFIG_PATH` can override this path (used by tests). API keys
@@ -163,20 +164,15 @@ which is deterministic from the provider id and therefore portable across
 machines (each machine holds its own Keychain entry). Where secure storage is
 unavailable (e.g. Windows — handled later) the key is simply not persisted.
 
-**Two layers (predefined base + user overlay).** When
-`LOCAGENS_PROVIDER_USER_CONFIG_PATH` is set, `ProviderRegistry` loads a read-only
-predefined catalog (the committed/bundled `config/providers.json`) and merges a
-writable **user overlay** on top (by provider/preset id). The overlay holds the
-user's custom providers, their edits to predefined entries, and removal tombstones
-(`removedProviders`/`removedPresets`); saves write ONLY the overlay, never the base.
-This means an app update can refresh the predefined catalog while the user's own
-providers survive. In the packaged desktop app the base is the bundled resource
-and the overlay lives at `<userData>/providers.user.json`. With no overlay env set
-(dev + tests) the registry uses the single base file and writes back to it.
+On first run, if the OS file is missing, `ProviderRegistry` seeds it from
+`LOCAGENS_PROVIDER_SEED_PATH` if set, and flattens any leftover
+`providers.user.json` overlay into that single file. There is no in-repo seed
+catalog: a fresh dev checkout or a freshly packaged build starts with an empty
+provider list until providers are added via Settings. After seeding, all reads
+and writes go to the OS file. `LOCAGENS_PROVIDER_USER_CONFIG_PATH` still
+enables a two-layer overlay (tests only).
 
-So a fresh clone gets the full catalog from `config/providers.json`; each
-developer only enters their own API keys once (saved to the Keychain, not the
-file). Public provider metadata must never include secrets.
+Public provider metadata must never include secrets.
 
 `GET /api/providers` returns only safe metadata:
 
@@ -191,7 +187,7 @@ The local settings API returns editable config, but `GET /api/providers/config`
 must not return raw API keys. It uses a preserve marker so the frontend can edit
 other provider fields without receiving or re-posting the existing secret.
 
-`config/providers.json` may also define an `agentPresets` block: named pairings
+The provider file may also define an `agentPresets` block: named pairings
 with an **architect** model, a **coder** model, `maxSubAgents`, and optionally a
 **utility** model. `GET /api/agent-presets` returns this as safe metadata (only
 provider ids + model names, already public). `PUT /api/agent-presets` saves the
@@ -491,7 +487,7 @@ A run can optionally use **two models**: an **architect** (the run's normal
 `providerId`/`model`) that plans and coordinates, and a **coder** (the run's
 `coderProviderId`/`coderModel`) that does the actual code-writing as 1–3 sub-agents.
 This pairing is a named **preset** ("opusplan"-style) defined server-side in
-`providers.local.json` under `agentPresets` and selectable, optionally, next to
+OS app-support `providers.json` under `agentPresets` and selectable, optionally, next to
 the model picker in the composer (`useComposerSettings.selectedPresetId`). When no
 preset is selected the run is plain single-model and behaves exactly as before.
 
@@ -652,7 +648,7 @@ Failed runs keep their messages; the error is stored in `error_message`.
 ## Security Rules
 
 ```txt
-API keys NEVER touch any JSON file. config/providers.json is committed and keyless;
+API keys NEVER touch any JSON file. providers.json lives in OS app-support and is keyless;
   keys live only in the OS keychain (referenced by a non-secret apiKeyRef pointer).
 Never return provider secrets from public metadata endpoints.
 Only the trusted local settings API should read or save full provider config.

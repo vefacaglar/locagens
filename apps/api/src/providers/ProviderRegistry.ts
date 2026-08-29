@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import type { ProviderMetadata, AgentPreset, ModelReasoningSettings, ReasoningEffort, ReasoningOption, ReasoningStyle, ResolvedReasoningConfig, ModelPricing, PriceTier } from "@locagens/shared";
+import { defaultProviderConfigPath, type ProviderMetadata, type AgentPreset, type ModelReasoningSettings, type ReasoningEffort, type ReasoningOption, type ReasoningStyle, type ResolvedReasoningConfig, type ModelPricing, type PriceTier } from "@locagens/shared";
 import type { ModelProvider } from "./ModelProvider.js";
 import { ProviderFactory } from "./ProviderFactory.js";
 import { MacOSKeychainProviderSecretStore, type ProviderSecretStore } from "./ProviderSecretStore.js";
@@ -60,10 +60,9 @@ export class ProviderRegistry {
   private configPathOverride?: string;
   private persistPath = "";
   private secretStore: ProviderSecretStore;
-  // Two-layer config: a read-only predefined base (committed/bundled) plus a
-  // writable user overlay (custom providers + edits + tombstones) that survives
-  // app updates. The overlay is only active when LOCAGENS_PROVIDER_USER_CONFIG_PATH
-  // is set; otherwise the registry uses a single file (dev + tests).
+  // Live config lives in the OS app-support directory (providers.json).
+  // LOCAGENS_PROVIDER_USER_CONFIG_PATH still enables a read-only base + writable
+  // overlay (used by tests); production uses a single file.
   private userConfigPath?: string;
   private baseConfigs: Record<string, ProviderConfigBlock> = {};
   private baseAgentPresets: Record<string, AgentPresetBlock> = {};
@@ -89,22 +88,57 @@ export class ProviderRegistry {
   }
 
   private defaultConfigPath(): string {
-    if (process.env.LOCAGENS_PROVIDER_CONFIG_PATH) {
-      return process.env.LOCAGENS_PROVIDER_CONFIG_PATH;
+    return defaultProviderConfigPath();
+  }
+
+  private materializeIfMissing(dest: string) {
+    if (fs.existsSync(dest)) return;
+    const seed = process.env.LOCAGENS_PROVIDER_SEED_PATH || path.join(this.findWorkspaceRoot(), "config", "providers.json");
+    const legacyOverlay = path.join(path.dirname(dest), "providers.user.json");
+    const hasSeed = seed !== dest && fs.existsSync(seed);
+    const hasOverlay = fs.existsSync(legacyOverlay);
+    if (!hasSeed && !hasOverlay) return;
+
+    let payload: ConfigSchema;
+    if (hasOverlay && hasSeed) {
+      payload = this.mergeConfigSchemas(this.readConfigFile(seed), this.readConfigFile(legacyOverlay));
+    } else if (hasOverlay) {
+      payload = this.readConfigFile(legacyOverlay);
+      delete payload.removedProviders;
+      delete payload.removedPresets;
+    } else {
+      payload = this.readConfigFile(seed);
     }
-    // Shared, version-controlled provider catalog (no secrets — API keys live
-    // only in the OS keychain). Committing this lets every clone pull the same
-    // providers, models, and pricing without re-entering them by hand.
-    return path.join(this.findWorkspaceRoot(), "config", "providers.json");
+    this.writeConfigFile(dest, payload);
+    console.log(`[ProviderRegistry] Seeded provider config at ${dest}`);
+  }
+
+  private mergeConfigSchemas(base: ConfigSchema, overlay: ConfigSchema): ConfigSchema {
+    const removedProviders = new Set(overlay.removedProviders || []);
+    const removedPresets = new Set(overlay.removedPresets || []);
+    const providers: Record<string, PersistedProviderConfigBlock> = {};
+    for (const [id, block] of Object.entries(base.providers || {})) {
+      if (!removedProviders.has(id)) providers[id] = block;
+    }
+    Object.assign(providers, overlay.providers || {});
+    const agentPresets: Record<string, AgentPresetBlock> = {};
+    for (const [id, preset] of Object.entries(base.agentPresets || {})) {
+      if (!removedPresets.has(id)) agentPresets[id] = preset;
+    }
+    Object.assign(agentPresets, overlay.agentPresets || {});
+    return { providers, agentPresets };
   }
 
   private loadConfiguration(configPathOverride?: string) {
     const basePath = configPathOverride || this.defaultConfigPath();
+    if (!configPathOverride && !process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH) {
+      this.materializeIfMissing(basePath);
+    }
     this.userConfigPath = process.env.LOCAGENS_PROVIDER_USER_CONFIG_PATH || undefined;
     // Saves go to the user overlay when present, else straight to the base file.
     this.persistPath = this.userConfigPath || basePath;
 
-    // 1. Predefined base layer (committed/bundled, read-only at runtime).
+    // 1. Base layer (OS app-support file, or a read-only catalog when overlaying).
     const base = this.readConfigFile(basePath);
     this.baseConfigs = this.hydrateConfigs(base.providers || {});
     this.baseAgentPresets = base.agentPresets || {};
@@ -228,7 +262,7 @@ export class ProviderRegistry {
     return this.getAgentPresets().find(p => p.id === id);
   }
 
-  /** Persists the full agent-preset set to providers.local.json (keeps providers intact). */
+  /** Persists the full agent-preset set (keeps providers intact). */
   saveAgentPresets(presets: Record<string, AgentPresetBlock>) {
     this.agentPresets = presets;
     this.persist();

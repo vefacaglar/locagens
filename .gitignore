@@ -41,9 +41,7 @@ vite.config.*.mtime-*
 !.env.example
 !.env.template
 
-# locagens local provider config
-# NOTE: config/providers.json is the shared, committed catalog (keyless — API
-# keys live only in the OS keychain) and is intentionally NOT ignored.
+# locagens local provider config (legacy filenames; live config is OS app-support)
 
 providers.local.json
 providers.*.local.json

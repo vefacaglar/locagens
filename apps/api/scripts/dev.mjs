@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 const childEnvironment = {
   ...process.env,
   LOCAGENS_API_TOKEN: process.env.LOCAGENS_API_TOKEN || "locagens-development-token-not-for-production-0000000000000000",
-  LOCAGENS_SETTINGS_PATH: process.env.LOCAGENS_SETTINGS_PATH || "../../.locagens-dev/settings.json",
   LOCAGENS_DB_PATH: process.env.LOCAGENS_DB_PATH || "../../.locagens-dev/locagens.db"
 };
 

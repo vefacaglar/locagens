@@ -1,4 +1,6 @@
-/** Local application settings (not provider config). Held in settings.json. */
+export { appSupportDir, defaultSettingsPath, defaultProviderConfigPath } from "./paths.js";
+
+/** Local application settings (not provider config). Held in OS app-support settings.json. */
 export interface AppSettings {
   /** TCP port the backend HTTP server listens on. */
   port: number;
@@ -169,7 +171,7 @@ export interface AgentPresetEndpoint {
 }
 
 // A saved "architect + coder" pairing (e.g. "opusplan"). Stored server-side in
-// providers.local.json and selectable, optionally, next to the model picker.
+// the OS app-support providers.json and selectable next to the model picker.
 // The architect plans/coordinates and delegates code-writing to 1..maxSubAgents
 // instances of the coder model via the delegate_tasks tool.
 export interface AgentPreset {

@@ -1,7 +1,6 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import type { AppSettings } from "@locagens/shared";
+import { defaultSettingsPath, type AppSettings } from "@locagens/shared";
 
 export const DEFAULT_PORT = 4321;
 const MIN_PORT = 1;
@@ -25,18 +24,7 @@ export class AppSettingsStore {
   }
 
   static defaultPath(): string {
-    if (process.env.LOCAGENS_SETTINGS_PATH) {
-      return process.env.LOCAGENS_SETTINGS_PATH;
-    }
-
-    const appDirName = "Locagens";
-    if (process.platform === "darwin") {
-      return path.join(os.homedir(), "Library", "Application Support", appDirName, "settings.json");
-    }
-    if (process.platform === "win32") {
-      return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), appDirName, "settings.json");
-    }
-    return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "locagens", "settings.json");
+    return defaultSettingsPath();
   }
 
   /** Validates a candidate port, returning a clamped integer or undefined. */
