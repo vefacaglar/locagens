@@ -191,9 +191,9 @@ function formatTime(iso: string): string {
   left: 0;
   right: 0;
   height: 320px;
-  background: var(--surface, #1e1e1e);
-  border-top: 1px solid var(--border, #333);
-  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.4);
+  background: var(--terminal-bg);
+  border-top: 1px solid var(--terminal-border);
+  box-shadow: 0 -8px 30px var(--terminal-shadow);
   display: flex;
   flex-direction: column;
   z-index: 1100;
@@ -205,8 +205,8 @@ function formatTime(iso: string): string {
   justify-content: space-between;
   align-items: center;
   padding: 6px 14px;
-  background: var(--surface-input, rgba(0, 0, 0, 0.2));
-  border-bottom: 1px solid var(--border, #333);
+  background: var(--terminal-header-bg);
+  border-bottom: 1px solid var(--terminal-border);
 }
 
 .terminal-header-title-wrap {
@@ -215,34 +215,34 @@ function formatTime(iso: string): string {
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--terminal-text);
 }
 
 .terminal-icon {
   font-size: 13px;
-  color: #e3b341;
+  color: var(--terminal-icon);
 }
 
 .terminal-proc-count {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 10px;
-  background: rgba(46, 160, 67, 0.15);
-  color: #3fb950;
+  background: var(--terminal-status-running-soft);
+  color: var(--terminal-status-running);
   font-weight: 500;
 }
 
 .terminal-close-btn {
   background: none;
   border: none;
-  color: var(--text-secondary);
+  color: var(--terminal-text-muted);
   font-size: 14px;
   cursor: pointer;
   padding: 2px 6px;
 }
 
 .terminal-close-btn:hover {
-  color: var(--text-primary);
+  color: var(--terminal-text);
 }
 
 .terminal-body {
@@ -253,17 +253,17 @@ function formatTime(iso: string): string {
 
 .terminal-sidebar {
   width: 280px;
-  border-right: 1px solid var(--border, #333);
+  border-right: 1px solid var(--terminal-border);
   display: flex;
   flex-direction: column;
-  background: var(--surface);
+  background: var(--terminal-sidebar-bg);
 }
 
 .terminal-spawn-form {
   display: flex;
   gap: 6px;
   padding: 8px;
-  border-bottom: 1px solid var(--border, #333);
+  border-bottom: 1px solid var(--terminal-border);
 }
 
 .terminal-input-wrap {
@@ -271,14 +271,14 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 4px;
   flex: 1;
-  background: var(--surface-input, rgba(0, 0, 0, 0.25));
-  border: 1px solid var(--border, #333);
+  background: var(--terminal-input-bg);
+  border: 1px solid var(--terminal-input-border);
   border-radius: 6px;
   padding: 0 6px;
 }
 
 .terminal-prompt-sign {
-  color: var(--text-tertiary, #666);
+  color: var(--terminal-text-faint);
   font-size: 11px;
 }
 
@@ -286,7 +286,7 @@ function formatTime(iso: string): string {
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--terminal-text);
   font-size: 11px;
   font-family: inherit;
   outline: none;
@@ -296,7 +296,7 @@ function formatTime(iso: string): string {
 .terminal-sidebar-error {
   margin: 4px 8px;
   font-size: 10px;
-  color: var(--danger, #c44);
+  color: var(--danger);
 }
 
 .terminal-proc-list {
@@ -320,12 +320,12 @@ function formatTime(iso: string): string {
 }
 
 .terminal-proc-item:hover {
-  background: var(--surface-hover, rgba(255, 255, 255, 0.04));
+  background: var(--terminal-hover-bg);
 }
 
 .terminal-proc-item.active {
-  background: color-mix(in srgb, var(--accent, #648cff) 15%, transparent);
-  border-color: color-mix(in srgb, var(--accent, #648cff) 40%, transparent);
+  background: var(--terminal-active-bg);
+  border-color: var(--terminal-active-border);
 }
 
 .proc-item-top {
@@ -337,14 +337,14 @@ function formatTime(iso: string): string {
 .proc-cmd {
   font-size: 11px;
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--terminal-text);
 }
 
 .proc-item-meta {
   display: flex;
   justify-content: space-between;
   font-size: 10px;
-  color: var(--text-secondary);
+  color: var(--terminal-text-muted);
 }
 
 .proc-status-dot {
@@ -355,23 +355,23 @@ function formatTime(iso: string): string {
 }
 
 .proc-status-dot.running {
-  background: #3fb950;
-  box-shadow: 0 0 6px #3fb950;
+  background: var(--terminal-status-running);
+  box-shadow: 0 0 6px var(--terminal-status-running);
 }
 
 .proc-status-dot.stopped {
-  background: #8b949e;
+  background: var(--terminal-status-stopped);
 }
 
 .proc-status-dot.error {
-  background: #f85149;
+  background: var(--terminal-status-error);
 }
 
 .terminal-empty-list {
   padding: 16px 12px;
   font-size: 11px;
   line-height: 1.4;
-  color: var(--text-tertiary);
+  color: var(--terminal-text-faint);
   text-align: center;
 }
 
@@ -380,7 +380,7 @@ function formatTime(iso: string): string {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #0d1117;
+  background: var(--terminal-screen-bg);
 }
 
 .terminal-toolbar {
@@ -388,8 +388,8 @@ function formatTime(iso: string): string {
   justify-content: space-between;
   align-items: center;
   padding: 6px 12px;
-  background: var(--surface-input, rgba(0, 0, 0, 0.3));
-  border-bottom: 1px solid var(--border, #333);
+  background: var(--terminal-header-bg);
+  border-bottom: 1px solid var(--terminal-border);
 }
 
 .terminal-active-meta {
@@ -397,7 +397,7 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 8px;
   font-size: 11px;
-  color: var(--text-primary);
+  color: var(--terminal-text);
 }
 
 .proc-badge {
@@ -409,13 +409,13 @@ function formatTime(iso: string): string {
 }
 
 .proc-badge.running {
-  background: rgba(46, 160, 67, 0.2);
-  color: #3fb950;
+  background: var(--terminal-status-running-soft);
+  color: var(--terminal-status-running);
 }
 
 .proc-badge.stopped {
-  background: rgba(110, 118, 129, 0.2);
-  color: #8b949e;
+  background: var(--terminal-status-stopped-soft);
+  color: var(--terminal-status-stopped);
 }
 
 .terminal-toolbar-actions {
@@ -429,7 +429,7 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--terminal-text-muted);
   cursor: pointer;
   user-select: none;
 }
@@ -454,7 +454,7 @@ function formatTime(iso: string): string {
 }
 
 .log-time {
-  color: #484f58;
+  color: var(--log-time);
   font-size: 10px;
   flex-shrink: 0;
   user-select: none;
@@ -470,15 +470,15 @@ function formatTime(iso: string): string {
 }
 
 .terminal-log-line.stdout .log-text {
-  color: #c9d1d9;
+  color: var(--log-stdout);
 }
 
 .terminal-log-line.stderr .log-text {
-  color: #ff7b72;
+  color: var(--log-stderr);
 }
 
 .terminal-log-line.system .log-text {
-  color: #79c0ff;
+  color: var(--log-system);
   font-style: italic;
 }
 
@@ -487,7 +487,7 @@ function formatTime(iso: string): string {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #484f58;
+  color: var(--log-time);
   font-size: 12px;
 }
 </style>

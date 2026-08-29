@@ -287,4 +287,60 @@
   /* Stronger variants for character-level (inline) diff highlights */
   --diff-add-hl: rgba(123, 216, 143, 0.22);
   --diff-del-hl: rgba(255, 138, 128, 0.22);
+
+  /* Console / Log output (TerminalDrawer.vue, WebPreview.vue)
+     Shared by every surface that prints raw process or browser output. */
+  --log-bg: #141414;
+  --log-stdout: var(--muted);
+  --log-stderr: var(--danger);
+  --log-warn: var(--warning);
+  --log-system: var(--info);
+  --log-time: var(--faint);
+
+  /* Terminal & Dev Servers Drawer (TerminalDrawer.vue) */
+  --terminal-bg: var(--surface-elevated);
+  --terminal-header-bg: var(--control-bg);
+  --terminal-sidebar-bg: var(--card-bg);
+  --terminal-screen-bg: var(--log-bg);
+  --terminal-border: var(--border);
+  --terminal-shadow: rgba(0, 0, 0, 0.4);
+
+  --terminal-text: var(--text);
+  --terminal-text-muted: var(--muted);
+  --terminal-text-faint: var(--faint);
+
+  --terminal-input-bg: var(--control-bg);
+  --terminal-input-border: var(--control-border);
+  --terminal-hover-bg: var(--control-bg-hover);
+  --terminal-active-bg: rgba(255, 255, 255, 0.08);
+  --terminal-active-border: var(--control-border-focus);
+
+  --terminal-status-running: var(--success);
+  --terminal-status-running-soft: var(--success-soft);
+  --terminal-status-stopped: var(--faint);
+  --terminal-status-stopped-soft: rgba(255, 255, 255, 0.06);
+  --terminal-status-error: var(--danger);
+  --terminal-icon: var(--warning);
+
+  /* Web Preview (WebPreview.vue) */
+  --preview-bg: var(--surface-elevated);
+  --preview-toolbar-bg: var(--control-bg);
+  --preview-border: var(--border);
+
+  --preview-text: var(--text);
+  --preview-text-muted: var(--muted);
+
+  --preview-input-bg: var(--control-bg);
+  --preview-input-border: var(--control-border);
+  --preview-hover-bg: var(--control-bg-hover);
+  --preview-tab-active-bg: var(--control-bg-active);
+  --preview-tab-active-color: var(--text);
+  --preview-chip-bg: rgba(255, 255, 255, 0.06);
+  --preview-chip-border: var(--control-border-focus);
+
+  --preview-viewport-bg: #141414;
+  /* The rendered page keeps a light paper background inside the dark chrome. */
+  --preview-viewport-paper: #ffffff;
+  --preview-console-bg: var(--log-bg);
+  --preview-console-head-bg: var(--control-bg);
 }

@@ -268,7 +268,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--surface, #1e1e1e);
+  background: var(--preview-bg);
   overflow: hidden;
   font-family: inherit;
 }
@@ -278,14 +278,14 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--surface-input, rgba(0, 0, 0, 0.25));
-  border-bottom: 1px solid var(--border, #333);
+  background: var(--preview-toolbar-bg);
+  border-bottom: 1px solid var(--preview-border);
   flex-wrap: wrap;
 }
 
 .preview-mode-switch {
   display: flex;
-  border: 1px solid var(--border, #333);
+  border: 1px solid var(--preview-border);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -293,7 +293,7 @@ onBeforeUnmount(() => {
 .preview-tab-btn {
   background: transparent;
   border: none;
-  color: var(--text-secondary, #888);
+  color: var(--preview-text-muted);
   padding: 4px 8px;
   font-size: 11px;
   cursor: pointer;
@@ -301,8 +301,8 @@ onBeforeUnmount(() => {
 }
 
 .preview-tab-btn.active {
-  background: var(--accent, #648cff);
-  color: #ffffff;
+  background: var(--preview-tab-active-bg);
+  color: var(--preview-tab-active-color);
   font-weight: 600;
 }
 
@@ -316,10 +316,10 @@ onBeforeUnmount(() => {
 
 .preview-url-input {
   flex: 1;
-  background: var(--surface);
-  border: 1px solid var(--border, #333);
+  background: var(--preview-input-bg);
+  border: 1px solid var(--preview-input-border);
   border-radius: 6px;
-  color: var(--text-primary, #fff);
+  color: var(--preview-text);
   font-size: 11px;
   padding: 5px 8px;
   outline: none;
@@ -331,9 +331,9 @@ onBeforeUnmount(() => {
 }
 
 .detected-url-pill {
-  background: color-mix(in srgb, var(--accent, #648cff) 15%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, #648cff) 40%, transparent);
-  color: var(--text-primary, #fff);
+  background: var(--preview-chip-bg);
+  border: 1px solid var(--preview-chip-border);
+  color: var(--preview-text);
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 10px;
@@ -343,7 +343,7 @@ onBeforeUnmount(() => {
 .preview-device-controls {
   display: flex;
   gap: 2px;
-  border: 1px solid var(--border, #333);
+  border: 1px solid var(--preview-border);
   border-radius: 6px;
   padding: 2px;
 }
@@ -359,7 +359,7 @@ onBeforeUnmount(() => {
 }
 
 .device-btn.active {
-  background: var(--surface-strong, rgba(255, 255, 255, 0.1));
+  background: var(--preview-hover-bg);
 }
 
 .preview-actions {
@@ -370,18 +370,18 @@ onBeforeUnmount(() => {
 
 .preview-icon-btn {
   background: transparent;
-  border: 1px solid var(--border, #333);
+  border: 1px solid var(--preview-border);
   border-radius: 6px;
   padding: 4px 6px;
   font-size: 11px;
   cursor: pointer;
-  color: var(--text-primary);
+  color: var(--preview-text);
   transition: all 0.15s ease;
 }
 
 .preview-icon-btn:hover,
 .preview-icon-btn.active {
-  background: var(--surface-strong, rgba(255, 255, 255, 0.1));
+  background: var(--preview-hover-bg);
 }
 
 .preview-viewport-wrap {
@@ -389,7 +389,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #121212;
+  background: var(--preview-viewport-bg);
   overflow: auto;
   padding: 12px;
 }
@@ -397,7 +397,7 @@ onBeforeUnmount(() => {
 .preview-frame-container {
   width: 100%;
   height: 100%;
-  background: #ffffff;
+  background: var(--preview-viewport-paper);
   border-radius: 6px;
   overflow: hidden;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
@@ -425,8 +425,8 @@ onBeforeUnmount(() => {
 
 .preview-console {
   height: 140px;
-  border-top: 1px solid var(--border, #333);
-  background: #0d1117;
+  border-top: 1px solid var(--preview-border);
+  background: var(--preview-console-bg);
   display: flex;
   flex-direction: column;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -437,23 +437,23 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   align-items: center;
   padding: 4px 10px;
-  background: var(--surface-input, rgba(0, 0, 0, 0.2));
+  background: var(--preview-console-head-bg);
   font-size: 10px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--preview-text-muted);
   text-transform: uppercase;
 }
 
 .preview-console-clear {
   background: none;
   border: none;
-  color: var(--text-secondary);
+  color: var(--preview-text-muted);
   font-size: 10px;
   cursor: pointer;
 }
 
 .preview-console-clear:hover {
-  color: var(--text-primary);
+  color: var(--preview-text);
 }
 
 .preview-console-body {
@@ -473,20 +473,20 @@ onBeforeUnmount(() => {
 }
 
 .console-log-row.error {
-  color: #ff7b72;
+  color: var(--log-stderr);
 }
 
 .console-log-row.warn {
-  color: #d29922;
+  color: var(--log-warn);
 }
 
 .console-time {
-  color: #484f58;
+  color: var(--log-time);
   font-size: 10px;
 }
 
 .console-empty {
-  color: #484f58;
+  color: var(--log-time);
   font-size: 11px;
   text-align: center;
   padding: 20px 0;

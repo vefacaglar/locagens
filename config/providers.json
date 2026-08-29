@@ -345,6 +345,34 @@
         "mimo-v2.5-pro"
       ],
       "modelSettings": {
+        "mimo-v2.5": {
+          "reasoning": {
+            "style": "openai-chat",
+            "options": [
+              {
+                "id": "low",
+                "value": "low"
+              },
+              {
+                "id": "high",
+                "value": "high"
+              }
+            ]
+          },
+          "reasoningEfforts": [
+            "low",
+            "high"
+          ],
+          "pricing": {
+            "tiers": [
+              {
+                "inputRate": 0.4,
+                "outputRate": 1.2
+              }
+            ]
+          },
+          "contextLimit": 1000000
+        },
         "mimo-v2.5-pro": {
           "reasoning": {
             "style": "openai-chat",
@@ -381,36 +409,9 @@
             ]
           },
           "contextLimit": 1000000
-        },
-        "mimo-v2.5": {
-          "reasoning": {
-            "style": "openai-chat",
-            "options": [
-              {
-                "id": "low",
-                "value": "low"
-              },
-              {
-                "id": "high",
-                "value": "high"
-              }
-            ]
-          },
-          "reasoningEfforts": [
-            "low",
-            "high"
-          ],
-          "pricing": {
-            "tiers": [
-              {
-                "inputRate": 0.4,
-                "outputRate": 1.2
-              }
-            ]
-          },
-          "contextLimit": 1000000
         }
-      }
+      },
+      "apiKeyRef": "macos-keychain:xiaomitokenplan"
     },
     "opencode-go-anthropic": {
       "type": "anthropic",
