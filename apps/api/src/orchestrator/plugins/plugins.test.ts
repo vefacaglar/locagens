@@ -79,8 +79,8 @@ test("PluginRegistry discovers user and project plugins with project override", 
 test("PluginHookRunner processes context-mode output sandboxing", async () => {
   const runner = new PluginHookRunner();
 
-  // Create a massive output (> 300 lines)
-  const lines = Array.from({ length: 400 }, (_, i) => `Line ${i + 1}: log entry details`);
+  // Create a massive output (> 300 lines and > MAX_RAW_OUTPUT_LENGTH chars)
+  const lines = Array.from({ length: 400 }, (_, i) => `Line ${i + 1}: log entry details ${"x".repeat(40)}`);
   const massiveOutput = lines.join("\n");
 
   const contextModePlugin = {
@@ -103,8 +103,8 @@ test("PluginHookRunner processes context-mode output sandboxing", async () => {
   }, [contextModePlugin]);
 
   assert.ok(result.result.includes("Context-Mode: Sandboxed 200 middle lines"));
-  assert.ok(result.result.startsWith("Line 1: log entry details"));
-  assert.ok(result.result.endsWith("Line 400: log entry details"));
+  assert.ok(result.result.startsWith(lines[0]));
+  assert.ok(result.result.endsWith(lines[399]));
 });
 
 test("PluginHookRunner handles session start system prompt injection", async () => {

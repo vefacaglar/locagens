@@ -30,14 +30,12 @@ const emit = defineEmits<{
 }>();
 
 const canInstallProject = computed(() => !!props.activeProjectPath);
-const userPlugins = computed(() => props.plugins.filter(p => p.scope === 'user'));
-const projectPlugins = computed(() => props.plugins.filter(p => p.scope === 'project'));
 
 const showInstallModal = ref(false);
 const installSource = ref<'template' | 'github' | 'npm' | 'custom'>('template');
 const selectedTemplateId = ref<string>('context-mode');
 const installUri = ref('');
-const installScope = ref<PluginScope>('user');
+const installScope = ref<InstallPluginPayload['scope']>('user');
 const customManifestText = ref('');
 const expandedPlugins = ref<Set<string>>(new Set());
 

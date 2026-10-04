@@ -71,7 +71,7 @@ export function registerPluginRoutes(server: FastifyInstance, ctx: AppContext) {
         for (const [serverName, serverConf] of Object.entries(installed.mcpServers)) {
           if (serverConf.enabled !== false) {
             try {
-              ctx.mcpManager.saveConfig({
+              ctx.mcpManager.getConfigStore().saveConfig({
                 name: `${installed.id}__${serverName}`,
                 scope: installed.scope === "project" ? "project" : "user",
                 transport: serverConf.transport || "stdio",
@@ -81,7 +81,7 @@ export function registerPluginRoutes(server: FastifyInstance, ctx: AppContext) {
                 url: serverConf.url,
                 enabled: true,
                 projectPath
-              });
+              }, projectPath);
             } catch (err) {
               console.warn(`[Plugins] Auto-registering MCP server for ${installed.id} warning:`, err);
             }
