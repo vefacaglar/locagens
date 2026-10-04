@@ -8,6 +8,7 @@ import { executeWorkspaceToolAsync, DANGEROUS_TOOLS, READONLY_TOOLS, MODIFYING_T
 import { getOrchestratorTool } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
 import type { RunMessageStream } from "./RunMessageStream.js";
+import type { UserMessageInbox } from "./UserMessageInbox.js";
 import type { PermissionCoordinator } from "./PermissionCoordinator.js";
 import { randomId } from "./ids.js";
 import type { IUsageLogRepository } from "../database/repositories.js";
@@ -63,6 +64,12 @@ const OPEN_TASK_LIST_NUDGE =
   "Your <task_list> still has unchecked '- [ ]' items, but you ended your turn without calling any tool. " +
   "Either continue the work with your tools NOW, or — if you are blocked or the remaining items are intentionally out of scope — say so explicitly and update the list.";
 const MAX_TASK_LIST_NUDGES = 1;
+
+// Prefixed (model-facing only) to a message the user sent while the run was
+// working, so the model folds it into the ongoing task instead of treating it as
+// a fresh conversation turn.
+const MID_RUN_MESSAGE_NOTE =
+  "[The user sent this message while you were working. Take it into account and continue the task; it does not stop the current work unless it says so.]";
 
 /**
  * When a utility tier is configured, the architect should explore the workspace
@@ -236,7 +243,8 @@ export class AgentLoop {
     private permissions: PermissionCoordinator,
     private toolContext: OrchestratorToolContext,
     private registry: ProviderRegistry,
-    private usageLogRepo: IUsageLogRepository
+    private usageLogRepo: IUsageLogRepository,
+    private inbox: UserMessageInbox
   ) {}
 
   /** Wires the delegation handler. Called once during orchestrator setup. */
@@ -277,8 +285,13 @@ export class AgentLoop {
     // check then falls back to a chars-based estimate.
     let lastPromptTotal = 0;
 
+    // Only the main agent takes mid-run user messages; sub-agents never see the
+    // conversation, so a message waits for the main loop's next step.
+    const takesUserMessages = !opts.agentRole || opts.agentRole === "planner";
+
     while (true) {
       turn.checkCancelled();
+      if (takesUserMessages) this.deliverUserMessages(turn, messages);
       lastPromptTotal = this.enforceContextWindow(turn, messages, lastPromptTotal);
 
       const { response, promptTotal } = await this.streamCompletion(turn, messages);
@@ -290,6 +303,13 @@ export class AgentLoop {
         continue;
       }
 
+      // The user wrote while this answer was generating: keep going so the next
+      // step addresses it, instead of finishing over it.
+      if (takesUserMessages && this.inbox.hasPending(runId)) {
+        messages.push({ role: "assistant", content: response.content || "" });
+        continue;
+      }
+
       // No tool call: the model thinks it is done. Give the relevant corrective
       // nudge a shot (invisibly — nudges are not persisted, so they stay out of
       // the UI); if none applies, the run is genuinely finished.
@@ -297,6 +317,24 @@ export class AgentLoop {
       if (nudge === null) return lastText;
       messages.push({ role: "assistant", content: response.content || "" });
       messages.push({ role: "user", content: nudge });
+    }
+  }
+
+  /**
+   * Folds messages the user sent mid-run into the conversation: each is persisted
+   * and shown as a normal user message at this point in the thread, and the
+   * model gets it with a short note that the run is still in progress.
+   */
+  private deliverUserMessages(turn: TurnContext, messages: ChatMessage[]): void {
+    for (const content of this.inbox.drain(turn.runId)) {
+      this.messages.emitMessage(turn.runId, {
+        id: randomId("msg-user"),
+        runId: turn.runId,
+        role: "user",
+        content,
+        createdAt: new Date().toISOString()
+      });
+      messages.push({ role: "user", content: `${MID_RUN_MESSAGE_NOTE}\n\n${content}` });
     }
   }
 

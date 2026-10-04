@@ -364,6 +364,10 @@ export const api = {
   continueRun: (runId: string, payload: ContinueRunPayload) =>
     requestVoid(`/api/runs/${runId}/continue`, { method: 'POST', body: payload, errorFallback: 'Failed to send message.' }),
 
+  /** Sends a message to a run that is still working; rejects when it is not. */
+  sendRunMessage: (runId: string, content: string) =>
+    requestVoid(`/api/runs/${runId}/messages`, { method: 'POST', body: { content }, errorFallback: 'Failed to send message.' }),
+
   // TODO: should return a typed result instead of leaking the raw Response.
   async cancelRun(runId: string): Promise<Response> {
     return request(`/api/runs/${runId}/cancel`, { method: 'POST' });

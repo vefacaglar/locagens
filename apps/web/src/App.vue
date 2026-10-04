@@ -54,6 +54,7 @@ const {
   isRunning,
   taskInput,
   queuedTaskInput,
+  pendingMidRunMessages,
   focusSignal,
   showPermissionModal,
   pendingPermissionRequest,
@@ -368,6 +369,7 @@ async function openFileInReview(filePath: string) {
 const composerBindings = computed(() => ({
   isRunning: isRunning.value,
   queuedTaskInput: queuedTaskInput.value,
+  pendingMessages: pendingMidRunMessages.value,
   modelOptions: settings.modelOptions.value,
   reasoningEffortOptions: settings.reasoningEffortOptions.value,
   activeModelDisplayName: settings.activeModelDisplayName.value,

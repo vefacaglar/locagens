@@ -4,6 +4,7 @@ import { ProviderRegistry } from "../providers/ProviderRegistry.js";
 import { eventBus } from "./eventBus.js";
 import { buildSystemPrompt, formatMemoryContext, formatActivePlan, formatSkillCatalog, getModeStrategy } from "./systemPrompt.js";
 import { DELEGATE_TASKS_TOOL, DELEGATE_UTILITY_TOOL, spawnAgentsTool } from "./workspaceTools.js";
+import { UserMessageInbox } from "./UserMessageInbox.js";
 import { availableSchemas } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
 import { SkillRegistry, type DiscoveredSkill } from "./skills/index.js";
@@ -41,6 +42,8 @@ export class Orchestrator {
   private pluginRegistry: PluginRegistry;
   // Runs plugin lifecycle hooks.
   private pluginHookRunner: PluginHookRunner;
+  // Messages the user sends while a run works, delivered at the next step.
+  private inbox = new UserMessageInbox();
   // Skills discovered for the in-flight drive(); empty when idle.
   private driveSkills: DiscoveredSkill[] = [];
 
@@ -79,7 +82,7 @@ export class Orchestrator {
     // The loop and the delegation handler reference each other (loop runs the
     // sub-agents; delegation dispatches from inside the loop), so wire the
     // delegator after both exist.
-    this.agentLoop = new AgentLoop(this.activeRuns, this.messages, this.permissions, this.toolContext, this.registry, this.usageLogRepo);
+    this.agentLoop = new AgentLoop(this.activeRuns, this.messages, this.permissions, this.toolContext, this.registry, this.usageLogRepo, this.inbox);
     this.delegation = new DelegationCoordinator(this.registry, this.agentLoop, this.memoryRepo);
     this.agentLoop.setDelegator(this.delegation);
   }
@@ -132,6 +135,15 @@ export class Orchestrator {
 
   isRunning(runId: string): boolean {
     return this.activeRuns.has(runId);
+  }
+
+  /**
+   * Hands a message the user sent mid-run to the main agent, which picks it up
+   * before its next model call without interrupting the run. False when the run
+   * is not working (or has just finished) — the caller should continue it instead.
+   */
+  queueUserMessage(runId: string, content: string): boolean {
+    return this.activeRuns.has(runId) && this.inbox.enqueue(runId, content);
   }
 
   /** Starts a brand new chat session for a freshly created run. */
@@ -188,6 +200,7 @@ export class Orchestrator {
   ): Promise<void> {
     try {
       console.log(`[Orchestrator] Run ${runId} - Entering GENERATING state`);
+      this.inbox.open(runId);
       await this.messages.emitStatus(runId, "generating");
 
       // The mode strategy carries this run's full behavior: prompt section, base
@@ -326,6 +339,9 @@ export class Orchestrator {
         postDelegationNudge,
         maxPostDelegationNudges: postDelegationNudge ? 1 : 0
       });
+      // Synchronously after the loop's final inbox check: from here on a mid-run
+      // message is refused (and the client continues the run) rather than lost.
+      this.inbox.close(runId);
 
       await this.messages.emitStatus(runId, "done");
       eventBus.emit(`run:${runId}`, { type: "run_completed", finalOutput: finalText });
@@ -349,6 +365,7 @@ export class Orchestrator {
         eventBus.emit(`run:${runId}`, { type: "run_failed", errorMessage: error.message });
       }
     } finally {
+      this.inbox.close(runId);
       await this.messages.flushAllPendingDbUpdates();
       this.activeRuns.delete(runId);
       this.permissions.clear(runId);

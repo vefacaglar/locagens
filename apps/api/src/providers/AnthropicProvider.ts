@@ -74,7 +74,15 @@ function toAnthropicMessages(messages: ChatMessage[]): any[] {
       // System content is sent via the top-level `system` field instead.
       i++;
     } else if (m.role === "user") {
-      out.push({ role: "user", content: parseAnthropicMessageContent(m.content) });
+      const content = parseAnthropicMessageContent(m.content);
+      const previous = out[out.length - 1];
+      if (previous?.role === "user" && Array.isArray(previous.content)) {
+        // A user message right after tool results (e.g. one sent mid-run) joins
+        // that tool_result turn, keeping user/assistant turns alternating.
+        previous.content.push(...(typeof content === "string" ? [{ type: "text", text: content }] : content));
+      } else {
+        out.push({ role: "user", content });
+      }
       i++;
     } else if (m.role === "assistant") {
       if (m.toolCalls && m.toolCalls.length > 0) {

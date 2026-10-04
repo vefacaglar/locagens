@@ -1698,4 +1698,68 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.strictEqual(result.success, false);
     assert.match(result.error, /not available in plan mode/);
   });
+
+  await t.test("Orchestrator - a message sent mid-run is delivered at the next step without interrupting", async () => {
+    const registry = new ProviderRegistry(testConfigPath);
+    const runRepo = new RunRepository(db);
+    const messageRepo = new MessageRepository(db);
+    const orchestrator = new Orchestrator(runRepo, messageRepo, registry, new PlanRepository(db), new MemoryRepository(db), new UsageLogRepository(db));
+
+    const runId = "run-test-midrun";
+    await runRepo.create({
+      id: runId,
+      title: "Test Mid-run",
+      task: "Write the feature",
+      status: "created",
+      providerId: "test-provider",
+      providerDisplayName: "Test Provider",
+      model: "model-1",
+      mode: "accept_edits",
+      projectPath: process.cwd(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    const requests: any[] = [];
+    const reply = (message: any) => ({ ok: true, json: async () => ({ choices: [{ message }] }) } as any);
+    globalThis.fetch = async (_url: any, options: any) => {
+      requests.push(JSON.parse(options.body));
+      switch (requests.length) {
+        case 1:
+          // The user writes while the model is working on a tool step.
+          assert.strictEqual(orchestrator.queueUserMessage(runId, "Also add a README."), true);
+          return reply({
+            role: "assistant",
+            content: "Looking around.",
+            tool_calls: [{ id: "call_list_1", type: "function", function: { name: "list_directory", arguments: JSON.stringify({ path: "" }) } }]
+          });
+        case 2:
+          // ...and again while the model is writing what it thinks is its final answer.
+          assert.strictEqual(orchestrator.queueUserMessage(runId, "Use TypeScript."), true);
+          return reply({ role: "assistant", content: "Feature written." });
+        default:
+          return reply({ role: "assistant", content: "README added, all in TypeScript." });
+      }
+    };
+
+    await orchestrator.run(runId);
+    assert.strictEqual(runRepo.getById(runId)?.status, "done");
+    // Once the run is done, a mid-run message is refused so the client continues instead.
+    assert.strictEqual(orchestrator.queueUserMessage(runId, "too late"), false);
+
+    // Step 2 sees the first message right after the tool result; the run did not
+    // finish on "Feature written." but took a third step for the second message.
+    assert.strictEqual(requests.length, 3);
+    const lastUser = (body: any) => body.messages.filter((m: any) => m.role === "user").pop();
+    assert.match(lastUser(requests[1]).content, /while you were working[\s\S]*Also add a README\./);
+    assert.match(lastUser(requests[2]).content, /Use TypeScript\./);
+
+    // Persisted as plain user messages, in thread order, without the model-facing note.
+    const saved = messageRepo.listByRunId(runId);
+    const userContents = saved.filter(m => m.role === "user").map(m => m.content);
+    assert.deepStrictEqual(userContents, ["Also add a README.", "Use TypeScript."]);
+    const order = saved.map(m => m.role === "user" ? m.content : m.role);
+    assert.ok(order.indexOf("Also add a README.") > order.indexOf("tool"));
+    assert.ok(order.indexOf("Use TypeScript.") > order.indexOf("Also add a README."));
+  });
 });

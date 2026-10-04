@@ -20,6 +20,7 @@ every `/api/*` route requires the process-local bearer token._
 | POST | `/api/runs` | Create and trigger a new orchestration run | `ctx.runRepo.create(run)`, `ctx.orchestrator.run(runId)` |
 | POST | `/api/runs/:id/cancel` | Cancel a running orchestration job | `ctx.orchestrator.cancel(id)` |
 | POST | `/api/runs/:id/continue` | Continue a run with follow-up instructions in the same thread | `ctx.runRepo.update(id, updates)`, `ctx.messageRepo.create(userMsg)`, `ctx.runRepo.update(id, {status: "generating"})`, `ctx.orchestrator.continueRun(id, task)` |
+| POST | `/api/runs/:id/messages` | Send a message to a run that is still working; delivered at the main agent's next step (409 when the run is not working) | `ctx.orchestrator.queueUserMessage(id, content)` |
 | POST | `/api/runs/:id/permission` | Resolve a pending permission request for a running job | `ctx.orchestrator.resolvePermission(id, decision)`, `ctx.permissionRepo.allowGlobal(tool, command)` / `ctx.permissionRepo.allowProject(path, tool, command)` |
 | POST | `/api/runs/:id/answer` | Resolve a pending `ask_user_question` with user's selections | `ctx.orchestrator.resolveQuestion(id, {selections, notes})` |
 | GET | `/api/runs` | Run history list | `ctx.runRepo.list()` |

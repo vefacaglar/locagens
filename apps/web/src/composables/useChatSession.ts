@@ -65,7 +65,12 @@ export function useChatSession(options: ChatSessionOptions) {
   const runUsage = ref<RunUsageSummary | null>(null);
 
   const taskInput = ref('');
+  // Fallback follow-up, sent as a new turn once the run finishes (used only when
+  // a mid-run message could not be handed to the running agent).
   const queuedTaskInput = ref('');
+  // Messages handed to the running agent but not yet picked up; each disappears
+  // when the agent folds it into the thread (its user message_created arrives).
+  const pendingMidRunMessages = ref<string[]>([]);
   const focusSignal = ref(0);
 
   const showPermissionModal = ref(false);
@@ -287,6 +292,7 @@ export function useChatSession(options: ChatSessionOptions) {
     runUsage.value = null;
     taskInput.value = '';
     queuedTaskInput.value = '';
+    pendingMidRunMessages.value = [];
     requestFocus();
   }
 
@@ -437,6 +443,7 @@ export function useChatSession(options: ChatSessionOptions) {
       }
 
       if (data.type === 'message_created' && activeRun.value?.id === runId) {
+        if (data.message.role === 'user') removePendingMidRunMessage(data.message.content);
         queueMessageUpdate(data.message);
       }
 
@@ -493,6 +500,14 @@ export function useChatSession(options: ChatSessionOptions) {
     isRunning.value = false;
     loadRuns();
     if (activeRun.value) refreshRunUsage(activeRun.value.id);
+
+    // A cancelled/failed run never picks these up; hand them back to the
+    // composer instead of losing them.
+    if (pendingMidRunMessages.value.length > 0) {
+      const undelivered = pendingMidRunMessages.value.join('\n\n');
+      pendingMidRunMessages.value = [];
+      if (!taskInput.value.trim()) taskInput.value = undelivered;
+    }
 
     if (options.sendQueuedMessage && queuedTaskInput.value.trim()) {
       // Capture + clear synchronously so a second finishEventStream call (e.g.
@@ -599,11 +614,35 @@ export function useChatSession(options: ChatSessionOptions) {
     }
   }
 
-  function handleQueueTask() {
-    if (!isRunning.value || !taskInput.value.trim()) return;
-    queuedTaskInput.value = taskInput.value;
+  /**
+   * Sends a message while the run is working. The agent picks it up at its next
+   * step without the run being interrupted. If the run has just finished (the
+   * server refuses), the message falls back to a normal follow-up turn.
+   */
+  async function handleQueueTask() {
+    const runId = activeRunId.value;
+    const content = taskInput.value;
+    if (!isRunning.value || !content.trim() || !runId) return;
     taskInput.value = '';
     requestFocus();
+    pendingMidRunMessages.value = [...pendingMidRunMessages.value, content];
+    try {
+      await api.sendRunMessage(runId, content);
+    } catch {
+      removePendingMidRunMessage(content);
+      if (isRunning.value) {
+        queuedTaskInput.value = queuedTaskInput.value.trim() ? `${queuedTaskInput.value}\n\n${content}` : content;
+      } else {
+        taskInput.value = content;
+        await handleSendTask();
+      }
+    }
+  }
+
+  function removePendingMidRunMessage(content: string) {
+    const index = pendingMidRunMessages.value.indexOf(content);
+    if (index === -1) return;
+    pendingMidRunMessages.value = pendingMidRunMessages.value.filter((_, i) => i !== index);
   }
 
   async function cancelActiveRun() {
@@ -679,6 +718,7 @@ export function useChatSession(options: ChatSessionOptions) {
     runUsage,
     taskInput,
     queuedTaskInput,
+    pendingMidRunMessages,
     focusSignal,
     showPermissionModal,
     pendingPermissionRequest,

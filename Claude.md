@@ -593,6 +593,29 @@ spawn_agents(agents[{ type: "explore" | "general", title, instructions }], paral
   coder/utility, and the web UI renders each in its own sub-agent window
   (`messageGroups.ts` `subAgentLabel`: Explore / Agent).
 
+### Mid-Run Messages (`POST /api/runs/:id/messages`)
+
+The user can keep typing while a run works (Claude-Code style): the message is
+folded into the conversation at the main agent's next step instead of
+interrupting the run or waiting for it to finish.
+
+- `Orchestrator.queueUserMessage` puts it in the run's `UserMessageInbox`. The
+  inbox is opened when `drive()` starts and closed synchronously the moment the
+  main loop returns, so a message is either delivered or refused (409) — never
+  silently dropped.
+- `AgentLoop.run` (main agent only; sub-agents never see the conversation) drains
+  the inbox before every model call: each message is persisted/emitted as a normal
+  user message at that point in the thread and sent to the model with a short
+  "sent while you were working" note. If one arrives while the model is writing
+  what would be its final answer, the loop takes another step instead of finishing.
+- `AnthropicProvider` merges such a user message into the preceding
+  `tool_result` turn so turns keep alternating.
+- Web: while running, Enter calls `useChatSession.handleQueueTask`, which posts
+  the message and shows it as "Queued" above the composer until its
+  `message_created` arrives. On 409 it falls back to the old behavior (sent as a
+  new turn after the run finishes, shown as "After run"); messages a cancelled run
+  never picked up are returned to the composer.
+
 ---
 
 ## Run States

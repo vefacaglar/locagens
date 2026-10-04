@@ -20,6 +20,8 @@ import { messageTokenEstimate } from '../lib/messageDerived';
 const props = defineProps<{
   taskInput: string;
   queuedTaskInput: string;
+  /** Messages sent to the running agent, not yet picked up. */
+  pendingMessages: string[];
   isRunning: boolean;
   currentMode: ChatMode;
   bypassPermissions: boolean;
@@ -780,8 +782,17 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="hasQueuedMessage" class="queued-message-preview">
+      <div
+        v-for="(pending, index) in pendingMessages"
+        :key="`pending-${index}`"
+        class="queued-message-preview"
+        title="The agent picks this up at its next step"
+      >
         <span class="queued-label">Queued</span>
+        <span class="queued-text truncate">{{ pending }}</span>
+      </div>
+      <div v-if="hasQueuedMessage" class="queued-message-preview" title="Sent as a new message when this run finishes">
+        <span class="queued-label">After run</span>
         <span class="queued-text truncate">{{ queuedTaskInput }}</span>
       </div>
 

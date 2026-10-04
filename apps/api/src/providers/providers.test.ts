@@ -438,6 +438,38 @@ test("Provider Registry and Model Providers Unit Tests", async (t) => {
     assert.deepStrictEqual(JSON.parse(res.toolCalls![0].function.arguments), { path: "a.txt", content: "hi" });
   });
 
+  await t.test("AnthropicProvider - a user message after tool results joins the tool_result turn", async () => {
+    const provider = new AnthropicProvider("http://localhost:9999", "ant-key");
+
+    let sentBody: any;
+    globalThis.fetch = async (_url: any, options: any) => {
+      sentBody = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({ content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1, output_tokens: 1 } })
+      } as any;
+    };
+
+    await provider.complete({
+      model: "claude-model",
+      messages: [
+        { role: "user", content: "build it" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "toolu_0", type: "function", function: { name: "list_directory", arguments: "{}" } }]
+        },
+        { role: "tool", content: '{"success":true}', tool_call_id: "toolu_0", name: "list_directory" },
+        { role: "user", content: "Also add a README." }
+      ]
+    });
+
+    // Still strictly alternating: the mid-run message rides on the tool_result turn.
+    assert.deepStrictEqual(sentBody.messages.map((m: any) => m.role), ["user", "assistant", "user"]);
+    assert.deepStrictEqual(sentBody.messages[2].content.map((b: any) => b.type), ["tool_result", "text"]);
+    assert.strictEqual(sentBody.messages[2].content[1].text, "Also add a README.");
+  });
+
   await t.test("reasoningWire - converts effort to each model's official parameter", () => {
     const r = (value: string) => ({ style: "openai-chat" as const, value });
 

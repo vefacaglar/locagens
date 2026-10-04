@@ -206,6 +206,23 @@ export function registerRunRoutes(server: FastifyInstance, ctx: AppContext) {
     return { success: true };
   });
 
+  // Send a message to a run that is still working. The main agent folds it into
+  // the conversation at its next step without interrupting the run. 409 when the
+  // run is not working (or has just finished) — the client then continues it.
+  server.post("/api/runs/:id/messages", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { content } = (request.body ?? {}) as { content?: unknown };
+    if (typeof content !== "string" || !content.trim()) {
+      reply.status(400);
+      return { error: "Missing required field: content" };
+    }
+    if (!ctx.orchestrator.queueUserMessage(id, content)) {
+      reply.status(409);
+      return { error: "This run is not working right now; continue it instead." };
+    }
+    return { success: true };
+  });
+
   // Resolve a pending permission request for a running job.
   server.post("/api/runs/:id/permission", async (request, reply) => {
     const { id } = request.params as { id: string };
