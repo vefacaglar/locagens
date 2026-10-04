@@ -705,9 +705,12 @@ export class AgentLoop {
         requestsCommandNetwork = false;
       }
     }
-    // Full Access skips ordinary command prompts, but never grants fresh
-    // outbound network access. Declared domains still require an exact grant.
-    const mustGate = requestsCommandNetwork || (!strategy.bypassDangerousGating && (isDangerous || strategy.gatesEveryTool));
+    // Full Access skips every prompt, including commands that declare
+    // network_domains (downloads): the user opted in to autonomous work. The OS
+    // sandbox still confines such a command to exactly the domains it declared,
+    // and local/IP-literal hosts are always refused. Other modes always ask
+    // before granting a new domain set.
+    const mustGate = !strategy.bypassDangerousGating && (requestsCommandNetwork || isDangerous || strategy.gatesEveryTool);
     const needsPermission = mustGate && !this.permissions.check(run, toolCall);
 
     if (needsPermission) {

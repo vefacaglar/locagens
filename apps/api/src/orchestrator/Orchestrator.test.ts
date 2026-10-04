@@ -1762,4 +1762,63 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.ok(order.indexOf("Also add a README.") > order.indexOf("tool"));
     assert.ok(order.indexOf("Use TypeScript.") > order.indexOf("Also add a README."));
   });
+
+  await t.test("Orchestrator - Full Access runs network commands without asking; Build mode still asks", async () => {
+    const registry = new ProviderRegistry(testConfigPath);
+    const runRepo = new RunRepository(db);
+    const messageRepo = new MessageRepository(db);
+    const orchestrator = new Orchestrator(runRepo, messageRepo, registry, new PlanRepository(db), new MemoryRepository(db), new UsageLogRepository(db));
+
+    // Each run: the model asks to download over the network, then finishes.
+    const startDownloadRun = async (runId: string, mode: string) => {
+      await runRepo.create({
+        id: runId,
+        title: "Download",
+        task: "Download the subtitle",
+        status: "created",
+        providerId: "test-provider",
+        providerDisplayName: "Test Provider",
+        model: "model-1",
+        mode,
+        projectPath: process.cwd(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        const message = calls === 1
+          ? {
+              role: "assistant",
+              content: "Downloading.",
+              tool_calls: [{
+                id: `call_dl_${runId}`,
+                type: "function",
+                function: { name: "run_command", arguments: JSON.stringify({ command: "true", network_domains: ["example.com"] }) }
+              }]
+            }
+          : { role: "assistant", content: "Done." };
+        return { ok: true, json: async () => ({ choices: [{ message }] }) } as any;
+      };
+      const requested: string[] = [];
+      const onEvent = (event: any) => { if (event.type === "permission_requested") requested.push(event.type); };
+      eventBus.on(`run:${runId}`, onEvent);
+      const done = orchestrator.run(runId);
+      return { done, requested, stop: () => eventBus.off(`run:${runId}`, onEvent) };
+    };
+
+    const full = await startDownloadRun("run-test-net-full", "full_access");
+    await full.done;
+    full.stop();
+    assert.deepStrictEqual(full.requested, [], "Full Access must not ask before a download");
+    assert.strictEqual(runRepo.getById("run-test-net-full")?.status, "done");
+
+    const build = await startDownloadRun("run-test-net-build", "accept_edits");
+    await new Promise(r => setTimeout(r, 100));
+    assert.strictEqual(runRepo.getById("run-test-net-build")?.status, "awaiting_permission");
+    assert.ok(orchestrator.resolvePermission("run-test-net-build", "deny"));
+    await build.done;
+    build.stop();
+    assert.deepStrictEqual(build.requested, ["permission_requested"]);
+  });
 });
