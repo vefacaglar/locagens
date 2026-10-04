@@ -21,8 +21,13 @@ jobs:
     runs-on: macos-15
 
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: false
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Developer ID Application certificate (.p12, base64) + its export password.
+      CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12_BASE64 }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+      # App Store Connect API key used by electron-builder for notarization.
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
@@ -79,8 +84,36 @@ jobs:
             }
           "
 
-      - name: Build all packages (db-writer + web + api + Electron)
+      - name: Check signing secrets
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=""
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY_P8; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing signing/notarization secrets:$missing"
+            exit 1
+          fi
+
+      - name: Write App Store Connect API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+          echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize (db-writer + web + api + Electron)
         run: pnpm dist
+
+      - name: Verify signature and notarization
+        run: |
+          app=$(find apps/desktop/release -maxdepth 2 -name "Locagens.app" -type d | head -1)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
 
       - name: List produced DMG
         run: ls -lh apps/desktop/release/
