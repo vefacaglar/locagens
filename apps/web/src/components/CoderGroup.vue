@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
 import type { MessageGroup } from '../lib/messageGroups';
+import { subAgentLabel } from '../lib/messageGroups';
 import { renderMarkdown, cleanMessageContent } from '../lib/markdown';
 import { capturePreScrollStates, restorePreScrollStates } from '../lib/domScroll';
 import ToolGroup from './ToolGroup.vue';
@@ -20,10 +21,8 @@ const emit = defineEmits<{
 
 const expanded = ref(false);
 
-// Sub-agent role drives the badge: coder vs the lighter utility tier.
-const badgeLabel = computed(() =>
-  props.children[0]?.message.agentRole === 'utility' ? 'Utility' : 'Coder'
-);
+// Sub-agent role drives the badge (Coder / Utility / Explore / Agent).
+const badgeLabel = computed(() => subAgentLabel(props.children[0]?.message.agentRole));
 
 // The sub-agent model label, taken from the first child that carries one.
 const model = computed(() => props.children.find(c => c.message.model)?.message.model ?? '');

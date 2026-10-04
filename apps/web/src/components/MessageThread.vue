@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, onUnmounted } from 'vue';
 import type { Run, Plan } from '@locagens/shared';
 import type { AgentSummary, MessageGroup } from '../lib/messageGroups';
+import { isWritingSubAgent, subAgentLabel } from '../lib/messageGroups';
 import { renderMarkdown, formatSystemErrorMessage } from '../lib/markdown';
 import { capturePreScrollStates, restorePreScrollStates } from '../lib/domScroll';
 import { cleanedMessageContent, extractPlanFromMessage, messageTokenEstimate } from '../lib/messageDerived';
@@ -360,7 +361,7 @@ const formattedElapsedTime = computed(() => {
             <path d="m9 18 6-6-6-6"></path>
           </svg>
           <span class="step-row-label">
-            {{ group.children?.[0]?.message.agentRole === 'utility' ? 'Utility' : 'Coder' }}: {{ group.title }}
+            {{ subAgentLabel(group.children?.[0]?.message.agentRole) }}: {{ group.title }}
           </span>
           <template v-if="isRunning && idx > lastNonCoderIdx">
             <span class="status-dot pending" title="Running..."></span>
@@ -372,12 +373,12 @@ const formattedElapsedTime = computed(() => {
         v-else-if="group.type === 'assistant'"
         class="assistant-message"
         :class="{ 
-          'coder-message': group.message.agentRole === 'coder',
+          'coder-message': isWritingSubAgent(group.message.agentRole),
           'is-generating': isRunning && idx === groupedMessages.length - 1
         }"
       >
         <div class="assistant-meta">
-          <span v-if="group.message.agentRole === 'coder'" class="agent-badge coder-badge">Coder</span>
+          <span v-if="isWritingSubAgent(group.message.agentRole)" class="agent-badge coder-badge">{{ subAgentLabel(group.message.agentRole) }}</span>
           <span>{{ group.message.providerDisplayName }} / {{ group.message.model }}</span>
           <span>{{ formatTime(group.message.createdAt) }}</span>
         </div>

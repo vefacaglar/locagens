@@ -11,6 +11,7 @@ export const fullAccessStrategy: ModeStrategy = {
   lightweight: false,
   allowsMutation: true,
   allowsDelegation: true,
+  subAgentTypes: ["explore", "general"],
   allowsPlanTool: false,
   bypassDangerousGating: true,
   gatesEveryTool: false,

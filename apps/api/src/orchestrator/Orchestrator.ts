@@ -3,7 +3,7 @@ import type { IRunRepository, IMessageRepository, IPlanRepository, IMemoryReposi
 import { ProviderRegistry } from "../providers/ProviderRegistry.js";
 import { eventBus } from "./eventBus.js";
 import { buildSystemPrompt, formatMemoryContext, formatActivePlan, formatSkillCatalog, getModeStrategy } from "./systemPrompt.js";
-import { DELEGATE_TASKS_TOOL, DELEGATE_UTILITY_TOOL } from "./workspaceTools.js";
+import { DELEGATE_TASKS_TOOL, DELEGATE_UTILITY_TOOL, spawnAgentsTool } from "./workspaceTools.js";
 import { availableSchemas } from "./tools/index.js";
 import type { OrchestratorToolContext } from "./tools/index.js";
 import { SkillRegistry, type DiscoveredSkill } from "./skills/index.js";
@@ -221,10 +221,15 @@ export class Orchestrator {
       // The utility-delegation tool is offered only when a utility model is
       // configured (and the run can delegate at all).
       const withUtility = delegation?.utilityModel ? [...withDelegate, DELEGATE_UTILITY_TOOL] : withDelegate;
+      // Single-model runs (no preset) get spawn_agents instead: the main agent
+      // keeps every tool and may fan work out to same-model sub-agents of the
+      // types this mode allows (plan: explore only; chat: none).
+      const subAgentTypes = delegation || run.coderModel ? [] : strategy.subAgentTypes;
+      const withSubAgents = subAgentTypes.length > 0 ? [...withUtility, spawnAgentsTool(subAgentTypes)] : withUtility;
       // The orchestrator-native tools the strategy allows: update_plan (plan
       // mode only) plus set_chat_title / ask_user_question / remember (every
       // mode). Sub-agents never get these. See orchestrator/tools.
-      const nativeTools = [...withUtility, ...availableSchemas(strategy)];
+      const nativeTools = [...withSubAgents, ...availableSchemas(strategy)];
 
       // Active plugins for this context
       const activePlugins = this.pluginRegistry.getActivePlugins(run.projectPath);
@@ -274,6 +279,7 @@ export class Orchestrator {
         mode: run.mode,
         shouldReadProjectGuidance: run.mode !== "chat" && shouldReadProjectGuidance,
         delegation,
+        subAgentTypes,
         memoryContext,
         planContext,
         skillCatalog

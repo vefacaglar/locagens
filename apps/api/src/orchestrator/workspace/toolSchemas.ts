@@ -536,6 +536,55 @@ export const DELEGATE_UTILITY_TOOL = {
   }
 };
 
+/**
+ * Single-model sub-agent types for spawn_agents. "explore" is read-only
+ * (read_file/list_directory/search_files); "general" gets the full workspace
+ * toolset. Which types a run may spawn is decided by its mode strategy.
+ */
+export type SubAgentType = "explore" | "general";
+
+/** Max sub-agents one spawn_agents call may launch. */
+export const MAX_SPAWNED_AGENTS = 5;
+
+/**
+ * Builds the spawn_agents schema for the sub-agent types this mode allows (plan
+ * mode: explore only). Offered to the main agent of a single-model run — preset
+ * runs use delegate_tasks instead. Like delegate_tasks it performs no direct I/O
+ * (the orchestrator runs each sub-agent loop), so it is not in DANGEROUS_TOOLS.
+ */
+export function spawnAgentsTool(types: SubAgentType[]) {
+  return {
+    type: "function" as const,
+    function: {
+      name: "spawn_agents",
+      description: `Launch 1-${MAX_SPAWNED_AGENTS} sub-agents with fresh context, each running the same model on one self-contained task; returns their short reports. ${types.includes("general") ? "'explore' = read-only search/read/summarize; 'general' = full workspace tools for an independent implementation chunk." : "'explore' = read-only search/read/summarize."}`,
+      parameters: {
+        type: "object",
+        properties: {
+          agents: {
+            type: "array",
+            description: "Sub-agents to launch.",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: types, description: "Sub-agent type." },
+                title: { type: "string", description: "Short task title (shown to the user)." },
+                instructions: { type: "string", description: "Self-contained ENGLISH instructions (the sub-agent sees only this, not the conversation). Cite file paths and line ranges; do NOT paste file contents — it reads files itself. State exactly what to report back." }
+              },
+              required: ["type", "title", "instructions"]
+            }
+          },
+          parallel: {
+            type: "boolean",
+            description: "Run concurrently. Safe for explore agents; for general agents only when they write disjoint files."
+          }
+        },
+        required: ["agents"]
+      }
+    }
+  };
+}
+
 /** Tools that must always be gated behind an explicit permission prompt. */
 export const DANGEROUS_TOOLS = new Set(["run_command", "search_web", "fetch_url"]);
 

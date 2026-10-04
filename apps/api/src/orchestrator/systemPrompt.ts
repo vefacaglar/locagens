@@ -9,6 +9,7 @@ export {
   buildCoderSystemPrompt,
   buildUtilitySystemPrompt,
   buildVerifierSystemPrompt,
+  buildExplorerSystemPrompt,
   formatCoderMemoryContext,
   formatMemoryContext,
   formatActivePlan,

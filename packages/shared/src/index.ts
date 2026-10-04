@@ -117,7 +117,12 @@ export interface RunMessage {
   id: string;
   runId: string;
   role: "system" | "user" | "assistant" | "tool";
-  agentRole?: "planner" | "coder" | "reviewer" | "user" | "utility";
+  /**
+   * Sub-agent roles: "coder"/"utility" are preset (architect) delegation;
+   * "explorer"/"worker" are single-model spawn_agents sub-agents (read-only vs
+   * full workspace tools). All four are internal to a delegation tool call.
+   */
+  agentRole?: "planner" | "coder" | "reviewer" | "user" | "utility" | "explorer" | "worker";
   /**
    * For delegated coder sub-agents: the sub-task title that identifies WHICH
    * sub-agent produced this message. Lets the UI render each coder in its own

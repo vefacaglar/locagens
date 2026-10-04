@@ -1,8 +1,8 @@
 import type { Run, RunMessage, ReasoningEffort } from "@locagens/shared";
 import type { ProviderRegistry } from "../providers/ProviderRegistry.js";
 import type { IMemoryRepository } from "../database/repositories.js";
-import { buildCoderSystemPrompt, buildUtilitySystemPrompt, buildVerifierSystemPrompt, formatCoderMemoryContext, getModeStrategy } from "./systemPrompt.js";
-import { WORKSPACE_TOOLS, UTILITY_TOOLS, READONLY_TOOLS } from "./workspaceTools.js";
+import { buildCoderSystemPrompt, buildUtilitySystemPrompt, buildVerifierSystemPrompt, buildExplorerSystemPrompt, formatCoderMemoryContext, getModeStrategy } from "./systemPrompt.js";
+import { WORKSPACE_TOOLS, UTILITY_TOOLS, READONLY_TOOLS, MAX_SPAWNED_AGENTS, type SubAgentType } from "./workspaceTools.js";
 import type { AgentLoop, Delegator } from "./AgentLoop.js";
 
 /**
@@ -135,10 +135,10 @@ function summaryWarnings(results: TaskResult[]): string[] {
 }
 
 /** Runs one sub-agent per task — concurrently only when the architect asked for it. */
-async function runTasks(
-  tasks: DelegatedTask[],
+async function runTasks<T extends DelegatedTask>(
+  tasks: T[],
   parallel: boolean,
-  runOne: (task: DelegatedTask) => Promise<TaskResult>
+  runOne: (task: T) => Promise<TaskResult>
 ): Promise<TaskResult[]> {
   if (parallel) return Promise.all(tasks.map(runOne));
   const results: TaskResult[] = [];
@@ -447,5 +447,71 @@ export class DelegationCoordinator implements Delegator {
       _reminder:
         "Review the utility results above and proceed with implementation if the information is sufficient."
     });
+  }
+
+  /**
+   * Executes a spawn_agents call from a single-model run's main agent: launches
+   * 1..MAX_SPAWNED_AGENTS sub-agents on the run's OWN model — 'explore' read-only,
+   * 'general' with the full workspace toolset — and returns their compact
+   * reports. The types allowed come from the mode strategy (plan: explore only).
+   */
+  async executeSpawnAgents(runId: string, run: Run, toolCall: any): Promise<string> {
+    if (run.coderModel && run.coderProviderId) {
+      return JSON.stringify({ success: false, error: "This run uses an agent preset; delegate with delegate_tasks instead of spawn_agents." });
+    }
+    const allowedTypes = getModeStrategy(run.mode).subAgentTypes;
+    if (allowedTypes.length === 0) {
+      return JSON.stringify({ success: false, error: `Cannot spawn sub-agents in ${run.mode} mode.` });
+    }
+
+    let args: any;
+    try {
+      args = JSON.parse(toolCall.function.arguments || "{}");
+    } catch (e: any) {
+      return JSON.stringify({ success: false, error: `Could not parse spawn_agents arguments (${e.message}). This usually means they were too large and got cut off. Do NOT paste file contents into 'instructions' — sub-agents read files themselves. Keep instructions short and cite file paths, then retry.` });
+    }
+
+    // Same filter normalizeTasks applies, so the two lists stay index-aligned.
+    const valid = (Array.isArray(args.agents) ? args.agents : [])
+      .filter((a: any) => a && typeof a.instructions === "string" && a.instructions.trim());
+    const disallowed = valid.find((a: any) => !allowedTypes.includes(a.type));
+    if (disallowed) {
+      return JSON.stringify({ success: false, error: `Sub-agent type "${disallowed.type}" is not available in ${run.mode} mode. Allowed: ${allowedTypes.join(", ")}.` });
+    }
+    const agents = normalizeTasks({ tasks: valid }, MAX_SPAWNED_AGENTS, "Agent")
+      .map((task, i) => ({ ...task, type: valid[i].type as SubAgentType }));
+    if (agents.length === 0) {
+      return JSON.stringify({ success: false, error: "No valid agents to spawn (each needs a type and non-empty instructions)." });
+    }
+
+    const parallel = !!args.parallel && agents.length > 1;
+    const results = await runTasks(agents, parallel, agent => this.runSpawnedAgent(runId, run, agent));
+
+    const warnings = summaryWarnings(results);
+    return JSON.stringify({
+      success: true,
+      parallel,
+      results: results.map((r, i) => ({ type: agents[i].type, title: r.title, summary: trimSummary(r.summary) })),
+      _warnings: warnings.length > 0 ? warnings : undefined
+    });
+  }
+
+  /** One spawn_agents sub-agent on the run's own model, tooled by its type. */
+  private runSpawnedAgent(runId: string, run: Run, agent: DelegatedTask & { type: SubAgentType }): Promise<TaskResult> {
+    const explore = agent.type === "explore";
+    return this.runTaskWithFallback(runId, run, agent, [{
+      providerId: run.providerId,
+      providerDisplayName: run.providerDisplayName,
+      model: run.model,
+      reasoningEffort: run.reasoningEffort,
+      tools: explore
+        ? WORKSPACE_TOOLS.filter(t => READONLY_TOOLS.has(t.function.name))
+        : [...WORKSPACE_TOOLS],
+      agentRole: explore ? "explorer" : "worker",
+      systemPrompt: explore
+        ? buildExplorerSystemPrompt(run.projectName, run.projectPath, agent.title)
+        : buildCoderSystemPrompt(run.projectName, run.projectPath, agent.title, this.coderProjectContext(run)),
+      agentName: agent.title
+    }]);
   }
 }

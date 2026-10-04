@@ -1,3 +1,5 @@
+import type { SubAgentType } from "../workspaceTools.js";
+
 /**
  * One advertised tool schema. Kept structurally loose (the various tools have
  * heterogeneous `parameters` shapes) — the orchestrator forwards these to the
@@ -54,6 +56,12 @@ export interface ModeStrategy {
   allowsMutation: boolean;
   /** Whether delegate_tasks / delegate_to_utility may be offered in this mode. */
   allowsDelegation: boolean;
+  /**
+   * spawn_agents sub-agent types a single-model run may launch in this mode:
+   * build-type modes get explore + general, plan mode explore only (read-only),
+   * chat none. Preset (architect) runs use delegate_tasks instead.
+   */
+  subAgentTypes: SubAgentType[];
   /** Whether update_plan is offered and accepted in this mode (plan only). */
   allowsPlanTool: boolean;
   /** Whether dangerous tools (run_command/search_web/fetch_url) skip gating (full access). */

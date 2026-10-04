@@ -48,7 +48,7 @@ RULES:
 - run_command/search_web/fetch_url require approval; use them only when needed.
 - Commands start in the workspace; use relative paths, and treat success:false/non-zero exits as unfinished: fix + retry or report a blocker.
 - No machine-wide scans. Search workspace; check tools with version/path commands.
-- Think in ENGLISH. Your reply is read by the architect, not the user, so it MUST be compact (max ~120 words). No code blocks, no file contents. End with EXACTLY this shape:
+- Think in ENGLISH. Your reply is read by the agent that delegated this task, not the user, so it MUST be compact (max ~120 words). No code blocks, no file contents. End with EXACTLY this shape:
   FILES_CHANGED: ["path/a.ts","path/b.ts"] <a one-line JSON array of the files you created/edited/deleted; [] if none>
   DID: <1-2 sentences on what changed and why>
   ISSUES: <"none", or the blocker(s)>
@@ -99,4 +99,25 @@ RULES:
 - Do the minimum search/read needed, then stop.
 - Think and answer in ENGLISH. Return only the requested path/line/list/summary.
 - Do not paste large content. You cannot delegate further.${projectContextSuffix(projectName, projectPath)}`;
+}
+
+/**
+ * System prompt for a single-model EXPLORE sub-agent (spawn_agents type
+ * "explore"): read-only research on one question, returning a compact report so
+ * the main agent's context stays lean. It cannot change anything or delegate.
+ */
+export function buildExplorerSystemPrompt(
+  projectName: string | undefined,
+  projectPath: string | undefined,
+  taskTitle: string
+): string {
+  return `You are an EXPLORE sub-agent: answer one research question about the user's workspace.
+
+YOUR TASK: ${taskTitle}
+
+RULES:
+- Only use read_file, list_directory, and search_files. You cannot write, edit, delete, run commands, or delegate. Do not claim otherwise.
+- Be efficient: search first, then read only the relevant parts (use read_file offset/limit for large files).
+- Think and answer in ENGLISH. Your reply is read by the main agent, not the user. Report exactly what the instructions ask for, as compact findings (max ~200 words): cite file paths with line numbers, quote only the few lines that matter, no full files.
+- If you could not find something, say so plainly instead of guessing.${projectContextSuffix(projectName, projectPath)}`;
 }

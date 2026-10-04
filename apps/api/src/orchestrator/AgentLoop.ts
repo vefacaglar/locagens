@@ -44,7 +44,7 @@ export interface AgentRunOptions {
 }
 
 /**
- * Handles the delegate_tasks / delegate_to_utility tool calls. Injected into the
+ * Handles the delegate_tasks / delegate_to_utility / spawn_agents tool calls. Injected into the
  * AgentLoop (rather than imported) so the loop depends only on this small
  * interface — breaking the loop ↔ delegation recursion cycle. Implemented by
  * DelegationCoordinator.
@@ -52,6 +52,7 @@ export interface AgentRunOptions {
 export interface Delegator {
   executeDelegateTasks(runId: string, run: Run, toolCall: any): Promise<string>;
   executeUtilityTasks(runId: string, run: Run, toolCall: any): Promise<string>;
+  executeSpawnAgents(runId: string, run: Run, toolCall: any): Promise<string>;
 }
 
 // One-shot reminder injected when the agent ends its turn mid-run with unchecked
@@ -639,6 +640,16 @@ export class AgentLoop {
         : this.delegator.executeUtilityTasks(runId, run, toolCall);
     }
 
+    // Single-model sub-agents. Sub-agents are never advertised spawn_agents, but
+    // refuse it from them anyway so delegation depth stays hard-capped at 1.
+    // Which types a mode allows is enforced by the coordinator.
+    if (toolName === "spawn_agents") {
+      if (agentRole && agentRole !== "planner") {
+        return deny("Blocked: sub-agents cannot spawn further agents. Do the task yourself and report back.");
+      }
+      return this.delegator.executeSpawnAgents(runId, run, toolCall);
+    }
+
     const denial = this.gateWorkspaceCall(run, toolName, strategy, agentRole, state);
     if (denial) return denial;
 
@@ -686,6 +697,12 @@ export class AgentLoop {
     const isDelegated = !!(run.coderModel && run.coderProviderId);
     const hasUtilityTier = !!(run.utilityModel && run.utilityProviderId);
     const isArchitect = isDelegated && agentRole !== "coder" && agentRole !== "utility";
+
+    // An explore sub-agent is read-only regardless of mode; it is only advertised
+    // read-only tools, so this catches a model calling one it was not offered.
+    if (agentRole === "explorer" && !READONLY_TOOLS.has(toolName)) {
+      return deny(`Blocked: explore sub-agents are read-only and cannot run "${toolName}". Report what needs to change instead.`);
+    }
 
     // Architect exploration trap: with a utility tier available, the architect
     // gets only a small per-turn budget of direct read-only calls; after that,

@@ -1,5 +1,7 @@
 import type { Memory, Plan } from "@locagens/shared";
 import { WORKSPACE_TOOLS, READONLY_TOOLS, MODIFYING_TOOLS } from "../workspaceTools.js";
+import type { SubAgentType } from "../workspaceTools.js";
+import { MAX_SPAWNED_AGENTS } from "../workspaceTools.js";
 import type { DelegationContext, ToolDef } from "./types.js";
 
 /** Appends the active project workspace context, when available. */
@@ -122,6 +124,31 @@ ${delegation.utilityModel
 - Use delegate_tasks for substantial implementation.`;
   }
 
+  return block;
+}
+
+/**
+ * Single-model sub-agent instructions, rendered when spawn_agents is offered.
+ * Unlike the architect block, the main agent keeps every tool and decides on
+ * its own when splitting work off to fresh-context sub-agents pays for itself.
+ */
+export function subAgentsBlock(types: SubAgentType[]): string {
+  const canWrite = types.includes("general");
+  let block = `\n\nSUB-AGENTS (spawn_agents):
+- You can launch up to ${MAX_SPAWNED_AGENTS} sub-agents per spawn_agents call. Each runs your same model with a FRESH context: it sees only the instructions you write, does the work with its own tools, and returns a short report. Its file reads and intermediate steps never enter your context.
+- Decide on your own when to use them; the user will not ask. Prefer them when work is large, separable, or would flood your context:
+  - 'explore' (read-only): open-ended searches across the codebase, mapping how a subsystem works, reading/summarizing many or large files. Launch several in parallel for independent questions instead of reading everything yourself.`;
+  if (canWrite) {
+    block += `
+  - 'general' (full workspace tools): independent implementation chunks that write DISJOINT files, or a large self-contained job that would bloat your context.
+- SPLIT LARGE UNIFORM JOBS: when one job is big but uniform (translating a long subtitle/document file, converting or migrating many similar files, processing a large dataset), split it yourself and fan out in parallel. Example for a long .srt translation: check the file's line count, cut it into contiguous ranges on entry boundaries, give each 'general' agent one range ("read lines 1-400 of subs/en.srt with read_file offset/limit, translate to Turkish preserving numbering and timestamps exactly, write the result to subs/.parts/tr_01.srt"), then merge the parts in order (one more agent, or a single run_command) and remove the temporary parts.
+- Parallel 'general' agents must never write the same file. If tasks depend on each other, run them sequentially (parallel=false) or in separate calls.`;
+  }
+  block += `
+- Do it yourself instead when the task is small: a known file, a single targeted search, a quick edit, or anything where you need the exact contents to make the next decision. Do not spawn an agent for one or two tool calls.
+- Instructions must be self-contained and in ENGLISH: the goal, the exact files/line ranges, constraints, and what to report back. Never paste file contents into instructions — point to the path; the agent reads it.
+- Sub-agents cannot spawn agents, ask the user questions, or update your <task_list>; you own the plan and the final answer. Review their reports; read a changed file yourself only when a report is unclear or flags an issue.
+- Do not narrate spawning ("I'm launching agents now"); the app shows each sub-agent in its own window. Call the tool in the same turn and report findings in your visible text.`;
   return block;
 }
 

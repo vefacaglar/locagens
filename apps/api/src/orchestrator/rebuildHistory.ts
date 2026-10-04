@@ -1,18 +1,21 @@
 import type { ChatMessage, RunMessage } from "@locagens/shared";
 
+/** Roles whose messages live inside a delegation tool call, never the main thread. */
+const SUB_AGENT_ROLES = new Set(["coder", "utility", "explorer", "worker"]);
+
 /**
  * Reconstructs the provider-facing message list from persisted messages,
  * pairing each assistant tool_call with its results so the history is valid
  * for strict providers ("a tool result must immediately follow its call").
  *
- * Replays ONLY top-level (architect/main) messages: coder & utility sub-agent
- * messages are internal to a delegate_tasks/delegate_to_utility call — the
- * architect never saw them, only the summarized tool result — and including
- * them would interleave their messages between the architect's delegate
- * tool_call and its result.
+ * Replays ONLY top-level (architect/main) messages: coder/utility/explorer/worker
+ * sub-agent messages are internal to a delegate_tasks/delegate_to_utility/
+ * spawn_agents call — the main agent never saw them, only the summarized tool
+ * result — and including them would interleave their messages between the
+ * delegating tool_call and its result.
  */
 export function rebuildHistory(allMessages: RunMessage[], task: string): ChatMessage[] {
-  const messages = allMessages.filter(m => m.agentRole !== "coder" && m.agentRole !== "utility");
+  const messages = allMessages.filter(m => !SUB_AGENT_ROLES.has(m.agentRole ?? ""));
   const chatMessages: ChatMessage[] = [{ role: "user", content: task }];
 
   for (let i = 0; i < messages.length; i++) {

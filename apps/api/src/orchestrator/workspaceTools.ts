@@ -23,8 +23,11 @@ export {
   READONLY_TOOLS,
   MODIFYING_TOOLS,
   UTILITY_TOOL_NAMES,
-  UTILITY_TOOLS
+  UTILITY_TOOLS,
+  MAX_SPAWNED_AGENTS,
+  spawnAgentsTool
 } from "./workspace/toolSchemas.js";
+export type { SubAgentType } from "./workspace/toolSchemas.js";
 export {
   permissionKey,
   commandEscapesWorkspace,

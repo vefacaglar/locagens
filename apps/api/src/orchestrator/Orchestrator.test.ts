@@ -762,6 +762,7 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.ok(toolNames.includes("delete_file"), "architect should be advertised delete_file as a trap");
     assert.ok(toolNames.includes("write_file"), "architect should be advertised write_file as a trap");
     assert.ok(toolNames.includes("delegate_tasks"), "architect should have delegate_tasks");
+    assert.ok(!toolNames.includes("spawn_agents"), "preset runs delegate via delegate_tasks, not spawn_agents");
 
     // #1b: calling one is rejected with a redirect to delegate_tasks, not executed.
     const savedMsgs = messageRepo.listByRunId(runId);
@@ -1546,5 +1547,155 @@ test("Orchestrator Integration Tests", async (t) => {
     assert.strictEqual(logs[0].cacheWriteTokens, 100);
     assert.strictEqual(logs[0].cacheHitRate, 15);
     assert.strictEqual(logs[0].cost, 0.012);
+  });
+  await t.test("Orchestrator - single-model run spawns explore + general sub-agents on its own model", async () => {
+    const registry = new ProviderRegistry(testConfigPath);
+    const runRepo = new RunRepository(db);
+    const messageRepo = new MessageRepository(db);
+    const orchestrator = new Orchestrator(runRepo, messageRepo, registry, new PlanRepository(db), new MemoryRepository(db), new UsageLogRepository(db));
+
+    const runId = "run-test-spawn";
+    await runRepo.create({
+      id: runId,
+      title: "Test Spawn",
+      task: "Translate the subtitles",
+      status: "created",
+      providerId: "test-provider",
+      providerDisplayName: "Test Provider",
+      model: "model-1",
+      mode: "accept_edits",
+      projectPath: process.cwd(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    const requests: any[] = [];
+    const reply = (message: any) => ({ ok: true, json: async () => ({ choices: [{ message }] }) } as any);
+    globalThis.fetch = async (_url: any, options: any) => {
+      requests.push(JSON.parse(options.body));
+      switch (requests.length) {
+        case 1:
+          return reply({
+            role: "assistant",
+            content: "Splitting the work.",
+            tool_calls: [{
+              id: "call_spawn_1",
+              type: "function",
+              function: {
+                name: "spawn_agents",
+                arguments: JSON.stringify({
+                  parallel: false,
+                  agents: [
+                    { type: "explore", title: "Count lines", instructions: "Count the subtitle entries." },
+                    { type: "general", title: "Translate part 1", instructions: "Translate lines 1-400." }
+                  ]
+                })
+              }
+            }]
+          });
+        case 2:
+          // The explore agent tries to write — must be refused, not executed.
+          return reply({
+            role: "assistant",
+            content: "",
+            tool_calls: [{
+              id: "call_explorer_write",
+              type: "function",
+              function: { name: "write_file", arguments: JSON.stringify({ path: "spawn-trap.txt", content: "x" }) }
+            }]
+          });
+        case 3:
+          return reply({ role: "assistant", content: "There are 812 entries." });
+        case 4:
+          return reply({ role: "assistant", content: "FILES_CHANGED: []\nDID: translated part 1.\nISSUES: none" });
+        default:
+          return reply({ role: "assistant", content: "Translation finished." });
+      }
+    };
+
+    await orchestrator.run(runId);
+    assert.strictEqual(runRepo.getById(runId)?.status, "done");
+    assert.ok(!fs.existsSync(path.join(process.cwd(), "spawn-trap.txt")), "explore agent must not write files");
+
+    const toolNames = (body: any) => (body.tools || []).map((tool: any) => tool.function?.name);
+    // Main agent: keeps its full toolset and is offered both sub-agent types.
+    const spawnTool = requests[0].tools.find((tool: any) => tool.function?.name === "spawn_agents");
+    assert.ok(spawnTool, "single-model main agent should be offered spawn_agents");
+    assert.deepStrictEqual(spawnTool.function.parameters.properties.agents.items.properties.type.enum, ["explore", "general"]);
+    assert.ok(toolNames(requests[0]).includes("write_file"), "main agent keeps write tools");
+    assert.ok(requests[0].messages[0].content.includes("SUB-AGENTS (spawn_agents)"));
+    // Explore agent: read-only tools, explorer prompt, no further spawning.
+    assert.ok(requests[1].messages[0].content.includes("EXPLORE sub-agent"));
+    assert.ok(!toolNames(requests[1]).includes("write_file"));
+    assert.ok(!toolNames(requests[1]).includes("spawn_agents"));
+    // General agent: full workspace tools on the same model, no further spawning.
+    assert.strictEqual(requests[3].model, "model-1");
+    assert.ok(toolNames(requests[3]).includes("write_file"));
+    assert.ok(!toolNames(requests[3]).includes("spawn_agents"));
+
+    const savedMsgs = messageRepo.listByRunId(runId);
+    const explorerDenial = savedMsgs.find(m => m.agentRole === "explorer" && m.role === "tool");
+    assert.ok(explorerDenial && JSON.parse(explorerDenial.content).error.includes("read-only"));
+    assert.ok(savedMsgs.some(m => m.agentRole === "worker" && m.agentName === "Translate part 1"));
+
+    const spawnResult = JSON.parse(savedMsgs.find(m => m.role === "tool" && !m.agentRole)!.content);
+    assert.strictEqual(spawnResult.success, true);
+    assert.deepStrictEqual(spawnResult.results.map((r: any) => [r.type, r.title, r.summary]), [
+      ["explore", "Count lines", "There are 812 entries."],
+      ["general", "Translate part 1", "FILES_CHANGED: []\nDID: translated part 1.\nISSUES: none"]
+    ]);
+  });
+
+  await t.test("Orchestrator - plan mode offers explore sub-agents only", async () => {
+    const registry = new ProviderRegistry(testConfigPath);
+    const runRepo = new RunRepository(db);
+    const messageRepo = new MessageRepository(db);
+    const orchestrator = new Orchestrator(runRepo, messageRepo, registry, new PlanRepository(db), new MemoryRepository(db), new UsageLogRepository(db));
+
+    const runId = "run-test-spawn-plan";
+    await runRepo.create({
+      id: runId,
+      title: "Test Spawn Plan",
+      task: "Plan the refactor",
+      status: "created",
+      providerId: "test-provider",
+      providerDisplayName: "Test Provider",
+      model: "model-1",
+      mode: "plan",
+      projectPath: process.cwd(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    const requests: any[] = [];
+    globalThis.fetch = async (_url: any, options: any) => {
+      requests.push(JSON.parse(options.body));
+      const message = requests.length === 1
+        ? {
+            role: "assistant",
+            content: "",
+            tool_calls: [{
+              id: "call_spawn_plan",
+              type: "function",
+              function: {
+                name: "spawn_agents",
+                arguments: JSON.stringify({ agents: [{ type: "general", title: "Edit", instructions: "Change a file." }] })
+              }
+            }]
+          }
+        : { role: "assistant", content: "Planned." };
+      return { ok: true, json: async () => ({ choices: [{ message }] }) } as any;
+    };
+
+    await orchestrator.run(runId);
+
+    const spawnTool = requests[0].tools.find((tool: any) => tool.function?.name === "spawn_agents");
+    assert.deepStrictEqual(spawnTool.function.parameters.properties.agents.items.properties.type.enum, ["explore"]);
+    // A general agent requested anyway is refused without launching anything.
+    const savedMsgs = messageRepo.listByRunId(runId);
+    assert.ok(!savedMsgs.some(m => m.agentRole === "worker"));
+    const result = JSON.parse(savedMsgs.find(m => m.role === "tool")!.content);
+    assert.strictEqual(result.success, false);
+    assert.match(result.error, /not available in plan mode/);
   });
 });

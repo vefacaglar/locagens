@@ -12,6 +12,7 @@ export const buildStrategy: ModeStrategy = {
   lightweight: false,
   allowsMutation: true,
   allowsDelegation: true,
+  subAgentTypes: ["explore", "general"],
   allowsPlanTool: false,
   bypassDangerousGating: false,
   gatesEveryTool: false,

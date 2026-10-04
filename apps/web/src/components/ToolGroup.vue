@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import type { RunMessage } from '@locagens/shared';
-import { isToolSuccess } from '../lib/messageGroups';
+import { isToolSuccess, isWritingSubAgent, subAgentLabel } from '../lib/messageGroups';
 import { cleanMessageContent, renderMarkdown } from '../lib/markdown';
 import CopyButton from './ui/CopyButton.vue';
 
@@ -14,7 +14,7 @@ const props = defineProps<{
   model?: string;
 }>();
 
-const isCoder = computed(() => props.agentRole === 'coder');
+const isCoder = computed(() => isWritingSubAgent(props.agentRole));
 
 const emit = defineEmits<{
   (e: 'open-plan'): void;
@@ -656,7 +656,7 @@ function formatToolResult(name: string, contentJson: string): string {
   <div class="tool-group-wrap" :class="{ 'coder-tool-group': isCoder }">
     <!-- Coder sub-agent label -->
     <div v-if="isCoder" class="coder-tool-meta">
-      <span class="agent-badge coder-badge">Coder</span>
+      <span class="agent-badge coder-badge">{{ subAgentLabel(agentRole) }}</span>
       <span v-if="model" class="coder-tool-model">{{ model }}</span>
     </div>
 

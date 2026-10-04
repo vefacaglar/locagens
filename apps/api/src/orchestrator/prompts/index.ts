@@ -1,8 +1,10 @@
 import type { DelegationContext, ModeStrategy } from "./types.js";
+import type { SubAgentType } from "../workspaceTools.js";
 import {
   GLOBAL_RULES,
   initialGuidance,
   delegationBlock,
+  subAgentsBlock,
   projectContextSuffix,
   formatMemoryContext
 } from "./shared.js";
@@ -16,7 +18,7 @@ import { fullAccessStrategy } from "./fullAccess.js";
 export type { ModeStrategy, DelegationContext, PromptContext, ToolDef } from "./types.js";
 export { formatMemoryContext, formatActivePlan } from "./shared.js";
 export { formatSkillCatalog } from "../skills/index.js";
-export { buildCoderSystemPrompt, buildUtilitySystemPrompt, buildVerifierSystemPrompt, formatCoderMemoryContext } from "./subAgents.js";
+export { buildCoderSystemPrompt, buildUtilitySystemPrompt, buildVerifierSystemPrompt, buildExplorerSystemPrompt, formatCoderMemoryContext } from "./subAgents.js";
 
 const STRATEGIES: Record<string, ModeStrategy> = {
   [chatStrategy.mode]: chatStrategy,
@@ -45,6 +47,8 @@ export interface SystemPromptOptions {
   shouldReadProjectGuidance?: boolean;
   /** Set when a coder model is configured — renders the architect instructions. */
   delegation?: DelegationContext;
+  /** spawn_agents types offered to a single-model run — renders the sub-agent guidance. */
+  subAgentTypes?: SubAgentType[];
   /** Pre-rendered REMEMBERED CONTEXT section (formatMemoryContext). */
   memoryContext?: string;
   /** Pre-rendered APPROVED PLAN section (formatActivePlan). */
@@ -67,6 +71,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
     mode,
     shouldReadProjectGuidance = false,
     delegation,
+    subAgentTypes = [],
     memoryContext = "",
     planContext = "",
     skillCatalog = ""
@@ -84,6 +89,7 @@ export function buildSystemPrompt(options: SystemPromptOptions = {}): string {
   // Architect (dual-model) instructions: when a coder model is wired up, the
   // main model acts as an architect and delegates the heavy code-writing.
   if (delegation) prompt += delegationBlock(delegation);
+  else if (subAgentTypes.length > 0) prompt += subAgentsBlock(subAgentTypes);
   prompt += planContext;
   prompt += memoryContext;
   prompt += skillCatalog;

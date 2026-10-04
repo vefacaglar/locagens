@@ -12,6 +12,7 @@ export const chatStrategy: ModeStrategy = {
   lightweight: true,
   allowsMutation: false,
   allowsDelegation: false,
+  subAgentTypes: [],
   allowsPlanTool: false,
   bypassDangerousGating: false,
   gatesEveryTool: false,

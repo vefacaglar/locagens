@@ -356,6 +356,7 @@ fetch_url(url)
   update_plan(title, tasks, body?, start_new?)   plan mode only
   delegate_tasks(tasks, parallel?)               preset build modes only
   delegate_to_utility(tasks, parallel?)          preset build modes only
+  spawn_agents(agents, parallel?)                single-model runs (build: explore+general, plan: explore)
   ```
 
 Safety: every path resolves against the run's project directory and must stay
@@ -376,7 +377,7 @@ approve the whole web). Because it is the only async tool, the orchestrator
 executes tools through `executeWorkspaceToolAsync`.
 
 `set_chat_title`, `ask_user_question`, `remember`, `load_skill`, `update_plan`,
-`delegate_tasks`, and `delegate_to_utility` are orchestrator tools. They do not
+`delegate_tasks`, `delegate_to_utility`, and `spawn_agents` are orchestrator tools. They do not
 execute through the filesystem helper directly: title and plan update local
 run/plan state, `remember` writes a memory row, `load_skill` returns a SKILL.md
 body from allowlisted skill roots, `ask_user_question` pauses the run for user
@@ -560,6 +561,37 @@ coder window machinery (`foldCoderGroups` folds both `coder` and `utility` roles
 `CoderGroup.vue` badges the box "Utility" vs "Coder"). Run fields:
 `utility_provider_id` / `utility_model` columns; preset metadata carries an
 optional `utility` endpoint.
+
+### Single-Model Sub-Agents (`spawn_agents`)
+
+Runs WITHOUT a preset get Claude-Code-style sub-agents instead: the main agent
+keeps its full toolset and decides on its own when to fan work out to
+fresh-context sub-agents running the run's OWN provider/model/reasoning effort.
+
+```txt
+spawn_agents(agents[{ type: "explore" | "general", title, instructions }], parallel?)
+```
+
+- `explore` → `agentRole: "explorer"`, read-only tools (`read_file`/`list_directory`/
+  `search_files`), `buildExplorerSystemPrompt`. `AgentLoop.gateWorkspaceCall`
+  refuses any other tool for this role.
+- `general` → `agentRole: "worker"`, full `WORKSPACE_TOOLS`, the coder prompt
+  (`FILES_CHANGED`/`DID`/`ISSUES` report). Normal mode/permission gating applies.
+- Which types a mode allows comes from `ModeStrategy.subAgentTypes`: build-type
+  modes `["explore","general"]`, plan `["explore"]`, chat `[]`. The schema is built
+  per run by `spawnAgentsTool(types)` so the `type` enum only lists allowed types.
+- Capped at `MAX_SPAWNED_AGENTS` (5) per call; `parallel: true` runs them
+  concurrently (general agents only when they write disjoint files).
+- The tendency to delegate comes from `subAgentsBlock` in the system prompt
+  (when to use explore/general, when to just do it yourself, and the
+  split-large-uniform-jobs pattern — e.g. translating a long .srt in ranges into
+  part files, then merging).
+- Depth is capped at 1: sub-agents are never advertised `spawn_agents`, and
+  `AgentLoop` refuses it from any sub-agent role. `DelegationCoordinator.
+  executeSpawnAgents` also refuses preset runs (they use `delegate_tasks`).
+- `explorer`/`worker` messages are excluded from `rebuildHistory` like
+  coder/utility, and the web UI renders each in its own sub-agent window
+  (`messageGroups.ts` `subAgentLabel`: Explore / Agent).
 
 ---
 

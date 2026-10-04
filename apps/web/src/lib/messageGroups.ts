@@ -14,10 +14,37 @@ export interface MessageGroup {
   title?: string;
 }
 
+/**
+ * Sub-agent roles: coder/utility come from preset delegation, explorer/worker
+ * from single-model spawn_agents. All render as their own sub-agent window.
+ */
+export type SubAgentRole = 'coder' | 'utility' | 'explorer' | 'worker';
+
+const SUB_AGENT_LABELS: Record<SubAgentRole, string> = {
+  coder: 'Coder',
+  utility: 'Utility',
+  explorer: 'Explore',
+  worker: 'Agent'
+};
+
+export function isSubAgentRole(role: RunMessage['agentRole']): role is SubAgentRole {
+  return !!role && role in SUB_AGENT_LABELS;
+}
+
+/** Badge/label text for a sub-agent role (unknown roles fall back to Coder). */
+export function subAgentLabel(role: RunMessage['agentRole']): string {
+  return isSubAgentRole(role) ? SUB_AGENT_LABELS[role] : 'Coder';
+}
+
+/** Sub-agents that can write files get the coder-style accent. */
+export function isWritingSubAgent(role: RunMessage['agentRole']): boolean {
+  return role === 'coder' || role === 'worker';
+}
+
 export interface AgentSummary {
   id: string;
   title: string;
-  role: 'coder' | 'utility';
+  role: SubAgentRole;
   roleLabel: string;
   model: string;
   status: 'running' | 'done';
@@ -96,13 +123,14 @@ function collectAgentSummariesInternal(groups: MessageGroup[], isRunning: boolea
     .filter(({ group }) => group.type === 'coder_group' && group.children?.length)
     .map(({ group, index }) => {
       const children = group.children ?? [];
-      const role = children[0]?.message.agentRole === 'utility' ? 'utility' : 'coder';
+      const firstRole = children[0]?.message.agentRole;
+      const role: SubAgentRole = isSubAgentRole(firstRole) ? firstRole : 'coder';
       const model = children.find(c => c.message.model)?.message.model ?? '';
       return {
         id: group.id,
-        title: group.title || (role === 'utility' ? 'Utility task' : 'Coder task'),
+        title: group.title || `${subAgentLabel(role)} task`,
         role,
-        roleLabel: role === 'utility' ? 'Utility' : 'Coder',
+        roleLabel: subAgentLabel(role),
         model,
         status: isRunning && index > lastNonCoderIdx ? 'running' : 'done',
         tokenEstimate: children.reduce((sum, child) => sum + messageTokenEstimate(child.message), 0),
@@ -134,7 +162,7 @@ export function lastNonCoderIndex(groups: MessageGroup[]): number {
  * the architect's own messages sitting between them.
  */
 function isSubAgent(group: MessageGroup): boolean {
-  return group.message.agentRole === 'coder' || group.message.agentRole === 'utility';
+  return isSubAgentRole(group.message.agentRole);
 }
 
 // Group objects are memoized so that re-grouping (which happens on every
@@ -200,7 +228,7 @@ function foldCoderGroups(flat: MessageGroup[]): MessageGroup[] {
       }
 
       // Partition the block into one bucket per sub-agent, keyed by role+name so
-      // coder and utility sub-agents never merge, keeping each in order and
+      // sub-agents of different roles never merge, keeping each in order and
       // preserving first-appearance order.
       const buckets = new Map<string, MessageGroup[]>();
       for (const g of block) {
