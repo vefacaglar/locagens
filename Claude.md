@@ -315,8 +315,9 @@ pinned bar = the live, per-message checklist. They are independent.
 `run_command` and `fetch_url` always pause for approval unless a matching
 standing grant exists — except in **Full Access** (`bypassDangerousGating`), which
 asks for nothing, including `run_command` calls that declare `network_domains`
-(downloads). The OS sandbox still limits such a command to exactly the hosts it
-declared and refuses local/IP-literal hosts. In `ask_permissions` mode every tool call is gated the
+(downloads). Commands run on the host with secrets stripped from their
+environment; only with `LOCAGENS_STRICT_COMMAND_SANDBOX=1` do they run in the OS
+sandbox, confined to the workspace and their declared domains. In `ask_permissions` mode every tool call is gated the
 same way. The approval flow emits `permission_requested`, sets status
 `awaiting_permission`, and waits for a decision: `allow_once`, `allow_project`,
 `allow_always`, `allow_run`, or `deny`. `allow_project` / `allow_always` are

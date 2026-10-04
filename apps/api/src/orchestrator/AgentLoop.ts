@@ -706,10 +706,9 @@ export class AgentLoop {
       }
     }
     // Full Access skips every prompt, including commands that declare
-    // network_domains (downloads): the user opted in to autonomous work. The OS
-    // sandbox still confines such a command to exactly the domains it declared,
-    // and local/IP-literal hosts are always refused. Other modes always ask
-    // before granting a new domain set.
+    // network_domains (downloads): the user opted in to autonomous work. Other
+    // modes always ask before granting a new domain set. (With the strict OS
+    // sandbox enabled, a command still reaches only the domains it declared.)
     const mustGate = !strategy.bypassDangerousGating && (requestsCommandNetwork || isDangerous || strategy.gatesEveryTool);
     const needsPermission = mustGate && !this.permissions.check(run, toolCall);
 
