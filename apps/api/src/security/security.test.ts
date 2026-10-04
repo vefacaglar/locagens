@@ -6,7 +6,7 @@ import test from "node:test";
 import Fastify from "fastify";
 import { registerApiAuthentication } from "./apiAuth.js";
 import { registerOriginPolicy } from "./originPolicy.js";
-import { isPrivateAddress, safeFetchText, selectPublicAddress, validateAgentUrl } from "./SafeHttpClient.js";
+import { isPrivateAddress, pinnedLookup, safeFetchText, selectPublicAddress, validateAgentUrl } from "./SafeHttpClient.js";
 import { commandSandbox, normalizeCommandTimeout, normalizeNetworkDomains } from "./CommandSandbox.js";
 import { canonicalProjectPath, requireRegisteredProject } from "./projectPaths.js";
 import { resolveInsideForMutation, resolveInsideForRead } from "../orchestrator/workspace/pathGuards.js";
@@ -52,6 +52,16 @@ test("private and reserved IP ranges are rejected", async () => {
     { address: "93.184.216.34", family: 4 },
     { address: "127.0.0.1", family: 4 }
   ]), /resolves to a local/i);
+});
+
+test("pinned lookup answers both single-address and happy-eyeballs (all: true) lookups", () => {
+  const lookup = pinnedLookup({ address: "93.184.215.14", family: 4 });
+  const single: unknown[] = [];
+  lookup("example.com", {}, (...args) => single.push(...args));
+  assert.deepEqual(single, [null, "93.184.215.14", 4]);
+  const all: unknown[] = [];
+  lookup("example.com", { all: true }, (...args) => all.push(...args));
+  assert.deepEqual(all, [null, [{ address: "93.184.215.14", family: 4 }]]);
 });
 
 test("project paths must be canonical registered directories below home/root", () => {

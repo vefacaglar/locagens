@@ -116,6 +116,19 @@ function withinDeadline<T>(operation: Promise<T>, timeoutMs: number, signal?: Ab
   });
 }
 
+/**
+ * A socket lookup that always answers with the pre-validated address, so the
+ * connection cannot be re-resolved to a different (private) host. Node's default
+ * autoSelectFamily (happy eyeballs) calls lookup with { all: true } and then
+ * expects an address list, not a single address.
+ */
+export function pinnedLookup(resolved: { address: string; family: number }) {
+  return (_hostname: string, options: { all?: boolean } | undefined, callback: (...args: any[]) => void): void => {
+    if (options?.all) callback(null, [{ address: resolved.address, family: resolved.family }]);
+    else callback(null, resolved.address, resolved.family);
+  };
+}
+
 async function requestOnce(url: URL, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
@@ -129,9 +142,7 @@ async function requestOnce(url: URL, timeoutMs: number, signal?: AbortSignal): P
       const request = transport.request(url, {
         method: "GET",
         headers: { "user-agent": "Locagens/1.0 (+local workspace assistant)", accept: "text/*,application/json" },
-        lookup(_hostname, _options, callback) {
-          callback(null, resolved.address, resolved.family);
-        },
+        lookup: pinnedLookup(resolved),
         signal: controller.signal,
         timeout: timeoutMs
       }, response => {
