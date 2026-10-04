@@ -25,6 +25,28 @@ describe('desktop API transport', () => {
     expect((globalThis as any).__LOCAGENS_API_TOKEN__).toBeUndefined();
   });
 
+  it('sends reactive request bodies over IPC as structured-clonable plain data', async () => {
+    const apiRequest = vi.fn(async (input: unknown) => {
+      structuredClone(input); // what Electron IPC does; throws DataCloneError on a Proxy
+      return { status: 200, contentType: 'application/json', body: '{}' };
+    });
+    (globalThis as any).__LOCAGENS_DESKTOP__ = {
+      apiRequest,
+      subscribeRunEvents: vi.fn(),
+      unsubscribeRunEvents: vi.fn(),
+      onRunEvent: vi.fn(() => () => undefined)
+    };
+    const { reactive } = await import('vue');
+    const { api } = await import('./client');
+    const configs = reactive({ openai: { displayName: 'OpenAI', models: ['gpt-x'] } });
+    await expect(api.saveProvidersConfig(configs)).resolves.toBeUndefined();
+    expect(apiRequest).toHaveBeenCalledWith({
+      path: '/api/providers/config',
+      method: 'POST',
+      body: { openai: { displayName: 'OpenAI', models: ['gpt-x'] } }
+    });
+  });
+
   it('delivers desktop-brokered SSE data and unsubscribes cleanly', async () => {
     let listener: ((event: any) => void) | undefined;
     const unsubscribeRunEvents = vi.fn(async () => undefined);

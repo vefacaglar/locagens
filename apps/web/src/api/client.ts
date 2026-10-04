@@ -133,7 +133,9 @@ async function request(path: string, init: RequestInitJson = {}): Promise<Respon
   const { method = 'GET', body, errorFallback = 'Request failed.' } = init;
   const desktop = desktopBridge();
   const response = desktop?.apiRequest
-      ? await desktop.apiRequest({ path, method, ...(body !== undefined ? { body } : {}) })
+      // IPC uses structured clone, which rejects Vue reactive proxies; a JSON
+      // round-trip yields the same plain payload the fetch path sends.
+      ? await desktop.apiRequest({ path, method, ...(body !== undefined ? { body: JSON.parse(JSON.stringify(body)) } : {}) })
       .then(result => new Response(result.body, {
         status: result.status,
         headers: result.contentType ? { 'content-type': result.contentType } : undefined
