@@ -26,6 +26,8 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # API tests import runtime values from @locagens/shared (resolved via dist/).
+      - run: pnpm --filter @locagens/shared build
       - run: pnpm --filter @locagens/api test
       - run: pnpm --filter @locagens/db-writer test
       - run: pnpm --filter @locagens/web test

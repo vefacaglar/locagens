@@ -11,7 +11,7 @@ function makeCtx(userRoot: string, projectRepo?: { get: (p: string) => unknown; 
   return {
     pluginRegistry: new PluginRegistry(userRoot),
     mcpManager: {
-      saveConfig: () => {}
+      getConfigStore: () => ({ saveConfig: () => {} })
     },
     projectRepo: projectRepo ?? {
       get: () => null,
