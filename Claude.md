@@ -4,30 +4,15 @@
 
 Locagens is a local-first AI orchestration tool. The user picks one provider
 and model, gives it a task, and the assistant works inside a selected project
-folder on the local machine.
-
-The default implementation is a **single-model workspace assistant** with
-filesystem tools and explicit permission modes. A run can also use an optional
-agent preset: the selected main model acts as an architect, delegates
-implementation to coder sub-agents, and may delegate tiny mechanical tasks to a
-utility model.
+folder. Runs are single-model by default. An optional agent preset turns the
+main model into an architect that delegates to coder/utility sub-agents; runs
+without a preset can fan work out via `spawn_agents` (explore/general).
 
 ```txt
-User Task
-  -> Orchestrator creates a run
-  -> Main model generates a response (optionally calling workspace tools)
-  -> Tool calls are gated by the active mode / permissions
-  -> If a preset is active, architect can delegate to coder / utility sub-agents
-  -> Tool results are fed back to the model
-  -> Loop until the main model returns a final answer with no tool calls
-  -> Run is marked done; messages are streamed live and saved
+User Task -> Orchestrator creates a run -> main model responds (with tools)
+-> tool calls gated by mode/permissions -> results fed back -> loop until
+no tool calls -> run done; messages stream live and persist.
 ```
-
-The current code supports the architect → coder preset path. It does not support
-an additional reviewer loop or a separate planner/coder/reviewer acceptance
-protocol.
-
----
 
 ## Tech Stack
 
@@ -36,712 +21,233 @@ Frontend: Vue 3 + Vite + TypeScript (Composition API, <script setup>)
 Backend:  Node.js + TypeScript + Fastify
 Database: SQLite via the built-in node:sqlite module
 Realtime: SSE (Server-Sent Events)
-Package manager: pnpm (workspaces)
-Repository style: monorepo
+Packages: pnpm workspaces, monorepo
 ```
 
 ## Project Map
 
-For quick navigation and to minimize token usage, consult these reference documents before making changes:
+Consult these before reading source:
 
-- **`apps/api/src/routes/API_ENDPOINT_MAP.md`** — Complete HTTP API reference (30 endpoints with route handlers and repository calls)
-- **`docs/database-schema.md`** — Full SQLite schema (7 tables, all columns, indexes, migrations, relationships)
-
-These maps show file locations, dependencies, and data flow without requiring you to read the source code.
-
----
-
----
+- **`apps/api/src/routes/API_ENDPOINT_MAP.md`** — HTTP API reference (endpoints, handlers, repository calls)
+- **`docs/database-schema.md`** — SQLite schema (tables, columns, indexes, migrations)
 
 ## Repository Structure
 
 ```txt
 apps/
-  api/                         Fastify backend
+  api/                    Fastify backend
     src/
-      server.ts                Bootstrap only: Fastify + CORS + listen
-      context.ts               Shared dependencies (registry, repos, orchestrator)
-      routes/
-        index.ts               Registers all route groups + /ping
-        providers.ts           Provider metadata/config/test/model-fetch routes
-        projects.ts            CRUD + macOS folder picker
-        runs.ts                Create/continue/cancel/permission/list/SSE
-        permissions.ts         List/revoke standing tool permissions
-      orchestrator/
-        Orchestrator.ts        Run lifecycle + shared generation loop (drive)
-        workspaceTools.ts      Tool schemas + executeWorkspaceTool (fs access)
-        systemPrompt.ts        buildSystemPrompt (mode-aware)
-        eventBus.ts            EventEmitter used for SSE fan-out
-      providers/
-        ModelProvider.ts       complete() interface
-        OpenAICompatibleProvider.ts
-        AnthropicProvider.ts
-        ProviderFactory.ts     type -> adapter
-        ProviderRegistry.ts    loads OS app-support providers.json, presets
-      database/
-        db.ts                  Connection + schema + migrations + startup cleanup
-        repositories.ts        Barrel: re-exports every repository + interface
-        repositories/          One file per repository (DI: db injected via ctor)
-          interfaces.ts        I*Repository contracts + *Input types
-          RunRepository.ts     Run rows
-          MessageRepository.ts Message rows
-          PlanRepository.ts    Plan rows
-          ProjectRepository.ts Project rows
-          PermissionRepository.ts  Standing permission grants
-          MemoryRepository.ts  Global/project memory rows
-          UsageLogRepository.ts    Token/cost usage logs (paginated)
-
-  web/                         Vue frontend
+      server.ts           Bootstrap: Fastify + CORS + listen
+      context.ts          Shared dependencies (registry, repos, orchestrator)
+      routes/             providers, projects, runs, permissions, memory,
+                          plugins, processes, skills, symbols, security, settings
+      orchestrator/       Orchestrator.ts (run lifecycle + drive loop),
+                          AgentLoop.ts, DelegationCoordinator.ts,
+                          PermissionCoordinator.ts, QuestionCoordinator.ts,
+                          RunMessageStream.ts, UserMessageInbox.ts,
+                          rebuildHistory.ts, contextWindow.ts, pricing.ts,
+                          workspaceTools.ts + workspace/ (tool exec, pathGuards,
+                          networkTools, permissionPreview), prompts/ (system +
+                          sub-agent prompts), processes/, plugins/, mcp/, skills/
+      providers/          ModelProvider, OpenAICompatibleProvider,
+                          AnthropicProvider, ProviderFactory, ProviderRegistry,
+                          ProviderSecretStore, reasoningWire
+      security/           CommandSandbox
+      database/           db.ts (schema+migrations), repositories/ (one per table)
+  web/                    Vue frontend
     src/
-      App.vue                  Thin shell: wires useAppShell to components
-      main.ts
-      api/client.ts            Typed fetch wrappers for every endpoint
-      composables/
-        useAppShell.ts         Composes the other composables + lifecycle
-        useChatSession.ts      Runs/messages/SSE/send/continue/cancel/permission
-        useProjects.ts         Project list + active project + add/remove flow
-        usePermissions.ts      Standing-permissions list + settings modal
-        useComposerSettings.ts Mode / model / preset settings (localStorage)
-        useChatAutoScroll.ts   Scroll-to-bottom watchers
-      lib/                     Pure helpers (no state)
-        markdown.ts            Marked setup + renderMarkdown + cleanMessageContent
-        format.ts              Time/status/json formatting, splitCombined, constants
-        messageGroups.ts       Groups flat messages into renderable blocks
-        confirmation.ts        Yes/no detection + permission path helpers
-      components/
-        AppSidebar.vue         Projects accordion + chat history
-        MessageThread.vue      Message list (user / assistant / tool groups)
-        ToolGroup.vue          Collapsible tool-call/response block
-        CoderGroup.vue         Collapsible coder/utility sub-agent windows
-        ChatComposer.vue       Input + mode menu + model menu + cards
-        ConfirmationCard.vue   Inline yes/no quick reply
-        PermissionCard.vue     Inline tool permission request (diff + options)
-        AddProjectModal.vue
-        PlanPanel.vue          Right-hand stable plan panel
-        settings/              Provider, permission, and agent preset settings
-
+      App.vue             Thin shell -> useAppShell
+      api/client.ts       Typed fetch wrappers
+      composables/        useAppShell, useChatSession, useProjects,
+                          usePermissions, useComposerSettings, ...
+      lib/                markdown, format, messageGroups, confirmation
+      components/         MessageThread, ToolGroup, CoderGroup, ChatComposer,
+                          PermissionCard, ConfirmationCard, PlanPanel,
+                          AppSidebar, settings/
+  desktop/                Electron shell + electron-builder
+  db-writer/              SQLite write worker
 packages/
-  shared/src/index.ts          Shared TS contracts (Run, RunMessage, events, ...)
-
-OS app-support/providers.json  Live provider/model/pricing config (NOT in the project; NO secrets)
-locagens.db                    Local SQLite file (git-ignored)
+  shared/src/index.ts     Shared TS contracts (Run, RunMessage, RunEvent, ...)
+docs/                     database-schema.md, RELEASING.md
 ```
-
----
 
 ## Core Principles
 
-Keep the architecture simple. No heavy agent frameworks.
-
-Prefer readable code over clever abstractions. Keep functions small and
-purpose-driven. Avoid premature abstraction.
-
-Backend layering: `routes` (HTTP) -> `orchestrator` / `repositories` /
-`registry` (logic) -> `database` / `providers` (I/O). Routes never contain
-provider-specific or SQL-heavy logic directly.
-
-Frontend layering: `App.vue` (view) -> `useAppShell` (coordination) ->
-domain composables -> `api/` + `lib/` (pure infrastructure). Components are
-presentational and communicate via props/emits.
-
----
-
-## Provider Configuration
-
-Provider settings live in the **OS application-support directory**, never in the
-project:
+Keep the architecture simple. No heavy agent frameworks. Readable code over
+clever abstractions. Small, purpose-driven functions. No premature abstraction.
 
 ```txt
-macOS    ~/Library/Application Support/Locagens/providers.json
-Windows  %APPDATA%\Locagens\providers.json
-Linux    ~/.config/locagens/providers.json
+Backend:  routes (HTTP) -> orchestrator/repositories/registry (logic)
+          -> database/providers (I/O). Routes hold no provider/SQL logic.
+Frontend: App.vue -> useAppShell -> domain composables -> api/ + lib/.
+          Components are presentational (props/emits).
+Contracts: shared types from packages/shared across all boundaries.
+Naming:   specific (ProviderRegistry, RunRepository, buildSystemPrompt);
+          never helper/manager/processor/data.
 ```
 
-`LOCAGENS_PROVIDER_CONFIG_PATH` can override this path (used by tests). API keys
-are **never written to the JSON**: on macOS the key is stored in the Keychain and
-the file keeps only a non-secret `apiKeyRef` pointer (`macos-keychain:<id>`),
-which is deterministic from the provider id and therefore portable across
-machines (each machine holds its own Keychain entry). Where secure storage is
-unavailable (e.g. Windows — handled later) the key is simply not persisted.
+## Providers
 
-On first run, if the OS file is missing, `ProviderRegistry` seeds it from
-`LOCAGENS_PROVIDER_SEED_PATH` if set, and flattens any leftover
-`providers.user.json` overlay into that single file. There is no in-repo seed
-catalog: a fresh dev checkout or a freshly packaged build starts with an empty
-provider list until providers are added via Settings. After seeding, all reads
-and writes go to the OS file. `LOCAGENS_PROVIDER_USER_CONFIG_PATH` still
-enables a two-layer overlay (tests only).
+- Config lives in OS app-support `providers.json` (override:
+  `LOCAGENS_PROVIDER_CONFIG_PATH`; first-run seed:
+  `LOCAGENS_PROVIDER_SEED_PATH`). Never in the project.
+- API keys never touch JSON or the database: macOS Keychain behind a non-secret
+  `apiKeyRef`. Never log or expose secrets. Public metadata endpoints return
+  only safe fields; the settings API never returns raw keys (preserve marker).
+- `agentPresets`: architect + coder model, `maxSubAgents`, optional utility
+  model. `modelSettings[model]`: `reasoning`, `contextLimit`, `pricing` tiers
+  (USD per 1M tokens). No built-in pricing table — unpriced models cost 0; cost
+  is computed locally into `usage_logs`.
+- Adapters implement `ModelProvider.complete(request)`. The orchestrator only
+  sees the common `ToolCall` shape; `OpenAICompatibleProvider` and
+  `AnthropicProvider` map to/from their wire formats. `reasoningWire.ts`
+  converts the UI effort level to each model's reasoning parameter.
 
-Public provider metadata must never include secrets.
+## Orchestrator
 
-`GET /api/providers` returns only safe metadata:
+`Orchestrator.ts` owns one run driver. `run()` starts fresh, `continueRun()`
+replays history; both share `drive()`, which uses `runAgentLoop()` for the main
+model AND every sub-agent — tool execution stays shared, never duplicated.
 
 ```txt
-id, displayName, type, models
+load run -> build mode-aware prompt (systemPrompt.ts)
+-> pick tools from mode + preset -> call model
+-> gate each tool call, execute, feed results back
+-> finish when no tool calls, on cancel, or on error
 ```
 
-Never expose `apiKey`, authorization headers, or raw secrets through public
-provider metadata.
+Cancellation is cooperative (`checkCancelled`) and resolves any pending
+permission/question so the loop unwinds.
 
-The local settings API returns editable config, but `GET /api/providers/config`
-must not return raw API keys. It uses a preserve marker so the frontend can edit
-other provider fields without receiving or re-posting the existing secret.
+Modes shape the prompt and tool gating (`chat`, `plan`, `accept_edits`,
+`ask_permissions`, `auto`). The web UI offers Build (`accept_edits`), Plan, and
+Full Access (`auto`, `bypassDangerousGating` — nothing is prompted). In plan
+mode, `update_plan` is a stable document (right panel); live progress is the
+per-message `<task_list>`.
 
-The provider file may also define an `agentPresets` block: named pairings
-with an **architect** model, a **coder** model, `maxSubAgents`, and optionally a
-**utility** model. `GET /api/agent-presets` returns this as safe metadata (only
-provider ids + model names, already public). `PUT /api/agent-presets` saves the
-full set back via `ProviderRegistry.saveAgentPresets`. See "Agent Presets" below.
+## Tools
 
-Each provider's `modelSettings[model]` block (edited per model row in the
-Providers settings tab) may carry, besides `reasoning`, an optional
-`contextLimit` (max context window in tokens) and `pricing`. `pricing` is a list
-of `tiers` — `{ upToInputTokens?, inputRate, outputRate, cacheReadRate?,
-cacheWriteRate? }` (USD per 1M tokens). Flat-priced models use one tier; tiered
-models (e.g. a cheaper rate ≤250k prompt tokens, pricier above) list several and
-the tier is chosen by the request's total prompt token count.
-`ProviderRegistry.resolvePricing` feeds this to `calculateCost` (pricing.ts).
-There is **no built-in pricing table and no name-based guessing**: a model with no
-configured pricing simply costs 0. Cost is computed locally from these rates and
-token usage (providers return token counts, never a dollar amount); it is stored
-per call in `usage_logs` at run time and not recomputed for past rows.
-
----
-
-## Provider Adapter Rules
-
-Use the adapter pattern. The orchestrator must not know provider-specific
-request formats — it only calls `complete(request)`.
-
-```ts
-export interface ModelProvider {
-  complete(request: CompletionRequest): Promise<CompletionResponse>;
-}
-```
-
-Adapters:
+Defined in `workspaceTools.ts`. All paths must resolve inside the run's project
+workspace; failures return `{ success: false, error }` to the model.
 
 ```txt
-OpenAICompatibleProvider   /chat/completions, OpenAI tools/tool_calls shape
-AnthropicProvider          /v1/messages, tool_use/tool_result blocks
+write_file  edit_file  delete_file  read_file  list_directory
+create_directory  move_file  search_files
+run_command(command)   fetch_url(url)          dangerous: permission-gated
+set_chat_title  ask_user_question  remember  load_skill   orchestrator tools
+update_plan                                  plan mode only
+delegate_tasks / delegate_to_utility         preset build modes only
+spawn_agents                                 single-model runs
 ```
 
-OpenAI-compatible providers (OpenAI, OpenCode, CommandCode, etc.) share
-`OpenAICompatibleProvider`. Anthropic uses its own adapter because the
-Messages API differs.
+- `run_command` (workspace cwd, 120s, env secrets stripped) and `fetch_url`
+  (GET, 30s, truncated) always pause for approval unless a standing grant
+  matches; `fetch_url` grants are per-host. OS command sandbox only with
+  `LOCAGENS_STRICT_COMMAND_SANDBOX=1`.
+- Silent tools (no I/O, no prompt): `set_chat_title`, `update_plan`, `remember`.
+  `ask_user_question` pauses the run (`awaiting_input`). `load_skill` returns a
+  `SKILL.md` body from user/project skill roots (sub-agents get no skills).
+- Delegation tools start nested `runAgentLoop()` calls in the same run (messages
+  tagged `agentRole` + `agentName`, rendered as sub-agent windows). Depth is
+  capped at 1: sub-agents never receive delegation tools. In preset runs,
+  architect mutation calls are trapped and redirected to `delegate_tasks`.
 
-Both adapters support workspace tools. The orchestrator always passes the
-OpenAI-shaped `WORKSPACE_TOOLS`; each adapter maps to/from its own wire format
-so the orchestrator only ever sees the common `ToolCall` shape. The Anthropic
-adapter converts tool definitions to `input_schema`, assistant tool calls to
-`tool_use` blocks, and tool results to `tool_result` blocks on a user turn.
-
-**Reasoning conversion:** the UI only ever offers plain effort levels
-(low/medium/high…). Each model names/shapes its reasoning control differently, so
-`OpenAICompatibleProvider` converts the chosen effort into that model's official
-parameter via `reasoningWire.ts` (`openAiReasoningParams`) — e.g.
-`thinking_config:{mode:"on"}` (qwen-max), `thinking_preference:"enabled"`
-(deepseek-v4), `reasoning_mode:"high_effort"` (kimi-k2.6),
-`thinking_control:{enable:true}` (minimax-m3), `thinking_effort` (glm-5.1),
-`reasoning_scope` (mimo-v2.5-pro). Unlisted models fall back to plain
-`reasoning_effort`. Anthropic-typed endpoints keep `thinking:{budget_tokens}`.
-
----
-
-## Orchestrator Rules
-
-The orchestrator (`Orchestrator.ts`) owns one run driver and a shared
-provider-facing generation loop.
-
-It should:
+## Permission Flow
 
 ```txt
-load the run
-build a mode-aware system prompt (systemPrompt.ts)
-choose tools from mode + preset configuration
-call the model with those tools available
-if the model returns tool calls:
-  gate each call by mode/permissions, execute it, feed the result back
-otherwise:
-  save the final assistant message and finish
-stream every state change and message over SSE
+gated tool call -> status awaiting_permission + permission_requested
+(with PermissionPreview: action, path, old/new content)
+-> allow_once | allow_project | allow_always | allow_run | deny
+-> standing grants persisted in the permissions table (revocable in Settings)
 ```
 
-`run()` starts a fresh run; `continueRun()` replays persisted history and
-continues the same thread. Both share one private `drive()` method, which uses
-`runAgentLoop()` for the main model and for delegated coder/utility sub-agents.
-Do not re-introduce duplicated tool-execution code across those paths.
-
-The run terminates when the main model responds with no tool calls, on
-cancellation, or on error. Cancellation is cooperative (`checkCancelled`) and
-also resolves any pending permission request so the loop can unwind.
-
----
-
-## Operational Modes
-
-The run's `mode` shapes the system prompt and tool gating:
-
-```txt
-chat             Lightweight conversation; no proactive workspace work.
-plan             Discuss/plan only; do not write files.
-accept_edits     May call tools; edits applied directly.
-ask_permissions  Each tool call requires explicit user approval first.
-auto             Autonomous build mode; still gates dangerous tools.
-```
-
-The web UI exposes three modes: **Build** (the `accept_edits` backend mode —
-applies edits directly), **Plan**, and **Full Access** (autonomous). `chat`,
-`ask_permissions` / `auto` remain valid backend modes (e.g. for older persisted
-runs and the permission flow) but are no longer offered in the mode picker.
-
-The picker defaults to whichever mode the user last SENT a message with
-(persisted as `bm_last_used_current_mode` in `handleSendTask`); on a fresh start
-with no prior message it defaults to **Build**.
-
-**Chat** is a retired UI mode (kept as a backend mode for old runs): a
-lightweight conversational mode where `buildSystemPrompt` returns a short prompt
-with no tool catalog or planning scaffolding, and the model is told not to
-proactively scan/read/modify the workspace. Build/Plan keep the full prompt.
-
-In **plan mode** the model records a structured, chat-specific plan via the
-`update_plan` tool (see Workspace Tools / Plan Panel below). That plan is a
-*stable document* shown in the right-hand panel — it is created once and only
-changes on an explicit revision request. Live progress is tracked separately by
-the text `<task_list>` block the model re-emits in each message (all modes),
-which the web UI pins above the composer. So the panel = the fixed plan; the
-pinned bar = the live, per-message checklist. They are independent.
-
-`run_command` and `fetch_url` always pause for approval unless a matching
-standing grant exists — except in **Full Access** (`bypassDangerousGating`), which
-asks for nothing, including `run_command` calls that declare `network_domains`
-(downloads). Commands run on the host with secrets stripped from their
-environment; only with `LOCAGENS_STRICT_COMMAND_SANDBOX=1` do they run in the OS
-sandbox, confined to the workspace and their declared domains. In `ask_permissions` mode every tool call is gated the
-same way. The approval flow emits `permission_requested`, sets status
-`awaiting_permission`, and waits for a decision: `allow_once`, `allow_project`,
-`allow_always`, `allow_run`, or `deny`. `allow_project` / `allow_always` are
-persisted in the `permissions` table. `allow_run` is the user's mid-run escape
-from prompt fatigue: it approves the current call AND silences every later prompt
-for the rest of that run. It is run-scoped and in-memory (a `bypassRuns` set in
-`PermissionCoordinator`, cleared when the run finishes) — not persisted.
-
-The `permission_requested` event carries a `PermissionPreview` (built by
-`buildPermissionPreview`): the tool, action
-(create/edit/delete/read/list/mkdir/move/search/command/fetch), path, and any
-available old/new content so the UI can render a preview before the tool runs.
-
-Standing `allow_project` / `allow_always` grants are silent until revoked.
-The Settings modal (sidebar → Settings) lists them and can revoke individual
-rules or clear all, via `GET /api/permissions` and
-`DELETE /api/permissions[/:id]`.
-
----
-
-## Workspace Tools
-
-Tools are defined and executed in `workspaceTools.ts`:
-
-```txt
-write_file(path, content)
-edit_file(path, old_string, new_string, replace_all?)
-delete_file(path)
-read_file(path, offset?, limit?)   large files paged in windows of ≤2000 lines
-list_directory(path)
-create_directory(path)
-move_file(source_path, destination_path)
-search_files(query, path?)
-run_command(command)
-fetch_url(url)
-  set_chat_title(title)
-  ask_user_question(questions)                    main agent, every mode
-  remember(scope, category, content, update_id?)  main agent, every mode
-  load_skill(name)                                main agent, every mode
-  update_plan(title, tasks, body?, start_new?)   plan mode only
-  delegate_tasks(tasks, parallel?)               preset build modes only
-  delegate_to_utility(tasks, parallel?)          preset build modes only
-  spawn_agents(agents, parallel?)                single-model runs (build: explore+general, plan: explore)
-  ```
-
-Safety: every path resolves against the run's project directory and must stay
-inside it. Access outside the workspace is denied. Tool failures are returned
-to the model as JSON `{ success: false, error }` rather than thrown.
-
-`run_command` runs a shell command with the workspace as the working directory
-(timeout 120s, output truncated). It is listed in `DANGEROUS_TOOLS` and is
-therefore **always** routed through the permission flow before it executes,
-regardless of the run's mode — the model can build/compile/test, but only after
-the user approves. Standing `allow_project` / `allow_always` grants still apply.
-
-`fetch_url` performs network I/O: it GETs an http(s) URL (timeout 30s, output
-truncated) and returns the response body so the model can read online docs or
-an API response. It is also in `DANGEROUS_TOOLS`, so it **always** asks before
-running. Its standing grants are scoped per host (approving one site does not
-approve the whole web). Because it is the only async tool, the orchestrator
-executes tools through `executeWorkspaceToolAsync`.
-
-`set_chat_title`, `ask_user_question`, `remember`, `load_skill`, `update_plan`,
-`delegate_tasks`, `delegate_to_utility`, and `spawn_agents` are orchestrator tools. They do not
-execute through the filesystem helper directly: title and plan update local
-run/plan state, `remember` writes a memory row, `load_skill` returns a SKILL.md
-body from allowlisted skill roots, `ask_user_question` pauses the run for user
-input, and delegation starts nested `runAgentLoop()` calls in the same run.
-
-### Skills (`load_skill`)
-
-Skills are Agent-Skills-compatible folders with a `SKILL.md` (YAML frontmatter
-`name` + `description`, then markdown body). Discovered from:
-
-```txt
-user:    ~/Library/Application Support/Locagens/skills/<name>/SKILL.md   (macOS)
-         ~/.config/locagens/skills/… or %APPDATA%/Locagens/skills/…
-project: <workspace>/.locagens/skills/<name>/SKILL.md
-```
-
-On each drive(), the main agent gets an AVAILABLE SKILLS catalog (name +
-description only). Matching work should call `load_skill(name)` to pull the full
-body. Project skills override user skills with the same name. Managed in
-**Settings → Skills** (list + Open folder; add skills by dropping SKILL.md on
-disk). Sub-agents do not receive skills. Override user root with
-`LOCAGENS_SKILLS_PATH`.
-
-Do not add git integration or further network tools without an explicit request.
-
-### Ask the User (`ask_user_question`)
-
-The main agent gets an `ask_user_question(questions)` tool in every mode (coder/
-utility sub-agents do not). It lets the model ask 1–4 multiple-choice questions
-(`{ question, header, multiSelect, options[{ label, description? }] }`) when it is
-blocked on a decision only the user can make. Like the permission flow it performs
-no filesystem/network I/O: `Orchestrator.executeAskQuestion` validates/normalizes
-the questions, then `requestUserAnswer` flips the run to status `awaiting_input`,
-emits a `question_requested` SSE event, and waits. The web client
-(`useChatSession.pendingQuestionRequest`, `QuestionCard.vue` above the composer)
-renders the questions; submitting posts the chosen labels to
-`POST /api/runs/:id/answer` (`{ selections: string[][] }`, aligned to the questions
-order), which calls `Orchestrator.resolveQuestion`. The selections are fed back to
-the model as the tool result (`{ success, answers[{ question, header, selected }] }`)
-and the run resumes (`generating`). Cancellation resolves a pending question with
-no selections so the loop unwinds.
-
-### Memory (`remember`)
-
-The agent has a persistent, two-tier memory so it learns the user and the project
-over time. The main agent gets a `remember(scope, category, content, update_id?)`
-tool in every mode (sub-agents do not). It records DURABLE facts only — user
-preferences, recurring feedback about how to work, stable project facts, or
-external references — never transient task detail or secrets.
-
-- `scope` is `"global"` (applies to every project) or `"project"` (this codebase
-  only; the orchestrator scopes it to the run's `projectPath`).
-- `category` is `user` / `feedback` / `project` / `reference`.
-- `update_id` revises an existing memory in place instead of duplicating it.
-
-Like `set_chat_title`/`update_plan` it performs no filesystem/network I/O and runs
-**silently** (no permission prompt, no SSE): `Orchestrator.executeRemember`
-validates the args and writes via `MemoryRepository` (the `memory` table). On every
-run start, `drive()` loads the relevant memories (`MemoryRepository.listForContext`
-= all global + this project's) and `formatMemoryContext` injects them into the
-system prompt under a "REMEMBERED CONTEXT" section, so the model honors them from
-the first turn. There is no live SSE event — the user simply sees current memories
-when they open Settings.
-
-Memories are managed by the user in **Settings → Memory** (`MemoryTab.vue`,
-`useMemories`), backed by `GET/POST/PUT/DELETE /api/memories` (`routes/memory.ts`).
-The list is fetched when the settings screen opens (`useAppShell.openSettings`
-loads permissions + memories together). The user can add, edit, delete, or clear
-memories; global and project memories are shown in separate groups.
-
-### Session Title (`set_chat_title`)
-
-New runs are created titled `"New session…"` (see `routes/runs.ts`). The main
-agent is given a `set_chat_title(title)` tool in every mode (coder sub-agents are
-not); the system prompt asks it to call this once, early, with a short title in
-the user's language. Like `update_plan` it performs no filesystem/network I/O, so
-it runs silently (no permission prompt): `Orchestrator.executeSetTitle` updates
-the run via `RunRepository.update` and emits a `run_title_changed` SSE event,
-which the web client applies to the active run and the sidebar list live.
-
-### Plan Panel (`update_plan`)
-
-In plan mode the orchestrator additionally advertises an `update_plan` tool:
-
-```txt
-update_plan(title, tasks[{ text, status }], body?, start_new?)
-```
-
-It performs no filesystem/network I/O, so it runs silently (no permission
-prompt). The orchestrator persists the plan to the `plans` table via
-`PlanRepository` and emits a `plan_updated` SSE event. The plan is meant to be
-stable: the model creates it once and only calls `update_plan` again to revise
-on request (updating the same plan in place); `start_new: true` supersedes a
-finished plan with a new versioned one. Progress is *not* tracked here — that
-lives in the per-message `<task_list>` (see Operational Modes).
-
-The web client (`useChatSession.currentPlan`, `PlanPanel.vue`) renders the
-active plan in a right-hand side panel. The panel opens automatically once a
-plan exists and then stays open across mode switches until the user closes it
-(an in-thread "Plan: …" link re-opens it once collapsed). The active plan is
-loaded on run select via `GET /api/runs/:id/plan`.
-
----
-
-## Agent Presets (`delegate_tasks`)
-
-A run can optionally use **two models**: an **architect** (the run's normal
-`providerId`/`model`) that plans and coordinates, and a **coder** (the run's
-`coderProviderId`/`coderModel`) that does the actual code-writing as 1–3 sub-agents.
-This pairing is a named **preset** ("opusplan"-style) defined server-side in
-OS app-support `providers.json` under `agentPresets` and selectable, optionally, next to
-the model picker in the composer (`useComposerSettings.selectedPresetId`). When no
-preset is selected the run is plain single-model and behaves exactly as before.
-
-When (and only when) a coder model is configured, the architect loop is given an
-extra `delegate_tasks` tool. The architect is still **advertised** the full
-workspace toolset (including `write_file`/`edit_file`/`delete_file`/`run_command`),
-but every mutating call is a **trap**: `AgentLoop.runToolCall` rejects it with a
-`success:false` error that redirects the model to `delegate_tasks`. So the
-architect cannot actually change the project itself — the only working path is to
-delegate — but instead of hitting a dead-end (no tool to call) it gets an in-loop
-correction. This replaced the earlier "strip the tools entirely" approach, which
-left weak models with no way to express intent so they gave up and told the user
-to run commands manually. The trap keeps them moving toward delegation. (Tool
-set-up lives in `Orchestrator.drive()` via `buildModeBaseTools`; the trap/redirect
-lives in `AgentLoop.runToolCall`.)
-
-```txt
-delegate_tasks(tasks[{ title, instructions, files? }], parallel?)
-```
-
-The architect writes self-contained `instructions` per sub-task (the coder does
-NOT see the conversation) and decides concurrency: `parallel: true` only when the
-tasks touch disjoint files, otherwise they run sequentially. The orchestrator caps
-the list at the preset's `maxSubAgents` (1–3) and runs each sub-task through the
-SAME generation loop (`runAgentLoop`) on the coder model, in the same workspace,
-tagging those messages `agentRole: "coder"`. Each sub-agent's final text is
-returned to the architect as the tool result.
-
-Implementation notes:
-- `Orchestrator.drive()` sets up the architect loop (adding `DELEGATE_TASKS_TOOL`
-  and architect instructions when a coder is configured); `runAgentLoop` is the
-  shared, model-agnostic loop used by both the architect and every coder sub-agent.
-- Coder sub-agents get `WORKSPACE_TOOLS` only — never `delegate_tasks` or
-  `update_plan` — so delegation depth is hard-capped at 1 (no recursion).
-- Sub-agents share the run's `runId`, so cancellation and the permission flow just
-  work; because parallel sub-agents share the single pending-permission slot, their
-  approval prompts are serialized via `permissionChain` (one prompt at a time).
-- Each sub-agent's messages are tagged with `agentName` (the delegated task
-  title) in addition to `agentRole: "coder"`. The web UI uses `agentName` to
-  render EACH coder sub-agent in its own collapsible window — `groupMessages`
-  (`messageGroups.ts`) partitions a contiguous coder block by `agentName`, and
-  `CoderGroup.vue` shows the title as the window header. Parallel sub-agents
-  interleave by timestamp but still split into separate windows. Presets are
-  managed in Settings → Agents (`AgentPresetsTab.vue`).
-
-### Optional Utility Tier (`delegate_to_utility`)
-
-A preset may additionally define an **optional** `utility` endpoint — a cheap,
-lightweight model the architect offloads tiny mechanical chores to (locating
-files/symbols, summarizing a file, simple renames) so its expensive context stays
-lean. It is purely additive: presets without a `utility` block, and single-model
-runs, behave exactly as before.
-
-When (and only when) a `utility` model is configured *and* the run can delegate
-(coder present, build-type mode), the architect also gets a `delegate_to_utility`
-tool:
-
-```txt
-delegate_to_utility(tasks[{ title, instructions }], parallel?)
-```
-
-It mirrors `delegate_tasks` but runs each task (capped at 3) through `runAgentLoop`
-on the run's `utilityProviderId`/`utilityModel`, tagged `agentRole: "utility"` +
-`agentName`. Crucially the utility sub-agent gets a **restricted toolset**
-(`UTILITY_TOOLS` = read-only `read_file`/`list_directory`/`search_files` **plus
-`move_file`** for renames — no write/edit/delete/create/run_command) and the
-`buildUtilitySystemPrompt` prompt instructing it to return a SHORT answer. Handled
-by `Orchestrator.executeUtilityTasks`. In the web UI utility sub-agents reuse the
-coder window machinery (`foldCoderGroups` folds both `coder` and `utility` roles;
-`CoderGroup.vue` badges the box "Utility" vs "Coder"). Run fields:
-`utility_provider_id` / `utility_model` columns; preset metadata carries an
-optional `utility` endpoint.
-
-### Single-Model Sub-Agents (`spawn_agents`)
-
-Runs WITHOUT a preset get Claude-Code-style sub-agents instead: the main agent
-keeps its full toolset and decides on its own when to fan work out to
-fresh-context sub-agents running the run's OWN provider/model/reasoning effort.
-
-```txt
-spawn_agents(agents[{ type: "explore" | "general", title, instructions }], parallel?)
-```
-
-- `explore` → `agentRole: "explorer"`, read-only tools (`read_file`/`list_directory`/
-  `search_files`), `buildExplorerSystemPrompt`. `AgentLoop.gateWorkspaceCall`
-  refuses any other tool for this role.
-- `general` → `agentRole: "worker"`, full `WORKSPACE_TOOLS`, the coder prompt
-  (`FILES_CHANGED`/`DID`/`ISSUES` report). Normal mode/permission gating applies.
-- Which types a mode allows comes from `ModeStrategy.subAgentTypes`: build-type
-  modes `["explore","general"]`, plan `["explore"]`, chat `[]`. The schema is built
-  per run by `spawnAgentsTool(types)` so the `type` enum only lists allowed types.
-- Capped at `MAX_SPAWNED_AGENTS` (5) per call; `parallel: true` runs them
-  concurrently (general agents only when they write disjoint files).
-- The tendency to delegate comes from `subAgentsBlock` in the system prompt
-  (when to use explore/general, when to just do it yourself, and the
-  split-large-uniform-jobs pattern — e.g. translating a long .srt in ranges into
-  part files, then merging).
-- Depth is capped at 1: sub-agents are never advertised `spawn_agents`, and
-  `AgentLoop` refuses it from any sub-agent role. `DelegationCoordinator.
-  executeSpawnAgents` also refuses preset runs (they use `delegate_tasks`).
-- `explorer`/`worker` messages are excluded from `rebuildHistory` like
-  coder/utility, and the web UI renders each in its own sub-agent window
-  (`messageGroups.ts` `subAgentLabel`: Explore / Agent).
-
-### Mid-Run Messages (`POST /api/runs/:id/messages`)
-
-The user can keep typing while a run works (Claude-Code style): the message is
-folded into the conversation at the main agent's next step instead of
-interrupting the run or waiting for it to finish.
-
-- `Orchestrator.queueUserMessage` puts it in the run's `UserMessageInbox`. The
-  inbox is opened when `drive()` starts and closed synchronously the moment the
-  main loop returns, so a message is either delivered or refused (409) — never
-  silently dropped.
-- `AgentLoop.run` (main agent only; sub-agents never see the conversation) drains
-  the inbox before every model call: each message is persisted/emitted as a normal
-  user message at that point in the thread and sent to the model with a short
-  "sent while you were working" note. If one arrives while the model is writing
-  what would be its final answer, the loop takes another step instead of finishing.
-- `AnthropicProvider` merges such a user message into the preceding
-  `tool_result` turn so turns keep alternating.
-- Web: while running, Enter calls `useChatSession.handleQueueTask`, which posts
-  the message and shows it as "Queued" above the composer until its
-  `message_created` arrives. On 409 it falls back to the old behavior (sent as a
-  new turn after the run finishes, shown as "After run"); messages a cancelled run
-  never picked up are returned to the composer.
-
----
+`allow_run` also silences prompts for the rest of the run (in-memory).
 
 ## Run States
 
-Use explicit run states (`RunStatus` in shared):
-
-```ts
-export type RunStatus =
-  | "created"
-  | "generating"
-  | "awaiting_permission"
-  | "awaiting_input"
-  | "done"
-  | "failed"
-  | "cancelled";
+```txt
+created  generating  awaiting_permission  awaiting_input  done  failed  cancelled
 ```
-
-`awaiting_input` is the non-terminal state used while an `ask_user_question` call
-waits for the user's answer (sibling to `awaiting_permission`).
-
----
 
 ## Persistence
 
-SQLite via `node:sqlite`. Tables (created/migrated in `db.ts`):
+SQLite via `node:sqlite` (`db.ts` migrations). Tables: `runs`, `messages`,
+`projects`, `permissions`, `plans`, `memory`, `usage_logs` — see
+`docs/database-schema.md`. All agent messages persist; a run must be reopenable
+after restart. Startup marks stuck active runs `failed`. Provider credentials
+never enter the database.
+
+## Realtime
+
+SSE at `GET /api/runs/:id/events` fanned out via `eventBus`:
 
 ```txt
-runs         id, title, task, project_path/name, status, provider, model, mode,
-             coder_provider_id?, coder_model?, agent_preset?, ...
-messages     id, run_id, role, agent_role?, provider/model?, content, raw_response?, ...
-projects     path (pk), name, created_at
-permissions  scope, project_path, tool, command, status; UNIQUE(scope, project_path, tool, command)
-plans        id, run_id, title, body?, tasks (JSON), status ('active'|'completed'), version
-memory       id, scope ('global'|'project'), project_path, category, content, created_at, updated_at
-usage_logs   id, run_id, agent_role?, provider_id, model, input/output/cache tokens,
-             cache_hit_rate, cost, duration_ms?, created_at
+run_started  status_changed  message_created  message_updated
+model_snapshot_locked  permission_requested  plan_updated
+question_requested  run_title_changed  run_completed  run_failed
 ```
 
-All agent messages are stored. A run must be reopenable after restart. On
-startup, runs stuck in active states are marked `failed`. Provider credentials
-stay in JSON, never in the database.
-
----
-
-## Realtime Rules
-
-Use SSE (`GET /api/runs/:id/events`). The backend fans events out through
-`eventBus`. Structured event types (see `RunEvent` in shared):
-
-```txt
-run_started
-status_changed
-message_created
-message_updated
-model_snapshot_locked
-permission_requested
-plan_updated
-question_requested
-run_title_changed
-run_completed
-run_failed
-```
-
-The stream closes on `run_completed`, `run_failed`, or a terminal
-`status_changed` (done/failed/cancelled). The frontend updates live.
-
----
+Stream closes on `run_completed` / `run_failed` / terminal `status_changed`.
 
 ## Error Handling
 
-Handle clearly and save to the run record without losing prior messages:
-
-```txt
-missing provider config        invalid/empty model response
-invalid API key                invalid model name
-provider timeout (idle 300s)   network error
-rate limit                     cancelled run
-permission denied
-```
-
-Failed runs keep their messages; the error is stored in `error_message`.
-
----
+Provider config/model errors, invalid keys, timeouts (idle 300s), network
+errors, rate limits, cancellations, and permission denials are stored in the
+run's `error_message` — prior messages are always kept.
 
 ## Security Rules
 
 ```txt
-API keys NEVER touch any JSON file. providers.json lives in OS app-support and is keyless;
-  keys live only in the OS keychain (referenced by a non-secret apiKeyRef pointer).
-Never return provider secrets from public metadata endpoints.
-Only the trusted local settings API should read or save full provider config.
-Never log secrets.
-Keep the local SQLite file out of git.
-Constrain all file access to the active project workspace.
-No telemetry or external tracking unless explicitly requested.
+API keys NEVER in JSON/DB/logs; keychain via apiKeyRef only
+Public provider metadata never exposes secrets
+All file access constrained to the active project workspace
+locagens.db stays out of git
+No telemetry or external tracking unless explicitly requested
 ```
 
----
+## Sub-Agents
 
-## Coding Style
-
-Use shared TypeScript types for cross-boundary contracts (`packages/shared`).
-
-Prefer specific names:
+Project development uses Claude Code sub-agents defined in `.claude/agents/`:
 
 ```txt
-ProviderRegistry  Orchestrator  RunRepository  OpenAICompatibleProvider
-useChatSession    useProjects   buildSystemPrompt  executeWorkspaceTool
+architect           Plan-only before 2+ module changes. No code.
+coder               Implements a scoped task; verifies with typecheck/tests.
+reviewer            Reviews diffs against this file. Read-only.
+searcher            Read-only exploration; paths + short answers.
+tester              Runs/writes tests; may only edit test files.
+provider-specialist Provider adapters, registry, secrets, pricing.
+security-auditor    Permission flow, sandbox, SSRF, path containment.
+prompt-engineer     systemPrompt.ts + prompts/ (agent behavior = product).
+docs-writer         Keeps API_ENDPOINT_MAP.md, database-schema.md, Claude.md in sync.
+debugger            Run triage: errors, states, SSE, SQLite forensics.
+release-engineer    Electron packaging, dist pipeline, signing, updates.
 ```
 
-Avoid vague names like `helper`, `manager`, `processor`, `data`, `stuff`.
+Delegation etiquette for the main agent:
 
----
+```txt
+wide "where/what/how" question          -> searcher
+multi-module or non-trivial design      -> architect, then coder
+small single-file fix                   -> just do it yourself
+prompt/agent-behavior change            -> prompt-engineer
+provider/config/secret work             -> provider-specialist
+after a non-trivial diff                -> reviewer (security-sensitive: security-auditor)
+after implementation / before done      -> tester
+failing run or weird state              -> debugger
+docs out of sync with code              -> docs-writer
+packaging / release work                -> release-engineer
+```
+
+Sub-agent reports return as tool results — summarize them for the user.
+Sub-agents share the workspace and must respect the rules above.
 
 ## Future Features
 
-Not implemented today; do not build without an explicit request:
+Not implemented; do not build without an explicit request:
 
 ```txt
 separate reviewer/acceptance loop after coder delegation
 direct git integration
-manual approval checkpoints beyond the existing permission flow
-token cost tracking
+manual approval checkpoints beyond the permission flow
 multi-user auth / cloud deployment
 ```
