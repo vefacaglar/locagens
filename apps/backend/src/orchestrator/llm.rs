@@ -10,6 +10,13 @@
 //! - **Anthropic Messages** (`{baseUrl}/messages`, `stream: true`): parses
 //!   `content_block_start`, `content_block_delta` (`text_delta`,
 //!   `thinking_delta`, `input_json_delta`), `message_delta`, `message_stop`.
+//! - **OpenAI Responses** (Codex WireAPI, `{baseUrl}/responses` with a
+//!   `/v1`-suffixed baseUrl or `{baseUrl}/v1/responses` otherwise,
+//!   `stream: true`): sends `instructions` + `input` items and parses
+//!   `response.output_text.delta`, `response.reasoning_summary_text.delta` /
+//!   `response.reasoning_text.delta`, `response.output_item.added` /
+//!   `.done` (function_call items), `response.function_call_arguments.delta`
+//!   and `response.completed` (usage).
 //!
 //! Deltas are forwarded through a callback so the orchestrator can update the
 //! live assistant `RunMessage` and emit throttled `message_updated` SSE events.
@@ -26,6 +33,8 @@ pub struct LlmMessage {
     pub role: String,
     pub content: String,
     /// `tool_call_id` for `role == "tool"` responses.
+    ///
+    /// (`call_id` for `function_call_output` items under the Responses API.)
     pub tool_call_id: Option<String>,
     /// Tool calls requested by an assistant message.
     pub tool_calls: Option<Vec<Value>>,
@@ -63,7 +72,8 @@ pub struct StreamOutcome {
 #[derive(Clone, Debug, Default)]
 pub struct Endpoint {
     pub base_url: String,
-    /// `"openai-compatible"` or `"anthropic"`.
+    /// `"openai-compatible"` (chat/completions), `"openai-responses"` /
+    /// `"responses"` (Codex `/v1/responses` WireAPI) or `"anthropic"`.
     pub api: String,
     pub api_key: String,
     /// Per-conversation routing id (OpenCode requires `x-opencode-session`).
@@ -80,6 +90,12 @@ impl Endpoint {
         self.api == "anthropic"
             || self.api == "anthropic-messages"
             || self.base_url.contains("anthropic")
+    }
+
+    /// True when the endpoint speaks Codex's native OpenAI Responses WireAPI
+    /// (`/v1/responses`) instead of chat completions.
+    pub fn is_openai_responses(&self) -> bool {
+        self.api == "openai-responses" || self.api == "responses"
     }
 }
 
@@ -243,6 +259,111 @@ impl StreamAcc {
         }
     }
 
+    /// Consumes one OpenAI `/v1/responses` (Codex WireAPI) SSE event.
+    pub fn feed_responses(&mut self, event: &Value) {
+        match event.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "response.output_text.delta" => {
+                if let Some(text) = event.get("delta").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        self.content.push_str(text);
+                        self.deltas.push((text.to_string(), String::new()));
+                    }
+                }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                if let Some(text) = event.get("delta").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        self.reasoning.push_str(text);
+                        self.deltas.push((String::new(), text.to_string()));
+                    }
+                }
+            }
+            "response.output_item.added" => {
+                let item = event.get("item").cloned().unwrap_or(Value::Null);
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let index = match event.get("output_index").and_then(Value::as_u64) {
+                        Some(i) => i as usize,
+                        None => {
+                            let idx = self.next_tool_index;
+                            self.next_tool_index += 1;
+                            idx
+                        }
+                    };
+                    let entry = self.tool_acc.entry(index).or_default();
+                    if let Some(id) = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    {
+                        entry.id = id.to_string();
+                    }
+                    if let Some(name) = item.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+                        entry.name = name.to_string();
+                    }
+                    if let Some(args) = item.get("arguments").and_then(Value::as_str) {
+                        entry.args.push_str(args);
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                let index = self.responses_tool_index(event);
+                if let Some(entry) = self.tool_acc.get_mut(&index) {
+                    if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                        entry.args.push_str(delta);
+                    }
+                }
+            }
+            "response.output_item.done" => {
+                let item = event.get("item").cloned().unwrap_or(Value::Null);
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let index = self.responses_tool_index(event);
+                    let entry = self.tool_acc.entry(index).or_default();
+                    if let Some(id) = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    {
+                        entry.id = id.to_string();
+                    }
+                    if let Some(name) = item.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+                        entry.name = name.to_string();
+                    }
+                    // The done event carries the full final arguments.
+                    if let Some(args) = item.get("arguments").and_then(Value::as_str) {
+                        entry.args = args.to_string();
+                    }
+                }
+            }
+            "response.completed" => {
+                if let Some(usage) = event.pointer("/response/usage").filter(|u| !u.is_null()) {
+                    self.usage = Usage {
+                        input_tokens: usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0),
+                        output_tokens: usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0),
+                        cache_read_tokens: usage
+                            .pointer("/input_tokens_details/cached_tokens")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                        cache_write_tokens: 0,
+                        provider_cost: usage.get("cost").and_then(Value::as_f64),
+                    };
+                }
+                self.finished = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Tool-accumulator key for a Responses event: the `output_index` field
+    /// when present, otherwise the sole tracked call (or a fresh slot).
+    fn responses_tool_index(&self, event: &Value) -> usize {
+        match event.get("output_index").and_then(Value::as_u64) {
+            Some(i) => i as usize,
+            None => self.tool_acc.keys().next().copied().unwrap_or(self.next_tool_index),
+        }
+    }
+
     /// Normalizes accumulated tool calls into the OpenAI shape used in
     /// `RunMessage.rawResponse`.
     pub fn tool_calls(&self) -> Vec<Value> {
@@ -280,10 +401,17 @@ pub async fn stream_chat(
         anyhow::bail!("No baseUrl configured for provider endpoint");
     }
 
+    // Codex Responses WireAPI has its own request/streaming path.
+    if endpoint.is_openai_responses() {
+        return stream_openai_responses(http, endpoint, system, messages, tools, on_delta, should_stop)
+            .await;
+    }
+
     let (url, mut request_body) = build_request(endpoint, system, messages, tools);
     // Ask for token accounting on OpenAI-compatible streams; providers that
-    // reject the field get an automatic retry without it.
-    let with_stream_options = !endpoint.is_anthropic();
+    // reject the field get an automatic retry without it. The Responses API
+    // reports usage in `response.completed` and rejects the field.
+    let with_stream_options = !endpoint.is_anthropic() && !endpoint.is_openai_responses();
     if with_stream_options {
         request_body["stream_options"] = json!({ "include_usage": true });
     }
@@ -346,6 +474,7 @@ async fn consume_response(
     should_stop: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<StreamOutcome> {
     let is_anthropic = endpoint.is_anthropic();
+    let is_responses = endpoint.is_openai_responses();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -357,6 +486,30 @@ async fn consume_response(
         // Non-streaming fallback: the endpoint ignored `stream: true`.
         let body: Value = response.json().await.unwrap_or(Value::Null);
         let mut acc = StreamAcc::default();
+        if is_responses {
+            // Replay the full response object as the equivalent events.
+            let output = body.get("output").and_then(Value::as_array).cloned().unwrap_or_default();
+            for item in &output {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    acc.feed_responses(&json!({
+                        "type": "response.output_item.done", "output_index": 0, "item": item
+                    }));
+                } else if item.get("type").and_then(Value::as_str) == Some("message") {
+                    if let Some(blocks) = item.get("content").and_then(Value::as_array) {
+                        for block in blocks {
+                            if block.get("type").and_then(Value::as_str) == Some("output_text") {
+                                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                    acc.content.push_str(text);
+                                    acc.deltas.push((text.to_string(), String::new()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            acc.feed_responses(&json!({ "type": "response.completed", "response": body }));
+            return finish(acc);
+        }
         acc.feed_openai(&non_streaming_openai(&body));
         let blocks = body.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
         for (i, block) in blocks.iter().enumerate() {
@@ -401,6 +554,26 @@ async fn consume_response(
             buffer.drain(..=newline);
             if line.ends_with('\r') {
                 line.pop();
+            }
+            if is_responses {
+                let Some(event) = parse_responses_sse_line(&line) else {
+                    continue;
+                };
+                let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+                if event_type == "error" || event_type == "response.failed" {
+                    let message = event
+                        .pointer("/error/message")
+                        .or_else(|| event.pointer("/response/error/message"))
+                        .or_else(|| event.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("stream error");
+                    anyhow::bail!("Provider stream error: {message}");
+                }
+                acc.feed_responses(&event);
+                for (content_delta, reasoning_delta) in acc.deltas.drain(..) {
+                    on_delta(&content_delta, &reasoning_delta);
+                }
+                continue;
             }
             let data = match line.strip_prefix("data:") {
                 Some(data) => data.trim(),
@@ -461,12 +634,173 @@ fn build_request(
             format!("{base_url}/messages"),
             anthropic_body(endpoint, system, messages, tools),
         )
+    } else if endpoint.is_openai_responses() {
+        (
+            responses_url(base_url),
+            build_responses_body(endpoint, system, messages, tools),
+        )
     } else {
         (
             format!("{base_url}/chat/completions"),
             openai_body(endpoint, system, messages, tools),
         )
     }
+}
+
+/// Resolves the `/v1/responses` endpoint from a provider `baseUrl`:
+/// `/v1`-suffixed base URLs append `/responses`, bare hosts append
+/// `/v1/responses`.
+fn responses_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.rsplit('/').next() == Some("v1") {
+        format!("{base}/responses")
+    } else {
+        format!("{base}/v1/responses")
+    }
+}
+
+/// Builds a Codex OpenAI `/v1/responses` (Responses WireAPI) request body:
+/// system prompt becomes `instructions`, the conversation becomes `input`
+/// items (`message`, `function_call`, `function_call_output`) and tools are
+/// flattened to the `{ type: "function", name, description, parameters }`
+/// shape the Responses API expects.
+fn build_responses_body(
+    endpoint: &Endpoint,
+    system: &str,
+    messages: &[LlmMessage],
+    tools: &[Value],
+) -> Value {
+    let mut body = Map::new();
+    body.insert("model".into(), json!(endpoint.model));
+    body.insert("stream".into(), json!(true));
+    if !system.trim().is_empty() {
+        body.insert("instructions".into(), json!(system));
+    }
+
+    let mut input: Vec<Value> = Vec::new();
+    for message in messages {
+        match message.role.as_str() {
+            "assistant" => {
+                if !message.content.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": message.content }],
+                    }));
+                }
+                if let Some(tool_calls) = message.tool_calls.as_ref() {
+                    for call in tool_calls {
+                        input.push(json!({
+                            "type": "function_call",
+                            "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                            "name": call.pointer("/function/name").cloned().unwrap_or(Value::Null),
+                            "arguments": call.pointer("/function/arguments").cloned().unwrap_or(json!("{}")),
+                        }));
+                    }
+                }
+            }
+            "tool" => {
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id.clone().unwrap_or_default(),
+                    "output": message.content,
+                }));
+            }
+            role => {
+                input.push(json!({
+                    "type": "message",
+                    "role": role,
+                    "content": message.content,
+                }));
+            }
+        }
+    }
+    body.insert("input".into(), json!(input));
+
+    if !tools.is_empty() {
+        let converted: Vec<Value> = tools
+            .iter()
+            .filter_map(|tool| {
+                // Accept both the chat-completions nested form and the
+                // already-flat Responses form.
+                let function = tool.get("function").unwrap_or(tool);
+                Some(json!({
+                    "type": "function",
+                    "name": function.get("name").cloned().unwrap_or(Value::Null),
+                    "description": function.get("description").cloned().unwrap_or(Value::Null),
+                    "parameters": function.get("parameters").cloned().unwrap_or(json!({ "type": "object", "properties": {} })),
+                }))
+            })
+            .collect();
+        body.insert("tools".into(), json!(converted));
+    }
+
+    if let Some(effort) = endpoint.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+        if endpoint.reasoning_supported {
+            body.insert("reasoning".into(), json!({ "effort": effort }));
+        }
+    }
+    if let Some(max_tokens) = endpoint.max_tokens.filter(|t| *t > 0) {
+        body.insert("max_output_tokens".into(), json!(max_tokens));
+    }
+    Value::Object(body)
+}
+
+/// Parses one SSE line from an OpenAI `/v1/responses` stream into its JSON
+/// event. Returns `None` for `event:`/comment lines, `[DONE]` sentinels and
+/// non-JSON payloads.
+fn parse_responses_sse_line(line: &str) -> Option<Value> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str::<Value>(data).ok()
+}
+
+/// Streams one OpenAI `/v1/responses` completion, forwarding
+/// `(content_delta, reasoning_delta)` through `on_delta` (same contract as
+/// [`stream_chat`], which dispatches here for Responses endpoints).
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_openai_responses(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    system: &str,
+    messages: &[LlmMessage],
+    tools: &[Value],
+    on_delta: &mut (dyn FnMut(&str, &str) + Send),
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<StreamOutcome> {
+    let base_url = endpoint.base_url.trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        anyhow::bail!("No baseUrl configured for provider endpoint");
+    }
+
+    let url = responses_url(&base_url);
+    let request_body = build_responses_body(endpoint, system, messages, tools);
+    let mut request = http.post(&url);
+    if !endpoint.api_key.is_empty() {
+        request = request.bearer_auth(&endpoint.api_key);
+    }
+    if base_url.contains("openrouter") {
+        request = request.header("X-Title", "Locagens");
+    }
+    // OpenCode Zen requires a per-conversation routing header.
+    if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
+        request = request.header("x-opencode-session", &endpoint.session_id);
+    }
+    let response = request
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|err| anyhow::anyhow!("Provider request failed: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Provider returned {status}: {}", summarize_error(&body));
+    }
+
+    consume_response(response, endpoint, on_delta, should_stop).await
 }
 
 fn openai_body(endpoint: &Endpoint, system: &str, messages: &[LlmMessage], tools: &[Value]) -> Value {
@@ -812,5 +1146,147 @@ mod tests {
         let body = anthropic_body(&anthropic, "", &[], &tools);
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn responses_request_body_matches_wire_api() {
+        let endpoint = Endpoint {
+            base_url: "https://api.openai.com/v1".into(),
+            api: "openai-responses".into(),
+            api_key: "k".into(),
+            session_id: String::new(),
+            model: "gpt-5".into(),
+            reasoning_effort: Some("high".into()),
+            max_tokens: Some(1024),
+            reasoning_supported: true,
+        };
+        let messages = vec![
+            LlmMessage { role: "user".into(), content: "do it".into(), ..Default::default() },
+            LlmMessage {
+                role: "assistant".into(),
+                content: "calling".into(),
+                tool_calls: Some(vec![json!({ "id": "c1", "function": { "name": "t", "arguments": "{\"a\":1}" } })]),
+                ..Default::default()
+            },
+            LlmMessage { role: "tool".into(), content: "done".into(), tool_call_id: Some("c1".into()), ..Default::default() },
+        ];
+        let tools = vec![json!({ "type": "function", "function": {
+            "name": "read_file", "description": "Read", "parameters": { "type": "object" } } })];
+        let body = build_responses_body(&endpoint, "sys", &messages, &tools);
+
+        assert_eq!(body["model"], "gpt-5");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["instructions"], "sys");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["max_output_tokens"], 1024);
+        assert!(body.get("messages").is_none());
+
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"], "do it");
+        // Assistant message: text item first, then its function_call item.
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["content"][0]["type"], "output_text");
+        assert_eq!(input[1]["content"][0]["text"], "calling");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "c1");
+        assert_eq!(input[2]["name"], "t");
+        assert_eq!(input[2]["arguments"], r#"{"a":1}"#);
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "c1");
+        assert_eq!(input[3]["output"], "done");
+
+        // Tools flatten to the Responses `{ type, name, description,
+        // parameters }` form.
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tools"][0]["description"], "Read");
+        assert_eq!(body["tools"][0]["parameters"]["type"], "object");
+        // No chat-completions `function` nesting remains.
+        assert!(body["tools"][0].get("function").is_none());
+
+        // `reasoning.effort` is omitted when unsupported, and
+        // `max_output_tokens` follows `max_tokens`.
+        let plain = Endpoint { reasoning_supported: false, ..endpoint };
+        let body = build_responses_body(&plain, "", &[], &[]);
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("instructions").is_none());
+
+        // URL resolution: `/v1`-suffixed baseUrls append `/responses`, bare
+        // hosts append `/v1/responses`.
+        assert_eq!(responses_url("https://api.openai.com/v1"), "https://api.openai.com/v1/responses");
+        assert_eq!(responses_url("https://api.openai.com/v1/"), "https://api.openai.com/v1/responses");
+        assert_eq!(responses_url("https://codex.example.com"), "https://codex.example.com/v1/responses");
+    }
+
+    #[test]
+    fn openai_responses_stream_accumulates_text_reasoning_and_function_calls() {
+        let mut acc = StreamAcc::default();
+        acc.feed_responses(&json!({
+            "type": "response.output_text.delta", "delta": "Hello"
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.reasoning_summary_text.delta", "delta": "thinking..."
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.reasoning_text.delta", "delta": " more"
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.output_item.added", "output_index": 1,
+            "item": { "type": "function_call", "call_id": "call-1", "name": "read_file", "arguments": "" }
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.function_call_arguments.delta", "output_index": 1,
+            "delta": "{\"pa"
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.function_call_arguments.delta", "output_index": 1,
+            "delta": "th\": \"src\"}"
+        }));
+        // The done event carries the full final arguments (must not append).
+        acc.feed_responses(&json!({
+            "type": "response.output_item.done", "output_index": 1,
+            "item": { "type": "function_call", "call_id": "call-1", "name": "read_file",
+                      "arguments": "{\"path\": \"src\"}" }
+        }));
+        acc.feed_responses(&json!({
+            "type": "response.completed",
+            "response": { "usage": { "input_tokens": 12, "output_tokens": 8,
+                                     "input_tokens_details": { "cached_tokens": 4 } } }
+        }));
+
+        assert!(acc.finished);
+        assert_eq!(acc.content, "Hello");
+        assert_eq!(acc.reasoning, "thinking... more");
+        let tool_calls = acc.tool_calls();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call-1");
+        assert_eq!(tool_calls[0]["function"]["name"], "read_file");
+        assert_eq!(tool_calls[0]["function"]["arguments"], r#"{"path": "src"}"#);
+        assert_eq!(acc.usage.input_tokens, 12);
+        assert_eq!(acc.usage.output_tokens, 8);
+        assert_eq!(acc.usage.cache_read_tokens, 4);
+        // Deltas arrive in arrival order with the right splits.
+        assert_eq!(acc.deltas.len(), 3);
+        assert_eq!(acc.deltas[0], ("Hello".to_string(), String::new()));
+        assert_eq!(acc.deltas[1], (String::new(), "thinking...".to_string()));
+        assert_eq!(acc.deltas[2], (String::new(), " more".to_string()));
+    }
+
+    #[test]
+    fn parse_responses_sse_line_skips_sentinels_and_parses_events() {
+        assert!(parse_responses_sse_line("event: response.output_text.delta").is_none());
+        assert!(parse_responses_sse_line(": keep-alive").is_none());
+        assert!(parse_responses_sse_line("data: ").is_none());
+        assert!(parse_responses_sse_line("data: [DONE]").is_none());
+        assert!(parse_responses_sse_line("data: not json").is_none());
+        let event = parse_responses_sse_line(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}",
+        )
+        .unwrap();
+        assert_eq!(event["type"], "response.output_text.delta");
+        assert_eq!(event["delta"], "Hi");
     }
 }
