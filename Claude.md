@@ -19,8 +19,10 @@ no tool calls -> run done; messages stream live and persist.
 How development work is executed in this repo:
 
 - **Codebase exploration (read-only research & analysis)**: always use
-  `gemini-3.8-flash` (`Gemini 3.8 Flash` / the `research` subagent with
-  `Model: "flash"`). Never burn a coding model on exploration.
+  `gemini-4-hydrogen` (`Gemini 4 Hydrogen`), default effort `medium` (`low` for
+  trivial lookups, `high`/`xhigh` for deep analysis), run as a read-only
+  subagent or swarm worker pinned to a `gemini-4-hydrogen-*` model. Never burn a
+  coding model on exploration.
 - **All coding, development & file modifications**: always execute via the
   `pi` CLI using model `opencode-go/glm-5.3-flash`.
 
@@ -246,7 +248,7 @@ No telemetry or external tracking unless explicitly requested
 All work is strictly handled by:
 
 ```txt
-gemini-3.8-flash            exploration (read-only research & analysis)
+gemini-4-hydrogen           exploration (read-only research & analysis)
 pi CLI (glm-5.3-flash)      all coding & development via pi
 ```
 

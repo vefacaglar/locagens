@@ -5,8 +5,10 @@ How development work is executed in the Locagens repo.
 ## Model split
 
 - **Codebase exploration (read-only research & analysis)**: always use
-  `gemini-3.8-flash` (`Gemini 3.8 Flash` / the `research` subagent with
-  `Model: "flash"`). Never burn a coding model on exploration.
+  `gemini-4-hydrogen` (`Gemini 4 Hydrogen`), default effort `medium` (`low` for
+  trivial lookups, `high`/`xhigh` for deep analysis), run as a read-only
+  subagent or swarm worker pinned to a `gemini-4-hydrogen-*` model. Never burn a
+  coding model on exploration.
 - **All coding, development & file modifications**: always execute via the
   `pi` CLI using model `opencode-go/glm-5.3-flash`.
 
