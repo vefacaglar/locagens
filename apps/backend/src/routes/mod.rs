@@ -7,6 +7,7 @@ pub mod permissions;
 pub mod plugins;
 pub mod processes;
 pub mod projects;
+pub mod providers;
 pub mod security;
 pub mod settings;
 pub mod skills;
@@ -24,6 +25,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/ping", get(ping))
         // Settings
         .route("/api/settings", get(settings::get_settings).put(settings::put_settings))
+        // Providers (pi auth.json / models.json / models-store.json)
+        .route("/api/providers", get(providers::list_providers))
+        .route("/api/providers/config", get(providers::get_config).post(providers::save_config))
+        .route("/api/providers/fetch-models", post(providers::fetch_models))
+        .route("/api/providers/test", post(providers::test_provider))
+        // Agent presets
+        .route("/api/agent-presets", get(providers::get_presets).put(providers::put_presets))
+        // Native pi auth endpoints
+        .route("/api/pi/auth", get(providers::get_pi_auth).post(providers::set_pi_auth))
         // Projects & files & git
         .route("/api/projects", get(projects::list_projects).post(projects::create_project).delete(projects::delete_project))
         .route("/api/projects/files", get(projects::list_files))

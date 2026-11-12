@@ -8,8 +8,9 @@ Update this file continuously as phases complete.
 ## 1. Migration Goal & Architectural Decisions
 
 - Replace the legacy Node.js/Fastify backend (`apps/api`) and SQLite sidecar (`apps/db-writer`)
-  with a single unified **Rust (`Axum` + `Tokio` + `Rusqlite`)** binary
-  (`apps/backend`, binary `locagens-backend`).
+  with a single unified **Rust (`Axum` + `Tokio` + file-based JSON/JSONL storage, Codex/Claude/Pi-style)**
+  binary (`apps/backend`, binary `locagens-backend`). Zero SQLite, zero C library dependency
+  (`rusqlite` removed from `Cargo.toml` in Phase 2).
 - Replace custom provider/API-key storage (`providers.json`, `MacOSKeychainProviderSecretStore`)
   and custom `AgentLoop`/`ModelProvider` adapters with **`pi`**
   (`pi --mode rpc`, `pi auth` / `~/.pi/agent/auth.json`, `~/.pi/agent/models.json`, `pi --list-models`).
@@ -40,27 +41,54 @@ Update this file continuously as phases complete.
   - Updated `Claude.md`, `Agents.md`, created `GEMINI.md` and `.agents/rules/pi-gemini-workflow.md`.
   - Removed all 11 legacy `.claude/agents/*.md` files.
 
-- [ ] **Phase 1: Rust Backend Foundation (`apps/backend`) + SQLite + Core Routes**
-  *(IN PROGRESS — active `pi` task writing `apps/backend/src/`)*
-  - Completed files so far: `Cargo.toml`, `apps/backend/Cargo.toml`, `src/db.rs`,
-    `src/paths.rs`, `src/util.rs`, `src/auth.rs`,
-    `src/services/{mod,processes,skills,plugins,mcp}.rs`.
-  - Remaining in Phase 1: `src/routes/{settings,projects,memory,permissions,skills,processes,symbols,plugins,mcp,security}.rs`,
-    `src/main.rs`, `cargo check` verification, commit & push.
+- [x] **Phase 1: Rust Backend Foundation (`apps/backend`) + Core Routes** (Committed in `fed1c37`)
+  - `apps/backend` with `Cargo.toml`, `src/{main,db,paths,util,auth}.rs`,
+    `src/services/{mod,processes,skills,plugins,mcp,symbols}.rs` and
+    `src/routes/{mod,settings,projects,memory,permissions,skills,processes,symbols,plugins,mcp,security}.rs`.
 
-- [ ] **Phase 2: `pi`-Backed Provider, Model & Credential Management (`/api/providers/*`, `/api/agent-presets`)**
-  - Bridge `/api/providers`, `/api/providers/config`, `/api/providers/fetch-models`,
-    `/api/providers/test`, `/api/agent-presets` to `~/.pi/agent/auth.json`,
-    `~/.pi/agent/models.json`, `~/.pi/agent/models-store.json`, `pi auth`,
-    and `pi --list-models`.
+- [x] **Phase 2: File-Based JSON/JSONL Storage (Codex/Claude/Pi-style) + Pure Rust `pi` Provider/Auth/Model Engine**
+  - **Part A — storage (`src/db.rs`)**: removed `rusqlite` from `Cargo.toml`; zero SQLite,
+    zero C library dependency, zero `locagens.db`. `Db` keeps the same public method
+    signatures but stores everything under the data root (`LOCAGENS_DATA_DIR` →
+    `LOCAGENS_DB_PATH` parent/stem → `<app_support_dir>/data`):
+    - `projects.json`, `permissions.json` (dedup on `(scope, projectPath, tool, command, networkDomains)`),
+      `memory.json` (auto-increment integer ids).
+    - `sessions/<run_id>/run.json` (full Run metadata incl. preset/coder/utility fields),
+      `sessions/<run_id>/messages.jsonl` (append-only `RunMessage` JSONL, clean rewrite on
+      `update_message`), `sessions/<run_id>/plan.json`, `usage_logs.jsonl`.
+    - In-memory `RwLock<StorageState>` (O(1) reads) with atomic `.tmp`-then-rename JSON
+      writes and append/flush JSONL writes; startup loads all files and fails stuck runs
+      (`created`/`generating`/`awaiting_permission`/`awaiting_input`) with
+      "Session interrupted due to server restart." plus a system message line.
+    - 4 `db.rs` unit tests (persistence across reopen, permission dedup/ids, stuck-run
+      restart handling, message update + usage logs).
+  - **Part B — `pi` engine (`src/pi_providers.rs`, `src/routes/providers.rs`)**: pure Rust,
+    no `pi` CLI dependency for providers:
+    - Reads/writes `~/.pi/agent/auth.json` (api_key / oauth / `!command`-cached / `$ENV_VAR`
+      credentials), `~/.pi/agent/models.json` (custom baseUrl/api/models),
+      `~/.pi/agent/models-store.json` (cached catalog), `<app_support>/locagens-providers-meta.json`
+      and `<app_support>/locagens-presets.json`.
+    - Built-in providers: `opencode-go`, `anthropic`, `openai`, `google`, `openrouter`,
+      `deepseek`, `groq`, `xai`, `ollama` with the spec'd models; env fallback chain
+      (`OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`, …, `ZAI_API_KEY`).
+    - Routes: `GET /api/providers`, `GET|POST /api/providers/config` (keys masked as
+      `__LOCAGENS_PRESERVE_API_KEY__`), `POST /api/providers/fetch-models`,
+      `POST /api/providers/test` (openai-compatible + Anthropic endpoints),
+      `GET|PUT /api/agent-presets`, `GET|POST /api/pi/auth`. Mounted in `routes/mod.rs`,
+      `AppState.pi` wired in `main.rs`.
+    - 4 `pi_providers.rs` tests (auth roundtrip + masking, `$ENV_VAR` resolution, catalog
+      merge + config masking, preset validation).
+  - Verified: `cargo test` 13/13 passed, `cargo check` clean, live smoke run of the binary
+    (ping/projects/providers/config/agent-presets/pi/auth all 200 with real
+    `models-store.json` data).
 
 - [ ] **Phase 3: `pi --mode rpc` Agent Orchestrator & Run/SSE Engine (`/api/runs/*`, `/api/runs/:id/events`)**
   - Implement Rust `pi --mode rpc` process supervisor & JSONL protocol driver
     (`prompt`, `steer`, `follow_up`, `clear_queue`, `abort`,
     `extension_ui_request`/`extension_ui_response`).
   - Map `pi` streaming events (`message_start`, `message_update`, `tool_execution_*`,
-    `agent_settled`) to SQLite (`runs`, `messages`, `plans`, `usage_logs`) and SSE broadcast
-    (`GET /api/runs/:id/events`).
+    `agent_settled`) to the file-based store (`sessions/<id>/run.json`, `messages.jsonl`,
+    `plan.json`, `usage_logs.jsonl`) and SSE broadcast (`GET /api/runs/:id/events`).
   - Wire permission gating (`PermissionCoordinator` via `pi` extension hook / RPC UI)
     and multi-agent delegation (`coder`, `utility`, `explorer`).
 
@@ -72,7 +100,15 @@ Update this file continuously as phases complete.
 
 ---
 
-## 4. Detailed Technical Reference Location
+## 4. Build Notes (this Windows machine)
+
+- Prepend `$HOME\w64devkit\w64devkit\bin` to `PATH`, then run
+  `rustup run stable-x86_64-pc-windows-gnu cargo test` /
+  `rustup run stable-x86_64-pc-windows-gnu cargo check`.
+
+---
+
+## 5. Detailed Technical Reference Location
 
 - `Claude.md`, `Agents.md`, `GEMINI.md`
 - Conversation scratch specs in

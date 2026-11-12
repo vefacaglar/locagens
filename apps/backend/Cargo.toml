@@ -2,7 +2,7 @@
 name = "locagens-backend"
 version = "0.1.0"
 edition = "2021"
-description = "Locagens Rust backend (Axum + Tokio + Rusqlite) built on top of pi."
+description = "Locagens Rust backend (Axum + Tokio + file-based JSON/JSONL storage) built on top of pi."
 
 [[bin]]
 name = "locagens-backend"
@@ -14,7 +14,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "limit"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

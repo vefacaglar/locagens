@@ -1,12 +1,14 @@
-//! Locagens backend (Axum + Tokio + Rusqlite).
+//! Locagens backend (Axum + Tokio + file-based JSON/JSONL storage) built on
+//! top of `pi`.
 //!
-//! Bootstraps the SQLite database, resolves the HTTP port (settings.json →
-//! `PORT` env → 4321), binds to `127.0.0.1:{port}` and prints
-//! `[locagens:backend-ready] port={port}` immediately after binding.
+//! Bootstraps the file-based data store, resolves the HTTP port
+//! (settings.json → `PORT` env → 4321), binds to `127.0.0.1:{port}` and
+//! prints `[locagens:backend-ready] port={port}` immediately after binding.
 
 mod auth;
 mod db;
 mod paths;
+mod pi_providers;
 mod routes;
 mod services;
 mod util;
@@ -24,6 +26,7 @@ pub const DEFAULT_PORT: u16 = 4321;
 /// Shared application state passed to every handler.
 pub struct AppState {
     pub db: db::Db,
+    pub pi: Arc<pi_providers::PiProviderManager>,
     pub settings_path: PathBuf,
     pub default_project_path: PathBuf,
     pub processes: Arc<ProcessManager>,
@@ -56,12 +59,12 @@ async fn main() {
 
     let settings_path = paths::default_settings_path();
     let port = resolve_port(&settings_path);
-    let db_path = db::resolve_db_path();
+    let data_root = db::resolve_data_root();
 
-    let database = match db::Db::open(&db_path) {
+    let database = match db::Db::open(&data_root) {
         Ok(db) => db,
         Err(err) => {
-            eprintln!("[locagens] Failed to open database at {}: {err}", db_path.display());
+            eprintln!("[locagens] Failed to open data store at {}: {err}", data_root.display());
             std::process::exit(1);
         }
     };
@@ -72,6 +75,7 @@ async fn main() {
     let default_project_path = workspace_root.clone();
     let state = Arc::new(AppState {
         db: database,
+        pi: Arc::new(pi_providers::PiProviderManager::new()),
         settings_path,
         default_project_path,
         processes: Arc::new(ProcessManager::new()),
