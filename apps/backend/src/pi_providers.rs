@@ -82,16 +82,19 @@ pub struct ModelInfo {
     pub cost: Option<Value>,
 }
 
-/// Metadata returned by `GET /api/providers`.
+/// Metadata returned by `GET /api/providers` (web client contract: `type` is
+/// `"openai-compatible"` or `"anthropic"`, `models` are plain model-id
+/// strings, API keys are never included).
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMetadata {
     pub id: String,
     pub display_name: String,
-    pub base_url: String,
-    pub api: String,
-    pub models: Vec<ModelInfo>,
-    pub has_api_key: bool,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_settings: Option<Value>,
 }
 
 /// Editable provider config returned by `GET /api/providers/config` —
@@ -100,6 +103,8 @@ pub struct ProviderMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct EditableProviderConfig {
     pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
     pub base_url: String,
     pub api: String,
     pub api_key: String,
@@ -111,26 +116,30 @@ pub struct EditableProviderConfig {
     pub model_settings: Option<Value>,
 }
 
-/// Body of `POST /api/providers/config`.
+/// One entry of the map submitted to `POST /api/providers/config`
+/// (`{ [providerId]: { type, displayName, baseUrl, apiKey, models, modelSettings } }`).
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveProviderConfigInput {
-    pub provider_id: String,
+    #[serde(rename = "type", alias = "api")]
+    pub provider_type: Option<String>,
     pub base_url: Option<String>,
-    pub api: Option<String>,
     pub api_key: Option<String>,
     pub models: Option<Vec<String>>,
     pub display_name: Option<String>,
     pub model_settings: Option<Value>,
 }
 
-/// Body of `POST /api/providers/fetch-models`.
+/// Body of `POST /api/providers/fetch-models` — `providerId` is optional;
+/// when absent the `baseUrl`/`apiKey`/`type` from the body are used directly.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchModelsInput {
-    pub provider_id: String,
+    #[serde(rename = "type", alias = "api")]
+    pub provider_type: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    pub provider_id: Option<String>,
 }
 
 /// Body of `POST /api/providers/test`.
@@ -152,13 +161,33 @@ pub struct SetPiAuthInput {
     pub api_key: Option<String>,
 }
 
-/// One agent preset (architect / coder / utility).
+/// One end (architect / coder / utility) of a dual-model agent preset.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPresetEndpoint {
+    pub provider_id: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+/// An agent preset — `{ [presetId]: AgentPreset }` in the web client
+/// contract. Arbitrary preset ids are allowed (e.g. `"opusplan"`).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPreset {
-    pub provider_id: String,
-    pub model: String,
-    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub architect: AgentPresetEndpoint,
+    #[serde(default)]
+    pub coder: AgentPresetEndpoint,
+    #[serde(default)]
+    pub max_sub_agents: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utility: Option<AgentPresetEndpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<bool>,
 }
 
 struct BuiltinProvider {
@@ -268,6 +297,17 @@ fn is_anthropic(provider_id: &str, api: &str, base_url: &str) -> bool {
         || api == "anthropic-messages"
         || provider_id == "anthropic"
         || base_url.contains("anthropic")
+}
+
+/// Web-client provider type for a resolved `api` kind: `anthropic-messages`
+/// (and friends) map to `"anthropic"`, everything else to
+/// `"openai-compatible"`.
+fn provider_type(api: &str) -> &'static str {
+    if api.contains("anthropic") {
+        "anthropic"
+    } else {
+        "openai-compatible"
+    }
 }
 
 pub struct PiProviderManager {
@@ -580,6 +620,65 @@ impl PiProviderManager {
             .unwrap_or_default()
     }
 
+    /// `modelSettings` map (model id → settings) for a provider, merged from
+    /// `locagens-providers-meta.json` plus details derived from
+    /// `models.json` / `models-store.json` (contextLimit, pricing).
+    fn model_settings_for(&self, provider_id: &str, models: &[ModelInfo]) -> Option<Value> {
+        let mut map = self
+            .meta_entry(provider_id)
+            .as_ref()
+            .and_then(|entry| entry.get("modelSettings"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for model in models {
+            if map.contains_key(&model.id) {
+                continue;
+            }
+            if let Some(settings) = Self::derived_model_settings(model) {
+                map.insert(model.id.clone(), settings);
+            }
+        }
+        if map.is_empty() {
+            None
+        } else {
+            Some(Value::Object(map))
+        }
+    }
+
+    /// Per-model settings derived from a merged `ModelInfo` (context window
+    /// and pricing tiers) — used when no UI-entered settings exist yet.
+    fn derived_model_settings(model: &ModelInfo) -> Option<Value> {
+        let mut settings = Map::new();
+        if let Some(context_limit) = model.context_window {
+            settings.insert("contextLimit".into(), json!(context_limit));
+        }
+        if let Some(cost) = model.cost.as_ref().and_then(Value::as_object) {
+            let rate = |key: &str| cost.get(key).and_then(Value::as_f64);
+            if rate("input").is_some() || rate("output").is_some() {
+                let mut tier = json!({});
+                if let Some(input) = rate("input") {
+                    tier["inputRate"] = json!(input);
+                }
+                if let Some(output) = rate("output") {
+                    tier["outputRate"] = json!(output);
+                }
+                if let Some(read) = rate("cacheRead") {
+                    tier["cacheReadRate"] = json!(read);
+                }
+                if let Some(write) = rate("cacheWrite") {
+                    tier["cacheWriteRate"] = json!(write);
+                }
+                settings.insert("pricing".into(), json!({ "tiers": [tier] }));
+            }
+        }
+        if settings.is_empty() {
+            None
+        } else {
+            Some(Value::Object(settings))
+        }
+    }
+
     /// Provider ids to expose: built-ins plus anything present in `auth.json`
     /// or `models.json`.
     fn provider_ids(&self) -> Vec<String> {
@@ -706,12 +805,14 @@ impl PiProviderManager {
         models
     }
 
-    /// All configured / authenticated providers for `GET /api/providers`.
+    /// All configured / authenticated providers for `GET /api/providers`, in
+    /// the web client's `ProviderMetadata[]` contract shape.
     pub async fn list_providers(&self) -> Vec<ProviderMetadata> {
-        let auth = self.read_auth_map();
         self.provider_ids()
             .into_iter()
             .map(|id| {
+                let api = self.resolve_api(&id);
+                let models = self.merged_models(&id);
                 let display_name = self
                     .meta_entry(&id)
                     .as_ref()
@@ -724,10 +825,9 @@ impl PiProviderManager {
                             .unwrap_or_else(|| id.clone())
                     });
                 ProviderMetadata {
-                    has_api_key: auth.contains_key(&id),
-                    models: self.merged_models(&id),
-                    base_url: self.resolve_base_url(&id),
-                    api: self.resolve_api(&id),
+                    kind: provider_type(&api).to_string(),
+                    models: models.iter().map(|model| model.id.clone()).collect(),
+                    model_settings: self.model_settings_for(&id, &models),
                     display_name,
                     id,
                 }
@@ -750,6 +850,7 @@ impl PiProviderManager {
                 id.clone(),
                 EditableProviderConfig {
                     id: id.clone(),
+                    kind: provider_type(&self.resolve_api(&id)).to_string(),
                     base_url: self.resolve_base_url(&id),
                     api: self.resolve_api(&id),
                     api_key: if has_api_key {
@@ -774,11 +875,28 @@ impl PiProviderManager {
         configs
     }
 
-    /// `POST /api/providers/config` — saves API keys to `auth.json`, custom
-    /// `baseUrl`/`models` to `models.json`, and UI metadata to
-    /// `locagens-providers-meta.json`.
-    pub fn save_config(&self, input: &SaveProviderConfigInput) -> Result<()> {
-        if input.provider_id.trim().is_empty() {
+    /// `POST /api/providers/config` — accepts the whole
+    /// `Record<providerId, ProviderConfig>` map the web client sends:
+    /// persists every entry (API keys → `auth.json`, `type`/`baseUrl`/
+    /// `models` → `models.json`, UI metadata →
+    /// `locagens-providers-meta.json`) and removes providers that previously
+    /// existed in the editable config but are missing from the submitted map
+    /// (including their `auth.json` credential).
+    pub fn save_configs(&self, entries: &HashMap<String, SaveProviderConfigInput>) -> Result<()> {
+        for (provider_id, entry) in entries {
+            self.save_single_provider(provider_id, entry)?;
+        }
+        self.delete_missing_providers(entries.keys())?;
+        Ok(())
+    }
+
+    /// Persists one provider entry: API key → `auth.json`,
+    /// `type`/`baseUrl`/`models` → `models.json`, displayName/modelSettings →
+    /// `locagens-providers-meta.json`. An `apiKey` equal to
+    /// [`PRESERVE_API_KEY`] keeps the existing credential untouched.
+    fn save_single_provider(&self, provider_id: &str, input: &SaveProviderConfigInput) -> Result<()> {
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
             anyhow::bail!("providerId is required");
         }
 
@@ -786,17 +904,33 @@ impl PiProviderManager {
         if let Some(api_key) = input.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
             if api_key != PRESERVE_API_KEY {
                 let mut auth = self.read_auth_map();
-                auth.insert(input.provider_id.clone(), serde_json::to_value(AuthCredential::api_key(api_key))?);
+                auth.insert(
+                    provider_id.to_string(),
+                    serde_json::to_value(AuthCredential::api_key(api_key))?,
+                );
                 self.write_auth_map(auth)?;
             }
         }
 
-        // 2. baseUrl / models / api → models.json.
+        // 2. type / baseUrl / models → models.json (`type: "anthropic"` is
+        //    stored as pi's `anthropic-messages` api kind).
+        let api = input
+            .provider_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                if t.eq_ignore_ascii_case("anthropic") {
+                    "anthropic-messages".to_string()
+                } else {
+                    t.to_string()
+                }
+            });
         let mut models_doc = self.read_models_json();
         if !models_doc.is_object() {
             models_doc = json!({});
         }
-        let needs_provider_entry = input.base_url.is_some() || input.models.is_some() || input.api.is_some();
+        let needs_provider_entry = input.base_url.is_some() || input.models.is_some() || api.is_some();
         if needs_provider_entry {
             let object = models_doc.as_object_mut().unwrap();
             let providers = object
@@ -805,7 +939,7 @@ impl PiProviderManager {
                 .as_object_mut()
                 .unwrap();
             let entry = providers
-                .entry(input.provider_id.clone())
+                .entry(provider_id.to_string())
                 .or_insert_with(|| json!({}))
                 .as_object_mut()
                 .unwrap();
@@ -817,7 +951,7 @@ impl PiProviderManager {
                     entry.remove("baseUrl");
                 }
             }
-            match input.api.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            match api.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
                 Some(api) => {
                     entry.insert("api".into(), json!(api));
                 }
@@ -857,7 +991,7 @@ impl PiProviderManager {
                 .as_object_mut()
                 .unwrap();
             let entry = providers
-                .entry(input.provider_id.clone())
+                .entry(provider_id.to_string())
                 .or_insert_with(|| json!({}))
                 .as_object_mut()
                 .unwrap();
@@ -873,78 +1007,159 @@ impl PiProviderManager {
         Ok(())
     }
 
+    /// Removes providers that previously existed in the editable config but
+    /// are missing from the submitted map: their `models.json` entry, UI
+    /// metadata and `auth.json` credential are all deleted.
+    fn delete_missing_providers<'a, I>(&self, kept: I) -> Result<()>
+    where
+        I: Iterator<Item = &'a String>,
+    {
+        let kept: Vec<&str> = kept.map(|id| id.as_str()).collect();
+        let removed: Vec<String> = self
+            .provider_ids()
+            .into_iter()
+            .filter(|id| !kept.contains(&id.as_str()))
+            .collect();
+        if removed.is_empty() {
+            return Ok(());
+        }
+        let mut models_doc = self.read_models_json();
+        let mut meta = Self::read_json(&self.meta_path());
+        let mut auth = self.read_auth_map();
+        for id in &removed {
+            if let Some(providers) = models_doc.get_mut("providers").and_then(Value::as_object_mut) {
+                providers.remove(id);
+            }
+            if let Some(providers) = meta.get_mut("providers").and_then(Value::as_object_mut) {
+                providers.remove(id);
+            }
+            auth.remove(id);
+        }
+        Self::write_json(&self.models_path(), &models_doc)?;
+        Self::write_json(&self.meta_path(), &meta)?;
+        self.write_auth_map(auth)?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Remote model fetching
     // ------------------------------------------------------------------
 
-    /// `POST /api/providers/fetch-models` — queries `{baseUrl}/models` with
-    /// the provider's resolved key and merges in `models-store.json` models.
-    pub async fn fetch_models(&self, input: &FetchModelsInput) -> Result<Vec<ModelInfo>> {
+    /// `POST /api/providers/fetch-models` — queries the provider's model
+    /// list endpoint (openai-compatible `GET {baseUrl}/models`, Anthropic
+    /// `/v1/models`) and returns plain model ids. When `providerId` is
+    /// missing, the `baseUrl`/`apiKey`/`type` from the request body are used
+    /// directly; when present, fetched ids are merged with the provider's
+    /// cached `models-store.json` models.
+    pub async fn fetch_models(&self, input: &FetchModelsInput) -> Result<Vec<String>> {
+        let provider_id = input
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
         let base_url = input
             .base_url
             .as_deref()
             .map(str::trim)
             .filter(|u| !u.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| self.resolve_base_url(&input.provider_id));
-        if base_url.is_empty() {
-            anyhow::bail!("No baseUrl configured for provider \"{}\"", input.provider_id);
-        }
-        let base_url = base_url.trim_end_matches('/');
-        let api = self.resolve_api(&input.provider_id);
+            .or_else(|| provider_id.as_ref().map(|id| self.resolve_base_url(id)));
+        let base_url = base_url
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("No baseUrl provided or configured"))?
+            .trim_end_matches('/')
+            .to_string();
 
-        let mut models: Vec<ModelInfo> = self.models_store_models(&input.provider_id);
+        // Anthropic when an explicit `type` says so, or inferred from the
+        // provider / base URL when `type` is absent.
+        let explicit_type = input
+            .provider_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        let anthropic = match explicit_type {
+            Some(t) => t.contains("anthropic"),
+            None => provider_id
+                .as_ref()
+                .map(|id| is_anthropic(id, &self.resolve_api(id), &base_url))
+                .unwrap_or_else(|| base_url.contains("anthropic")),
+        };
 
-        if !is_anthropic(&input.provider_id, &api, &base_url) {
-            let api_key = self
-                .resolve_api_key(&input.provider_id, input.api_key.as_deref())
-                .await;
+        let supplied_key = input
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+        let api_key = match supplied_key {
+            Some(key) => Some(key),
+            None => match provider_id.as_ref() {
+                Some(id) => self.resolve_api_key(id, None).await,
+                None => None,
+            },
+        };
+
+        let mut models: Vec<String> = provider_id
+            .as_ref()
+            .map(|id| {
+                self.models_store_models(id)
+                    .into_iter()
+                    .map(|model| model.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let request = if anthropic {
+            let url = if base_url.ends_with("/v1") {
+                format!("{base_url}/models")
+            } else {
+                format!("{base_url}/v1/models")
+            };
+            let mut request = self.http.get(url).header("anthropic-version", "2023-06-01");
+            if let Some(key) = api_key.as_ref().filter(|k| !k.is_empty()) {
+                request = request.header("x-api-key", key);
+            }
+            request
+        } else {
             let mut request = self.http.get(format!("{base_url}/models"));
             if let Some(key) = api_key.as_ref().filter(|k| !k.is_empty()) {
                 request = request.bearer_auth(key);
             }
-            let response = request.send().await?;
-            if !response.status().is_success() {
-                anyhow::bail!(
-                    "Model fetch failed with status {}",
-                    response.status()
-                );
-            }
-            let body: Value = response.json().await.unwrap_or(Value::Null);
-            let entries = match &body {
-                Value::Array(array) => array.clone(),
-                Value::Object(_) => body
-                    .get("data")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-                _ => Vec::new(),
+            request
+        };
+
+        let response = request.send().await?;
+        let status = response.status();
+        let body: Value = response.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            anyhow::bail!(
+                "Model fetch failed with status {status}: {}",
+                summarize_error(&body)
+            );
+        }
+        let entries: Vec<Value> = match &body {
+            Value::Array(array) => array.clone(),
+            Value::Object(_) => body
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for entry in &entries {
+            let id = match entry {
+                Value::String(id) => id.clone(),
+                _ => entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             };
-            for entry in entries {
-                let Some(id) = entry.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                if models.iter().any(|m| m.id == id) {
-                    continue;
-                }
-                models.push(ModelInfo {
-                    id: id.to_string(),
-                    name: entry
-                        .get("name")
-                        .or_else(|| entry.get("display_name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or(id)
-                        .to_string(),
-                    api: None,
-                    base_url: None,
-                    context_window: entry
-                        .get("context_window")
-                        .and_then(Value::as_i64),
-                    max_tokens: entry.get("max_tokens").and_then(Value::as_i64),
-                    reasoning: None,
-                    cost: None,
-                });
+            if id.is_empty() || models.iter().any(|existing| existing == &id) {
+                continue;
             }
+            models.push(id);
         }
 
         Ok(models)
@@ -1132,62 +1347,114 @@ impl PiProviderManager {
     // ------------------------------------------------------------------
 
     /// Default presets, used when `locagens-presets.json` is missing or
-    /// incomplete.
+    /// empty.
     fn default_presets() -> Map<String, Value> {
-        let preset = |model: &str| {
+        let block = |display_name: &str, model: &str| {
             json!({
-                "providerId": "opencode-go",
-                "model": model,
-                "reasoningEffort": Value::Null,
+                "displayName": display_name,
+                "architect": { "providerId": "opencode-go", "model": model },
+                "coder": { "providerId": "opencode-go", "model": model },
+                "maxSubAgents": 1,
             })
         };
         Map::from_iter([
-            ("architect".to_string(), preset("glm-5.3-flash")),
-            ("coder".to_string(), preset("glm-5.3-flash")),
-            ("utility".to_string(), preset("glm-5.3-flash")),
+            ("architect".to_string(), block("Architect", "glm-5.3-flash")),
+            ("coder".to_string(), block("Coder", "glm-5.3-flash")),
+            ("utility".to_string(), block("Utility", "glm-5.3-flash")),
         ])
     }
 
-    /// `GET /api/agent-presets` — presets from `locagens-presets.json`
-    /// overlaid on defaults.
-    pub fn get_presets(&self) -> Value {
-        let mut presets = Self::default_presets();
-        if let Value::Object(stored) = Self::read_json(&self.presets_path()) {
-            for (name, value) in stored {
-                if presets.contains_key(&name) {
-                    presets.insert(name, value);
-                }
-            }
+    /// Normalized `{ providerId, model, reasoningEffort? }` preset endpoint,
+    /// or `None` when the value is not a usable endpoint.
+    fn preset_endpoint(value: Option<&Value>) -> Option<Value> {
+        let value = value?;
+        let provider_id = value
+            .get("providerId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())?;
+        let model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())?;
+        let mut endpoint = json!({ "providerId": provider_id, "model": model });
+        if let Some(effort) = value
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+        {
+            endpoint["reasoningEffort"] = json!(effort);
         }
-        Value::Object(presets)
+        Some(endpoint)
     }
 
-    /// `PUT /api/agent-presets` — merges the submitted presets into
-    /// `locagens-presets.json`.
-    pub fn save_presets(&self, body: &Value) -> Result<Value> {
-        let Value::Object(submitted) = body else {
-            anyhow::bail!("Expected an object of preset name → AgentPreset");
+    /// Normalizes a stored preset block into the web client's `AgentPreset`
+    /// shape (`id`, `displayName`, `architect`, `coder`, `maxSubAgents`,
+    /// optional `utility`/`fallback`). Legacy single-model blocks
+    /// (`{ providerId, model, reasoningEffort }`) map onto both ends.
+    fn normalize_preset_block(id: &str, block: &Value) -> Value {
+        let architect = Self::preset_endpoint(block.get("architect"))
+            .or_else(|| Self::preset_endpoint(Some(block)))
+            .unwrap_or_else(|| json!({ "providerId": "", "model": "" }));
+        let coder = Self::preset_endpoint(block.get("coder"))
+            .or_else(|| Self::preset_endpoint(Some(block)))
+            .unwrap_or_else(|| architect.clone());
+        let mut preset = json!({
+            "id": id,
+            "displayName": block
+                .get("displayName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id),
+            "architect": architect,
+            "coder": coder,
+            "maxSubAgents": block.get("maxSubAgents").and_then(Value::as_u64).unwrap_or(1),
+        });
+        if let Some(utility) = Self::preset_endpoint(block.get("utility")) {
+            preset["utility"] = utility;
+        }
+        if block.get("fallback").and_then(Value::as_bool).unwrap_or(false) {
+            preset["fallback"] = json!(true);
+        }
+        preset
+    }
+
+    /// `GET /api/agent-presets` — the stored presets from
+    /// `locagens-presets.json` (or the defaults when the file is missing or
+    /// empty) as the `AgentPreset[]` array the web client expects, each item
+    /// carrying its `id` (the map key).
+    pub fn get_presets(&self) -> Vec<Value> {
+        let stored = Self::read_json(&self.presets_path());
+        let presets = match stored {
+            Value::Object(map) if !map.is_empty() => map,
+            _ => Self::default_presets(),
         };
-        let mut presets = Self::default_presets();
-        for (name, value) in submitted.iter() {
-            if !presets.contains_key(name) {
-                anyhow::bail!("Unknown preset name \"{name}\". Expected architect, coder or utility.");
+        presets
+            .iter()
+            .map(|(id, block)| Self::normalize_preset_block(id, block))
+            .collect()
+    }
+
+    /// `PUT /api/agent-presets` — replaces the stored presets with the
+    /// submitted `{ [presetId]: AgentPreset }` map. Arbitrary preset ids are
+    /// allowed (e.g. `"opusplan"`). The returned array mirrors
+    /// `GET /api/agent-presets`.
+    pub fn save_presets(&self, body: &Value) -> Result<Vec<Value>> {
+        let Value::Object(submitted) = body else {
+            anyhow::bail!("Expected an object of preset id → AgentPreset");
+        };
+        for (id, value) in submitted {
+            if id.trim().is_empty() {
+                anyhow::bail!("Preset id must not be empty");
             }
             serde_json::from_value::<AgentPreset>(value.clone())
-                .map_err(|err| anyhow::anyhow!("Invalid preset \"{name}\": {err}"))?;
+                .map_err(|err| anyhow::anyhow!("Invalid preset \"{id}\": {err}"))?;
         }
-        if let Value::Object(stored) = Self::read_json(&self.presets_path()) {
-            for (name, value) in stored {
-                if presets.contains_key(&name) {
-                    presets.insert(name, value);
-                }
-            }
-        }
-        for (name, value) in submitted {
-            presets.insert(name.clone(), value.clone());
-        }
-        Self::write_json(&self.presets_path(), &Value::Object(presets.clone()))?;
-        Ok(Value::Object(presets))
+        Self::write_json(&self.presets_path(), &Value::Object(submitted.clone()))?;
+        Ok(self.get_presets())
     }
 }
 
@@ -1203,6 +1470,9 @@ fn summarize_error(body: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
 
     fn temp_dirs(label: &str) -> (PathBuf, PathBuf) {
         let unique = uuid::Uuid::new_v4().to_string();
@@ -1273,18 +1543,23 @@ mod tests {
     fn builtin_catalog_and_configs_mask_keys() {
         let (agent, support) = temp_dirs("catalog");
         let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
-        assert!(manager.get_presets()["architect"]["model"] == "glm-5.3-flash");
-        manager
-            .save_config(&SaveProviderConfigInput {
-                provider_id: "anthropic".into(),
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "anthropic".to_string(),
+            SaveProviderConfigInput {
+                provider_type: Some("anthropic".into()),
                 api_key: Some("sk-ant-live-key".into()),
                 display_name: Some("Anthropic (work)".into()),
-                model_settings: Some(json!({ "temperature": 0.2 })),
+                model_settings: Some(json!({ "claude-sonnet-4-5": { "contextLimit": 200000 } })),
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
+        manager.save_configs(&entries).unwrap();
+
         let configs = manager.get_configs();
         let anthropic = configs.get("anthropic").unwrap();
+        assert_eq!(anthropic.kind, "anthropic");
         assert_eq!(anthropic.api_key, PRESERVE_API_KEY);
         assert!(anthropic.has_api_key);
         assert_eq!(anthropic.display_name.as_deref(), Some("Anthropic (work)"));
@@ -1296,7 +1571,18 @@ mod tests {
             .block_on(manager.list_providers());
         let anthropic_meta = providers.iter().find(|p| p.id == "anthropic").unwrap();
         assert_eq!(anthropic_meta.display_name, "Anthropic (work)");
-        assert!(anthropic_meta.has_api_key);
+        assert_eq!(anthropic_meta.kind, "anthropic");
+        assert!(anthropic_meta.models.contains(&"claude-sonnet-4-5".to_string()));
+        assert!(anthropic_meta.models.iter().all(|model| !model.is_empty()));
+        assert_eq!(
+            anthropic_meta.model_settings.as_ref().unwrap()["claude-sonnet-4-5"]["contextLimit"],
+            200000
+        );
+
+        // No API keys are ever included in the provider metadata.
+        let raw = serde_json::to_string(&providers).unwrap();
+        assert!(!raw.contains("sk-"));
+        assert!(!raw.contains("apiKey"));
 
         // Saved auth.json is a real credential file, not exposing metadata.
         let auth = PiProviderManager::read_json(&agent.join("auth.json"));
@@ -1306,23 +1592,372 @@ mod tests {
     }
 
     #[test]
-    fn presets_roundtrip_validation() {
+    fn provider_metadata_contract_shape() {
+        let (agent, support) = temp_dirs("meta");
+        std::fs::write(
+            agent.join("models-store.json"),
+            json!({
+                "openai": { "models": [
+                    { "id": "gpt-x", "name": "GPT X", "contextWindow": 128000, "cost": { "input": 1.5, "output": 6.0, "cacheRead": 0.15 } }
+                ]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            agent.join("models.json"),
+            json!({
+                "providers": {
+                    "acme": { "baseUrl": "https://acme.example/v1", "api": "anthropic-messages", "models": ["fast-model"] }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            support.join("locagens-providers-meta.json"),
+            json!({
+                "providers": {
+                    "anthropic": { "displayName": "Anthropic", "modelSettings": { "claude-opus-4-5": { "contextLimit": 200000 } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+
+        let providers = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.list_providers());
+
+        // models-store details derive contextLimit / pricing settings.
+        let openai = providers.iter().find(|p| p.id == "openai").unwrap();
+        assert_eq!(openai.kind, "openai-compatible");
+        assert!(openai.models.contains(&"gpt-x".to_string()));
+        let settings = openai.model_settings.as_ref().unwrap();
+        assert_eq!(settings["gpt-x"]["contextLimit"], 128000);
+        assert_eq!(settings["gpt-x"]["pricing"]["tiers"][0]["inputRate"], 1.5);
+        assert_eq!(settings["gpt-x"]["pricing"]["tiers"][0]["outputRate"], 6.0);
+        assert_eq!(settings["gpt-x"]["pricing"]["tiers"][0]["cacheReadRate"], 0.15);
+
+        // UI-entered meta settings win, and `type` is "anthropic".
+        let anthropic = providers.iter().find(|p| p.id == "anthropic").unwrap();
+        assert_eq!(anthropic.kind, "anthropic");
+        assert_eq!(anthropic.display_name, "Anthropic");
+        assert_eq!(
+            anthropic.model_settings.as_ref().unwrap()["claude-opus-4-5"]["contextLimit"],
+            200000
+        );
+
+        // `anthropic-messages` api maps to the "anthropic" client type.
+        let acme = providers.iter().find(|p| p.id == "acme").unwrap();
+        assert_eq!(acme.kind, "anthropic");
+        assert_eq!(acme.models, vec!["fast-model".to_string()]);
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[test]
+    fn config_map_save_deletes_missing_providers() {
+        let (agent, support) = temp_dirs("configs");
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            "anthropic".to_string(),
+            SaveProviderConfigInput {
+                api_key: Some("sk-ant".into()),
+                ..Default::default()
+            },
+        );
+        entries.insert(
+            "acme".to_string(),
+            SaveProviderConfigInput {
+                provider_type: Some("openai-compatible".into()),
+                base_url: Some("https://acme.example/v1".into()),
+                api_key: Some("sk-acme".into()),
+                models: Some(vec!["m1".into(), "m2".into()]),
+                display_name: Some("Acme".into()),
+                model_settings: Some(json!({ "m1": { "contextLimit": 4096 } })),
+            },
+        );
+        entries.insert(
+            "grox".to_string(),
+            SaveProviderConfigInput {
+                provider_type: Some("openai-compatible".into()),
+                base_url: Some("https://grox.example/v1".into()),
+                api_key: Some("sk-grox".into()),
+                display_name: Some("Grox".into()),
+                ..Default::default()
+            },
+        );
+        manager.save_configs(&entries).unwrap();
+
+        // Grox exists in the editable config after the first save.
+        assert!(manager.get_configs().contains_key("grox"));
+
+        let auth = PiProviderManager::read_json(&agent.join("auth.json"));
+        assert_eq!(auth["acme"]["key"], "sk-acme");
+        assert_eq!(auth["anthropic"]["key"], "sk-ant");
+        let models_doc = PiProviderManager::read_json(&agent.join("models.json"));
+        assert_eq!(models_doc["providers"]["acme"]["baseUrl"], "https://acme.example/v1");
+        assert_eq!(models_doc["providers"]["acme"]["api"], "openai-compatible");
+        let meta = PiProviderManager::read_json(&support.join("locagens-providers-meta.json"));
+        assert_eq!(meta["providers"]["acme"]["displayName"], "Acme");
+        assert_eq!(meta["providers"]["acme"]["modelSettings"]["m1"]["contextLimit"], 4096);
+
+        // The second map keeps only acme (with the preserve sentinel);
+        // anthropic and grox are missing, so they are deleted entirely.
+        let mut entries = HashMap::new();
+        entries.insert(
+            "acme".to_string(),
+            SaveProviderConfigInput {
+                api_key: Some(PRESERVE_API_KEY.into()),
+                ..Default::default()
+            },
+        );
+        manager.save_configs(&entries).unwrap();
+
+        let auth = PiProviderManager::read_json(&agent.join("auth.json"));
+        assert_eq!(auth["acme"]["key"], "sk-acme");
+        assert!(auth.get("anthropic").is_none());
+        assert!(auth.get("grox").is_none());
+        let models_doc = PiProviderManager::read_json(&agent.join("models.json"));
+        assert!(models_doc["providers"].get("grox").is_none());
+        assert!(models_doc["providers"].get("acme").is_some());
+        let meta = PiProviderManager::read_json(&support.join("locagens-providers-meta.json"));
+        assert!(meta["providers"].get("grox").is_none());
+        assert!(meta["providers"].get("acme").is_some());
+        assert!(!manager.get_configs().contains_key("grox"));
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    /// Tiny local HTTP server: serves queued JSON responses for sequential
+    /// requests and logs each raw request for assertions.
+    fn spawn_model_server(responses: Vec<Value>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let queue = Arc::new(Mutex::new(responses));
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                log_clone
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buffer).to_string());
+                let body = queue
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), log)
+    }
+
+    #[tokio::test]
+    async fn fetch_models_openai_compatible_without_provider_id() {
+        let (agent, support) = temp_dirs("fetch-openai");
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+        let (base_url, log) = spawn_model_server(vec![json!({
+            "data": [ { "id": "gpt-remote-1" }, { "id": "gpt-remote-2" } ]
+        })]);
+
+        let models = manager
+            .fetch_models(&FetchModelsInput {
+                provider_type: Some("openai-compatible".into()),
+                base_url: Some(base_url),
+                api_key: Some("sk-openai-test".into()),
+                provider_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            models,
+            vec!["gpt-remote-1".to_string(), "gpt-remote-2".to_string()]
+        );
+
+        let requests = log.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(request.starts_with("GET /models "), "unexpected request: {request}");
+        assert!(request.to_lowercase().contains("authorization: bearer sk-openai-test"));
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_anthropic_uses_v1_models() {
+        let (agent, support) = temp_dirs("fetch-anthropic");
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+        let (base_url, log) = spawn_model_server(vec![json!({
+            "data": [ { "id": "claude-remote" } ]
+        })]);
+
+        let models = manager
+            .fetch_models(&FetchModelsInput {
+                provider_type: Some("anthropic".into()),
+                base_url: Some(base_url),
+                api_key: Some("sk-ant-test".into()),
+                provider_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(models, vec!["claude-remote".to_string()]);
+
+        let requests = log.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(request.starts_with("GET /v1/models "), "unexpected request: {request}");
+        assert!(request.to_lowercase().contains("x-api-key: sk-ant-test"));
+        assert!(request.to_lowercase().contains("anthropic-version: 2023-06-01"));
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_with_provider_id_merges_store() {
+        let (agent, support) = temp_dirs("fetch-merge");
+        std::fs::write(
+            agent.join("models-store.json"),
+            json!({ "mystore": { "models": [ { "id": "stored-model" } ] } }).to_string(),
+        )
+        .unwrap();
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+        let (base_url, log) = spawn_model_server(vec![json!({
+            "data": [ { "id": "stored-model" }, { "id": "remote-model" } ]
+        })]);
+
+        let models = manager
+            .fetch_models(&FetchModelsInput {
+                provider_type: Some("openai-compatible".into()),
+                base_url: Some(base_url),
+                api_key: None,
+                provider_id: Some("mystore".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            models,
+            vec!["stored-model".to_string(), "remote-model".to_string()]
+        );
+
+        let requests = log.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /models "));
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[test]
+    fn presets_defaults_when_missing() {
+        let (agent, support) = temp_dirs("presets-default");
+        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+        let presets = manager.get_presets();
+        assert!(presets.len() >= 3);
+        assert!(presets.iter().all(|preset| preset.get("id").is_some()));
+        assert!(presets
+            .iter()
+            .all(|preset| preset["architect"]["model"] == "glm-5.3-flash"));
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[test]
+    fn presets_roundtrip_arbitrary_ids() {
         let (agent, support) = temp_dirs("presets");
         let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+
+        // Arbitrary preset ids (not just architect/coder/utility) are saved.
         let saved = manager
             .save_presets(&json!({
-                "architect": { "providerId": "anthropic", "model": "claude-sonnet-4-5", "reasoningEffort": "high" }
+                "opusplan": {
+                    "displayName": "Opus Plan",
+                    "architect": { "providerId": "anthropic", "model": "claude-opus-4-5", "reasoningEffort": "high" },
+                    "coder": { "providerId": "opencode-go", "model": "glm-5.3" },
+                    "maxSubAgents": 2,
+                    "utility": { "providerId": "opencode-go", "model": "glm-5.3-flash" },
+                    "fallback": true
+                }
             }))
             .unwrap();
-        assert_eq!(saved["architect"]["model"], "claude-sonnet-4-5");
+        let opusplan = saved
+            .iter()
+            .find(|preset| preset["id"] == "opusplan")
+            .unwrap();
+        assert_eq!(opusplan["displayName"], "Opus Plan");
+        assert_eq!(opusplan["architect"]["model"], "claude-opus-4-5");
+        assert_eq!(opusplan["architect"]["reasoningEffort"], "high");
+        assert_eq!(opusplan["coder"]["model"], "glm-5.3");
+        assert_eq!(opusplan["maxSubAgents"], 2);
+        assert_eq!(opusplan["utility"]["model"], "glm-5.3-flash");
+        assert_eq!(opusplan["fallback"], true);
 
-        // Unknown preset names are rejected.
-        assert!(manager
+        // The saved map round-trips through locagens-presets.json.
+        let reloaded = manager.get_presets();
+        let reloaded_opusplan = reloaded
+            .iter()
+            .find(|preset| preset["id"] == "opusplan")
+            .unwrap();
+        assert_eq!(reloaded_opusplan["architect"]["providerId"], "anthropic");
+
+        // Saving a new map replaces the stored presets entirely.
+        let replaced = manager
             .save_presets(&json!({
-                "bogus": { "providerId": "x", "model": "y" }
+                "tiny": {
+                    "displayName": "Tiny",
+                    "architect": { "providerId": "openai", "model": "gpt-5" },
+                    "coder": { "providerId": "openai", "model": "gpt-5" },
+                    "maxSubAgents": 1
+                }
             }))
-            .is_err());
-        assert_eq!(manager.get_presets()["coder"]["model"], "glm-5.3-flash");
+            .unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0]["id"], "tiny");
+
+        // Legacy single-model blocks stored on disk normalize onto both ends.
+        std::fs::write(
+            support.join("locagens-presets.json"),
+            json!({ "old": { "providerId": "google", "model": "gemini-2.5-pro" } }).to_string(),
+        )
+        .unwrap();
+        let presets = manager.get_presets();
+        let old = presets
+            .iter()
+            .find(|preset| preset["id"] == "old")
+            .unwrap();
+        assert_eq!(old["architect"]["model"], "gemini-2.5-pro");
+        assert_eq!(old["coder"]["model"], "gemini-2.5-pro");
+        assert_eq!(old["displayName"], "old");
+        assert_eq!(old["maxSubAgents"], 1);
+
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);
     }
