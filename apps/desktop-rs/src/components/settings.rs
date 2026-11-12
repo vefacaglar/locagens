@@ -1,5 +1,5 @@
 //! Settings page: every tab is wired in-process to `locagens_core::api` —
-//! providers, pi auth accounts, permissions, memory, skills, MCP servers,
+//! Codex / Locagens auth & provider accounts, permissions, memory, skills, MCP servers,
 //! plugins and security.
 
 use crate::state_ui::{core, UiStore};
@@ -78,7 +78,7 @@ fn ProvidersTab() -> Element {
 
     if providers.is_empty() {
         return rsx! {
-            div { class: "settings-empty", "No providers configured. Add one via `pi auth login` or the provider config file." }
+            div { class: "settings-empty", "No providers configured. Add one via `lcgn auth login` or the provider config file (~/.locagens/auth.json, Codex-compatible with ~/.codex/auth.json)." }
         };
     }
     rsx! {
@@ -125,7 +125,7 @@ fn ProviderRow(provider: ProviderMetadata, selected: bool) -> Element {
     }
 }
 
-/// Native pi auth.json accounts.
+/// Native auth.json accounts (~/.locagens, Codex / pi fallbacks).
 #[component]
 fn AuthTab() -> Element {
     let accounts: Signal<Vec<Value>> = use_signal(Vec::new);
@@ -139,7 +139,7 @@ fn AuthTab() -> Element {
     let data = accounts.read().clone();
     if data.is_empty() {
         return rsx! {
-            div { class: "settings-empty", "No pi auth accounts found. Run `pi auth login` in a terminal." }
+            div { class: "settings-empty", "No auth accounts found. Run `lcgn auth login` in a terminal (reads ~/.locagens/auth.json with ~/.codex + ~/.pi fallbacks)." }
         };
     }
     rsx! {

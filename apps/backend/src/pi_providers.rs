@@ -1,12 +1,16 @@
-//! Pure Rust `pi` provider, auth & model engine.
+//! Pure Rust provider, auth & model engine (Codex / Locagens compatible).
 //!
-//! Reads and writes `pi`'s configuration files under the `pi` agent directory
-//! (`~/.pi/agent`, overridable via `PI_CODING_AGENT_DIR`):
+//! Reads and writes the primary agent config directory `~/.locagens`
+//! (`$LOCAGENS_HOME`, module alias kept as "pi agent dir" for callers):
 //!
 //! - `auth.json` — map of provider id → credential
 //!   (`{ "type": "api_key", "key": "..." }`, `!command`, `$ENV_VAR` or OAuth).
 //! - `models.json` — custom provider configs & model overrides.
-//! - `models-store.json` — `pi`'s cached dynamic model catalog.
+//! - `models-store.json` — cached dynamic model catalog.
+//!
+//! Read-only credential fallbacks: `~/.codex` (`$CODEX_HOME`: `auth.json`
+//! `OPENAI_API_KEY` and `config.toml` `[model_providers.*]`) and the legacy
+//! `~/.pi/agent` directory, so existing credentials keep working.
 //!
 //! Plus Locagens UI metadata under the app-support dir:
 //! `locagens-providers-meta.json` (display names / model settings).
@@ -261,6 +265,28 @@ fn builtin(id: &str) -> Option<&'static BuiltinProvider> {
     BUILTINS.iter().find(|provider| provider.id == id)
 }
 
+/// Maps a fallback-chain `auth.json` entry onto a Locagens provider
+/// credential. Codex stores `{ "OPENAI_API_KEY": "sk-…", "tokens": … }` while
+/// Locagens/`pi` store `{ "<provider>": { "type": "api_key", "key": … } }`.
+fn codex_credential(key: &str, value: &Value) -> Vec<(String, Value)> {
+    if key == "OPENAI_API_KEY" {
+        if let Some(api_key) = value.as_str().filter(|k| !k.trim().is_empty()) {
+            return vec![(
+                "openai".to_string(),
+                json!({ "type": "api_key", "key": api_key.trim() }),
+            )];
+        }
+        return Vec::new();
+    }
+    // pi-style credential entries pass through keyed by provider id.
+    match value {
+        Value::Object(_) if value.get("type").is_some() || value.get("key").is_some() => {
+            vec![(key.to_string(), value.clone())]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// True when a provider talks the Anthropic Messages API.
 fn is_anthropic(provider_id: &str, api: &str, base_url: &str) -> bool {
     api == "anthropic"
@@ -281,7 +307,10 @@ fn provider_type(api: &str) -> &'static str {
 }
 
 pub struct PiProviderManager {
-    pi_agent_dir: PathBuf,
+    /// Primary agent config directory (`~/.locagens`). Writes go here.
+    primary_dir: PathBuf,
+    /// Read-only credential/config fallbacks: `~/.codex`, `~/.pi/agent`.
+    fallback_dirs: Vec<PathBuf>,
     app_support_dir: PathBuf,
     http: reqwest::Client,
     /// Cache of `!command` stdout results, keyed by command string.
@@ -290,16 +319,28 @@ pub struct PiProviderManager {
 
 impl PiProviderManager {
     pub fn new() -> Self {
-        Self::with_dirs(paths::pi_agent_dir(), paths::app_support_dir())
+        Self::with_chain(
+            paths::locagens_home(),
+            paths::app_support_dir(),
+            vec![paths::codex_home(), paths::pi_agent_dir()],
+        )
     }
 
+    /// Single-directory constructor (tests, CLI overrides).
     pub fn with_dirs(pi_agent_dir: PathBuf, app_support_dir: PathBuf) -> Self {
+        Self::with_chain(pi_agent_dir, app_support_dir, Vec::new())
+    }
+
+    /// Primary directory plus read-only fallback chain
+    /// (`~/.locagens` → `~/.codex` → `~/.pi/agent` in production).
+    pub fn with_chain(primary_dir: PathBuf, app_support_dir: PathBuf, fallback_dirs: Vec<PathBuf>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_default();
         Self {
-            pi_agent_dir,
+            primary_dir,
+            fallback_dirs,
             app_support_dir,
             http,
             command_cache: Mutex::new(HashMap::new()),
@@ -311,15 +352,15 @@ impl PiProviderManager {
     // ------------------------------------------------------------------
 
     fn auth_path(&self) -> PathBuf {
-        self.pi_agent_dir.join("auth.json")
+        self.primary_dir.join("auth.json")
     }
 
     fn models_path(&self) -> PathBuf {
-        self.pi_agent_dir.join("models.json")
+        self.primary_dir.join("models.json")
     }
 
     fn models_store_path(&self) -> PathBuf {
-        self.pi_agent_dir.join("models-store.json")
+        self.primary_dir.join("models-store.json")
     }
 
     fn meta_path(&self) -> PathBuf {
@@ -349,10 +390,31 @@ impl PiProviderManager {
     }
 
     fn read_auth_map(&self) -> Map<String, Value> {
-        match Self::read_json(&self.auth_path()) {
-            Value::Object(map) => map,
-            _ => Map::new(),
+        // Fallback chain first (codex + pi), primary last so it wins.
+        let mut merged = Map::new();
+        for directory in self.fallback_dirs.iter() {
+            let path = directory.join("auth.json");
+            match Self::read_json(&path) {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        let credential = codex_credential(&key, &value);
+                        for (provider_id, entry) in credential {
+                            merged.entry(provider_id).or_insert(entry);
+                        }
+                    }
+                }
+                _ => continue,
+            }
         }
+        match Self::read_json(&self.auth_path()) {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    merged.insert(key, value);
+                }
+            }
+            _ => {}
+        }
+        merged
     }
 
     fn write_auth_map(&self, map: Map<String, Value>) -> Result<()> {
@@ -363,14 +425,74 @@ impl PiProviderManager {
         Self::read_json(&self.models_path())
     }
 
-    /// `models.json` entry for a provider (`providers.<id>`), if any.
+    /// `models.json` entry for a provider (`providers.<id>`), if any. Falls
+    /// back to fallback-chain `models.json` files and to Codex's
+    /// `config.toml` `[model_providers.*]` entries.
     fn models_json_provider(&self, provider_id: &str) -> Option<Map<String, Value>> {
         let models = self.read_models_json();
-        models
-            .get("providers")?
-            .get(provider_id)?
-            .as_object()
+        if let Some(entry) = models
+            .get("providers")
+            .and_then(|providers| providers.get(provider_id))
+            .and_then(Value::as_object)
             .cloned()
+        {
+            return Some(entry);
+        }
+        for directory in &self.fallback_dirs {
+            let models = Self::read_json(&directory.join("models.json"));
+            if let Some(entry) = models
+                .get("providers")
+                .and_then(|providers| providers.get(provider_id))
+                .and_then(Value::as_object)
+                .cloned()
+            {
+                return Some(entry);
+            }
+        }
+        self.codex_config_providers()
+            .get(provider_id)
+            .and_then(Value::as_object)
+            .cloned()
+    }
+
+    /// `[model_providers.*]` entries from Codex `config.toml` fallback
+    /// directories, converted to `models.json`-shaped entries.
+    fn codex_config_providers(&self) -> Map<String, Value> {
+        let mut result = Map::new();
+        for directory in &self.fallback_dirs {
+            let Ok(raw) = std::fs::read_to_string(directory.join("config.toml")) else {
+                continue;
+            };
+            let Ok(doc) = toml::from_str::<toml::Value>(&raw) else {
+                continue;
+            };
+            let Some(providers) = doc.get("model_providers").and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (name, entry) in providers {
+                let base_url = entry
+                    .get("base_url")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default();
+                let env_key = entry
+                    .get("env_key")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default();
+                let mut converted = Map::new();
+                converted.insert("name".into(), json!(name));
+                if !base_url.is_empty() {
+                    converted.insert("baseUrl".into(), json!(base_url));
+                }
+                if !env_key.is_empty() {
+                    converted.insert("envKey".into(), json!(env_key));
+                }
+                // Codex `wire_api` ("chat" / "responses") maps onto the
+                // OpenAI-compatible chat-completions adapter.
+                converted.insert("api".into(), json!("openai-compatible"));
+                result.insert(name.clone(), Value::Object(converted));
+            }
+        }
+        result
     }
 
     // ------------------------------------------------------------------
@@ -408,6 +530,18 @@ impl PiProviderManager {
                     let resolved = self.expand_key_value(key, provider_id).await;
                     if !resolved.is_empty() {
                         return Some(resolved);
+                    }
+                }
+            }
+        }
+
+        // Codex `config.toml` `env_key` fallback.
+        if let Some(entry) = self.models_json_provider(provider_id) {
+            if let Some(env_key) = entry.get("envKey").and_then(Value::as_str).filter(|k| !k.is_empty()) {
+                if let Ok(value) = std::env::var(env_key) {
+                    let value = value.trim().to_string();
+                    if !value.is_empty() {
+                        return Some(value);
                     }
                 }
             }
@@ -658,8 +792,8 @@ impl PiProviderManager {
         }
     }
 
-    /// Provider ids to expose: built-ins plus anything present in `auth.json`
-    /// or `models.json`.
+    /// Provider ids to expose: built-ins plus anything present in `auth.json`,
+    /// `models.json` or Codex `config.toml`.
     fn provider_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = BUILTINS.iter().map(|p| p.id.to_string()).collect();
         for key in self.read_auth_map().keys() {
@@ -672,6 +806,11 @@ impl PiProviderManager {
                 if !ids.contains(key) {
                     ids.push(key.clone());
                 }
+            }
+        }
+        for key in self.codex_config_providers().keys() {
+            if !ids.contains(key) {
+                ids.push(key.clone());
             }
         }
         ids

@@ -1,0 +1,54 @@
+{
+  // Locagens debug configurations. cppdbg/gdb uses the w64devkit gdb; the
+  // CodeLLDB entries work on any platform when the `vadimcn.vscode-lldb`
+  // extension is installed.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Locagens Desktop (cppdbg / gdb)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/locagens.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${env:USERPROFILE}/w64devkit/w64devkit/bin/gdb.exe",
+      "preLaunchTask": "cargo: build desktop (debug)"
+    },
+    {
+      "name": "Debug lcgn CLI (cppdbg / gdb)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/lcgn.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "miDebuggerPath": "${env:USERPROFILE}/w64devkit/w64devkit/bin/gdb.exe",
+      "preLaunchTask": "cargo: build lcgn CLI (debug)"
+    },
+    {
+      "name": "Debug Locagens Desktop (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/locagens",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build desktop (debug)"
+    },
+    {
+      "name": "Debug lcgn CLI --list-models (CodeLLDB)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/lcgn",
+      "args": ["--list-models"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build lcgn CLI (debug)"
+    }
+  ]
+}

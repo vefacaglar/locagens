@@ -10,10 +10,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::AsyncReadExt;
-use tokio::process::Child;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin};
 
 const MAX_LOGS_PER_PROCESS: usize = 2000;
+
+/// One poll result of an exec session (`exec_command` / `write_stdin`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecPoll {
+    pub output: String,
+    /// `"running"` or `"exited"`.
+    pub status: String,
+    pub exit_code: Option<i32>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +52,15 @@ struct Managed {
     command: String,
     project_path: PathBuf,
     env: HashMap<String, String>,
+    /// Interactive stdin pipe (only for `spawn_with_stdin` sessions).
+    stdin: Option<ChildStdin>,
+    /// Whether this session was spawned with a piped stdin.
+    stdin_pipe: bool,
+    /// When true the child starts with a cleared environment and only the
+    /// (secret-stripped) variables supplied in `env` — used by exec sessions.
+    env_clean: bool,
+    /// Read cursor into `logs` for incremental `poll_output` calls.
+    read_cursor: usize,
 }
 
 pub struct ProcessManager {
@@ -108,10 +127,112 @@ impl ProcessManager {
             command: command.trim().to_string(),
             project_path: project_path.clone(),
             env: env.unwrap_or_default(),
+            stdin: None,
+            stdin_pipe: false,
+            env_clean: false,
+            read_cursor: 0,
         }));
         self.lock_processes().insert(id.clone(), managed);
         self.start_child(&id);
         self.get(&id).unwrap_or(info)
+    }
+
+    /// Like [`spawn`](Self::spawn) but pipes the child's stdin so interactive
+    /// exec sessions can feed characters via [`write_stdin`](Self::write_stdin).
+    pub fn spawn_with_stdin(
+        self: &Arc<Self>,
+        command: &str,
+        project_path: PathBuf,
+        env: Option<HashMap<String, String>>,
+    ) -> ProcessInfo {
+        let id = format!(
+            "proc-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            self.counter.fetch_add(1, Ordering::Relaxed)
+        );
+        let info = ProcessInfo {
+            id: id.clone(),
+            command: command.trim().to_string(),
+            project_path: project_path.to_string_lossy().to_string(),
+            status: "running".to_string(),
+            started_at: now_iso(),
+            stopped_at: None,
+            exit_code: None,
+            pid: None,
+        };
+        let managed = Arc::new(Mutex::new(Managed {
+            info: info.clone(),
+            logs: Vec::new(),
+            command: command.trim().to_string(),
+            project_path,
+            env: env.unwrap_or_default(),
+            stdin: None,
+            stdin_pipe: true,
+            env_clean: true,
+            read_cursor: 0,
+        }));
+        self.lock_processes().insert(id.clone(), managed);
+        self.start_child(&id);
+        self.get(&id).unwrap_or(info)
+    }
+
+    /// Writes characters to an interactive session's stdin.
+    pub async fn write_stdin(&self, id: &str, chars: &str) -> bool {
+        let Some(managed) = self.get_arc(id) else {
+            return false;
+        };
+        let mut pipe = {
+            let mut m = managed.lock().expect("managed process poisoned");
+            m.stdin.take()
+        };
+        if pipe.is_none() {
+            return false;
+        }
+        let result = match pipe.as_mut() {
+            Some(stdin) => {
+                let write = stdin.write_all(chars.as_bytes()).await;
+                if write.is_ok() {
+                    stdin.flush().await.is_ok()
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        // Only put the pipe back when the write succeeded (broken pipes are
+        // dropped so later writes fail fast).
+        if result {
+            managed.lock().expect("managed process poisoned").stdin = pipe;
+        }
+        result
+    }
+
+    /// Drains new output for `id` since the last poll and reports the current
+    /// status (`running` / `exited` from the exec-session point of view).
+    pub fn poll_output(&self, id: &str, max_chars: usize) -> Option<ExecPoll> {
+        let managed = self.get_arc(id)?;
+        let mut m = managed.lock().expect("managed process poisoned");
+        let mut output = String::new();
+        for entry in m.logs.iter().skip(m.read_cursor) {
+            let text = format!("[{}] {}", entry.stream, entry.text);
+            if output.len() + text.len() > max_chars {
+                output.push_str("... (output truncated)\n");
+                break;
+            }
+            output.push_str(&text);
+        }
+        m.read_cursor = m.logs.len();
+        let status = if m.info.status == "running" { "running" } else { "exited" };
+        Some(ExecPoll {
+            output: output.trim_end().to_string(),
+            status: status.to_string(),
+            exit_code: m.info.exit_code,
+        })
+    }
+
+    /// Removes a finished session from the registry.
+    pub fn drop_session(&self, id: &str) -> bool {
+        self.lock_processes().remove(id).is_some()
     }
 
     /// Starts (or restarts) the child process for an existing entry.
@@ -133,12 +254,23 @@ impl ProcessManager {
             c.arg("-c").arg(&command);
             c
         };
+        let stdin_piped = managed.lock().expect("managed process poisoned").stdin_pipe;
         cmd.current_dir(&project_path)
             .env("FORCE_COLOR", "1")
-            .stdin(std::process::Stdio::null())
+            .stdin(if stdin_piped {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(false);
+        let env_clean = managed.lock().expect("managed process poisoned").env_clean;
+        if env_clean {
+            // Exec sessions start from a stripped environment: secrets never
+            // reach child processes.
+            cmd.env_clear();
+        }
         for (key, value) in &env {
             cmd.env(key, value);
         }
@@ -148,12 +280,14 @@ impl ProcessManager {
                 let pid = child.id();
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
+                let stdin = if stdin_piped { child.stdin.take() } else { None };
                 {
                     let mut m = managed.lock().expect("managed process poisoned");
                     m.info.pid = pid;
                     m.info.status = "running".to_string();
                     m.info.stopped_at = None;
                     m.info.exit_code = None;
+                    m.stdin = stdin;
                 }
                 self.append_log(
                     id,

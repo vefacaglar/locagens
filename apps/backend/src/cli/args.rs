@@ -85,7 +85,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Manage provider credentials (~/.pi/agent/auth.json)
+    /// Manage provider credentials (Codex / Locagens Auth & Providers: ~/.locagens/auth.json, Codex-compatible with ~/.codex/auth.json + ~/.pi/agent fallback)
     Auth {
         #[command(subcommand)]
         action: AuthAction,

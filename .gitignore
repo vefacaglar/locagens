@@ -136,6 +136,8 @@ tsconfig.tsbuildinfo
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.example.json
+!.vscode/tasks.json
+!.vscode/launch.json
 .idea/
 *.iml
 *.ipr

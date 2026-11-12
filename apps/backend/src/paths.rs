@@ -124,3 +124,43 @@ pub fn pi_agent_dir() -> PathBuf {
     p.push("agent");
     p
 }
+
+/// Primary agent config directory: `~/.locagens` (`$LOCAGENS_HOME` override).
+/// Auth (`auth.json`) and provider config (`models.json`) live here; codex and
+/// `pi` directories are consulted as read-only fallbacks.
+pub fn locagens_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("LOCAGENS_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    home_dir().join(".locagens")
+}
+
+/// Codex home (`$CODEX_HOME` or `~/.codex`) — read-only fallback for
+/// `auth.json` (`OPENAI_API_KEY` / tokens) and `config.toml`
+/// (`[model_providers.*]`).
+pub fn codex_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("CODEX_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    home_dir().join(".codex")
+}
+
+/// `~/.codex/auth.json`.
+pub fn codex_auth_path() -> PathBuf {
+    codex_home().join("auth.json")
+}
+
+/// `~/.codex/config.toml`.
+pub fn codex_config_path() -> PathBuf {
+    codex_home().join("config.toml")
+}
+
+/// The provider-credential fallback chain, primary first:
+/// `~/.locagens` → `~/.codex` → `~/.pi/agent`.
+pub fn agent_dir_chain() -> Vec<PathBuf> {
+    vec![locagens_home(), codex_home(), pi_agent_dir()]
+}

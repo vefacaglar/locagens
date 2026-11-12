@@ -122,3 +122,11 @@ files (`projects.json`, `permissions.json`, `memory.json`,
 `usage_logs.jsonl`) are serialized with an advisory lock on `<data>/.lock`
 and re-read from disk under the lock, so interleaved writes lose nothing.
 Per-run files under `sessions/<run_id>/` are private and need no locking.
+
+## Auth & providers (Codex / Locagens compatible)
+
+`lcgn auth login` stores credentials in `~/.locagens/auth.json`
+(`$LOCAGENS_HOME`). Reads fall back to Codex's `~/.codex/auth.json`
+(`OPENAI_API_KEY`, `config.toml` `[model_providers.*]`) and the legacy
+`~/.pi/agent/auth.json` / `models.json`, so existing credentials on the
+machine keep working out of the box.

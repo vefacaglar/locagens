@@ -260,3 +260,59 @@ direct git integration
 manual approval checkpoints beyond the permission flow
 multi-user auth / cloud deployment
 ```
+
+## Phase 9 — Codex Harness Architecture (implemented)
+
+Locagens now ships the Codex tool harness (ported from `codex-rs`):
+
+- **`apply_patch`** (`orchestrator/apply_patch.rs`): full `*** Begin Patch` …
+  `*** End Patch` parser (add / delete / update / move, multi-chunk updates,
+  `@@ context`, `*** End of File`), the fuzzy `seek_sequence` matcher (exact →
+  `trim_end` → `trim` → Unicode-punctuation normalization), workspace-safe
+  application, `preview_patch` and Codex's exact
+  `Success. Updated the following files:` summary. Every target/move path is
+  validated through `safe_path`, so patches cannot escape the workspace.
+- **`exec_command` / `write_stdin`** (unified exec): commands run through the
+  ProcessManager with a secret-stripped environment; they return
+  `{ exit_code, output, wall_time_ms }` when they finish within
+  `yield_time_ms` (default 10000 ms, clamped 500..60000) and otherwise
+  register an interactive session the model can drive with `write_stdin`.
+- **Command safety & policy** (`orchestrator/command_safety.rs`): Codex's
+  `ApprovalPolicy` (`untrusted` / `on-request` / `on-failure` / `never`) and
+  `SandboxMode` (`read-only` / `workspace-write` / `danger-full-access`)
+  mapped from Locagens modes (`chat`/`plan` → read-only, `accept_edits` →
+  workspace-write + on-request, `ask_permissions` → untrusted, `auto` →
+  danger-full-access + never). Known-safe read-only commands (`git status`,
+  `rg`, `cargo check`, …) run without prompting in `accept_edits`; dangerous
+  commands (`rm -rf`, `git reset --hard`, `sudo`, …) always prompt.
+- **Hierarchical `AGENTS.md` discovery** (`orchestrator/agents_md.rs`): walks
+  from the git root down to the cwd picking at most one doc per level
+  (`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` > `.agents.md`), joined
+  with `
+
+--- project-doc ---
+
+` under a 32 KiB budget and injected into
+  the system prompt.
+- **`<environment_context>`** (`orchestrator/env_context.rs`): Codex-format
+  XML block (cwd / shell / approval_policy / sandbox_mode / network_access /
+  workspace_roots / current_date) seeded as the first user message of a run.
+- **`TurnDiffTracker`** (`orchestrator/turn_diff_tracker.rs`): snapshots file
+  baselines before mutations (`apply_patch`, `write_file`, `edit_file`,
+  `delete_file`, `move_file`) and streams `turn_diff_updated` events with the
+  aggregate unified diff and changed-file count.
+- **Context compaction** (`orchestrator/compact.rs`): automatic compaction
+  when the estimated input tokens exceed 90k (also on demand via
+  `compact_context`): older history is summarized with Codex's
+  SUMMARIZATION_PROMPT and replaced by a `[Compacted context summary]` block
+  while the last 8 messages stay intact.
+- **Codex sub-agent tools**: `spawn_agent` (background agent with id),
+  `wait_agent`, `send_input`, `close_agent`, `list_agents`, plus
+  `request_user_input` (Codex question schema) and `view_image`.
+- **Config & auth**: the primary agent directory is now `~/.locagens`
+  (`$LOCAGENS_HOME`); `~/.codex` (`$CODEX_HOME`: `auth.json` OPENAI_API_KEY
+  and `config.toml` `[model_providers.*]`) and the legacy `~/.pi/agent`
+  directory are read as credential/config fallbacks.
+- **`.vscode/tasks.json` + `.vscode/launch.json`**: w64devkit PATH, rustup-run
+  GNU toolchain tasks (check/build/test/run) and cppdbg/gdb + CodeLLDB debug
+  configurations for the desktop app and the `lcgn` CLI.

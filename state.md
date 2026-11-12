@@ -306,16 +306,76 @@ Update this file continuously as phases complete.
   pure Rust streaming agent loop with workspace tools, permission gating, `spawn_agents`
   fan-out, usage logs with cost.
 - Binaries: **`locagens`** (desktop app) and **`lcgn`** (CLI).
-- Tests: **69 passing** across the workspace — 47 `locagens_core` lib unit tests,
-  4 `lcgn` integration tests (mock OpenAI-compatible server), 18 `locagens-desktop`
-  unit tests (11 markdown + 7 theme) — zero warnings, `cargo build --release --workspace`
-  clean on `stable-x86_64-pc-windows-gnu` + w64devkit.
+- Tests: **98 passing** across the workspace — 76 `locagens_core` lib unit tests
+  (incl. the Phase 9 Codex harness suites), 4 `lcgn` integration tests (mock
+  OpenAI-compatible server), 18 `locagens-desktop` unit tests (11 markdown +
+  7 theme) — zero warnings, `cargo build --release --workspace` clean on
+  `stable-x86_64-pc-windows-gnu` + w64devkit.
 - CI: `cargo test/build --release` for both crates on ubuntu/macos/windows matrices.
 - Not verified / known limits: the desktop UI has not been exercised with a real
   end-to-end agent run in an automated harness (manual verification only); the `lcgn`
   interactive REPL and permission/question prompts still need a real TTY.
 
 ---
+
+
+- [x] **Phase 9: Codex Harness Architecture port (`codex-rs` → Locagens) + `.vscode` tasks/launch** —
+  implemented in this workspace:
+  - **`.vscode/tasks.json` + `.vscode/launch.json`**: w64devkit PATH prepend,
+    `rustup run stable-x86_64-pc-windows-gnu cargo …` tasks on Windows (plain
+    `cargo` on linux/osx) for check / debug+release desktop & CLI builds /
+    tests / run targets; cppdbg+gdb (`w64devkit` gdb) and CodeLLDB launch
+    configurations for `locagens` and `lcgn --list-models`. `.gitignore`
+    un-ignores both files.
+  - **`orchestrator/apply_patch.rs`** (port of `codex-rs/apply-patch`):
+    `*** Begin Patch` parser (add/delete/update/move hunks, multi-chunk
+    updates, `@@ context`, `*** End of File`, lenient heredoc stripping),
+    `seek_sequence` fuzzy matcher (exact → `trim_end` → `trim` → Unicode
+    punctuation normalization), workspace-safe applier with `safe_path`
+    containment (path traversal rejected), `preview_patch` +
+    `affected_paths` + unified-diff generation and Codex's exact
+    `Success. Updated the following files:` summary. 10 unit tests.
+  - **`orchestrator/agents_md.rs`** (port of `core/src/agents_md.rs`):
+    hierarchical discovery from git root → cwd, one doc per level
+    (`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` > `.agents.md`),
+    `
+
+--- project-doc ---
+
+` separator, 32 KiB budget; injected into
+    the system prompt.
+  - **`orchestrator/env_context.rs`**: Codex `<environment_context>` XML
+    block (cwd/shell/approval_policy/sandbox_mode/network_access/
+    workspace_roots/current_date) seeded as the first user message.
+  - **`orchestrator/command_safety.rs`**: Codex `ApprovalPolicy` +
+    `SandboxMode` mapped from Locagens modes; known-safe read-only command
+    classification (bypasses prompting in `accept_edits`), dangerous-command
+    detection (`rm -rf`, `git reset --hard`, `sudo`, …).
+  - **`orchestrator/turn_diff_tracker.rs`**: baseline snapshots before
+    mutations, aggregate unified diff, `turn_diff_updated` events with
+    `filesChanged`.
+  - **`orchestrator/compact.rs`**: Codex SUMMARIZATION_PROMPT,
+    auto-compaction above 90k estimated tokens (+ `compact_context` tool),
+    `[Compacted context summary]` block, last 8 messages preserved.
+  - **Tools (`orchestrator/tools.rs` + `mod.rs`)**: `apply_patch`,
+    `exec_command` (ProcessManager sessions, secret-stripped env, yield /
+    poll semantics) + `write_stdin` (stdin piping added to ProcessManager),
+    `view_image`, `request_user_input` (Codex schema → QuestionCard),
+    `update_plan` dual-schema normalization, and Codex interactive
+    sub-agents `spawn_agent` / `send_input` / `wait_agent` / `close_agent` /
+    `list_agents` (background tasks with per-agent inboxes).
+  - **Config/auth (`paths.rs`, `pi_providers.rs`)**: primary directory
+    `~/.locagens` (`$LOCAGENS_HOME`), read-only fallbacks `~/.codex`
+    (`$CODEX_HOME`: `auth.json` `OPENAI_API_KEY` → `openai` provider,
+    `config.toml` `[model_providers.*]` via the new `toml` dependency) and
+    `~/.pi/agent` (legacy credentials keep working). UI/CLI labels updated
+    to "Codex / Locagens Auth & Providers".
+  - **Docs**: `Claude.md`, `Agents.md`, `GEMINI.md`, `README.md`,
+    `docs/CORE_API.md`, `docs/CLI.md` updated with the Phase 9 sections.
+  - Tests: **98 passing** across the workspace (76 `locagens_core` lib unit
+    tests incl. the new apply-patch/agents-md/command-safety/compact/
+    env-context/turn-diff suites, 4 `lcgn` integration tests, 18
+    `locagens-desktop` unit tests) — zero warnings.
 
 ## 4. Build Notes (this Windows machine)
 

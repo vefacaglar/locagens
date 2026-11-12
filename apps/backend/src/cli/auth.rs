@@ -42,7 +42,7 @@ fn login(pi: &PiProviderManager, provider: &str, api_key: Option<&str>) -> i32 {
         api_key: Some(key),
     }) {
         Ok(()) => {
-            println!("Logged in to {provider} (stored in ~/.pi/agent/auth.json).");
+            println!("Logged in to {provider} (stored in ~/.locagens/auth.json; Codex ~/.codex/auth.json and ~/.pi/agent/auth.json are read as fallbacks).");
             0
         }
         Err(err) => {

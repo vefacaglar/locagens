@@ -14,8 +14,16 @@
 //! terminal: status_changed + run_completed / run_failed
 //! ```
 
+pub mod agents_md;
+pub mod apply_patch;
+pub mod command_safety;
+pub mod compact;
+pub mod env_context;
 pub mod llm;
 pub mod tools;
+pub mod turn_diff_tracker;
+
+pub use turn_diff_tracker::TurnDiffTracker;
 
 use crate::db::{Plan, RunMessage, UsageLogEntry};
 use crate::pi_providers::PiProviderManager;
@@ -26,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const MAX_ROUNDS: usize = 40;
 const SUB_AGENT_MAX_ROUNDS: usize = 24;
@@ -52,9 +60,12 @@ const WORKSPACE_TOOLS: [&str; 10] = [
     "fetch_url",
 ];
 
-/// Full (worker) sub-agent toolset: workspace + dangerous tools.
+/// Full (worker) sub-agent toolset: workspace + dangerous tools + the Codex
+/// patch/exec harness.
 fn worker_tool_defs() -> Vec<Value> {
-    tools::filter_tool_defs(&WORKSPACE_TOOLS)
+    let mut names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
+    names.extend_from_slice(&["apply_patch", "exec_command", "write_stdin"]);
+    tools::filter_tool_defs(&names)
 }
 
 // ----------------------------------------------------------------------
@@ -101,6 +112,8 @@ pub struct RunHandle {
     pub permission: tokio::sync::Mutex<PermissionSlot>,
     pub question: tokio::sync::Mutex<QuestionSlot>,
     pub allow_run: AtomicBool,
+    /// Interactive sub-agents spawned by `spawn_agent`.
+    pub agents: tokio::sync::Mutex<HashMap<String, SubAgent>>,
 }
 
 impl RunHandle {
@@ -116,6 +129,7 @@ impl RunHandle {
             permission: tokio::sync::Mutex::new(PermissionSlot::default()),
             question: tokio::sync::Mutex::new(QuestionSlot::default()),
             allow_run: AtomicBool::new(false),
+            agents: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -173,6 +187,24 @@ impl RunHandle {
             })
         })
     }
+}
+
+/// A Codex-style interactive sub-agent spawned via `spawn_agent`.
+pub struct SubAgent {
+    pub id: String,
+    pub name: String,
+    /// `explorer` (read-only) or `worker`.
+    pub role: String,
+    /// `running` | `completed` | `failed` | `closed`.
+    pub status: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    /// Aborts the background task on `close_agent`.
+    pub abort: Option<tokio::task::AbortHandle>,
+    /// Delivers `send_input` messages while the agent is running.
+    pub input_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Resolves with the agent's final output on `wait_agent`.
+    pub done: Option<oneshot::Receiver<Result<String, String>>>,
 }
 
 /// Registry of live run handles.
@@ -426,13 +458,13 @@ fn base_system_prompt(state: &AppState, run: &crate::db::Run) -> String {
     };
     format!(
         "You are the Locagens coding agent, working inside the user's project.\n\n\
-{project} {path}\n{project_name}\n\n{mode}\n{memories}\n\n\
+{project} {path}\n{project_name}\n\n{mode}\n{agents_md}\n{memories}\n\n\
 ## Working style\n\
 - Inspect before changing: read the relevant files first.\n\
-- Prefer edit_file for small changes; write_file for new files.\n\
+- Prefer apply_patch/edit_file for small changes; write_file for new files.\n\
 - Keep answers concise and concrete; summarize what you did.\n\
 - Use update_plan for multi-step work so the user can follow progress.\n\
-- Fan independent research or implementation sub-tasks out via spawn_agents (explorer / worker).\n\
+- Fan independent research or implementation sub-tasks out via spawn_agents / spawn_agent (explorer / worker).\n\
 - Use ask_user_question when a decision genuinely needs the user.\n",
         project = project,
         path = run.project_path,
@@ -441,7 +473,29 @@ fn base_system_prompt(state: &AppState, run: &crate::db::Run) -> String {
             if name.is_empty() { String::new() } else { format!("(project: {name})") }
         },
         mode = mode_rules(&run.mode),
+        agents_md = agents_md_block(&run.project_path),
         memories = memories_block(state, &run.project_path),
+    )
+}
+
+/// Hierarchical AGENTS.md docs (Codex discovery: git root → cwd, 32 KiB
+/// budget, AGENTS.override.md > AGENTS.md > CLAUDE.md > .agents.md).
+fn agents_md_block(project_path: &str) -> String {
+    if project_path.trim().is_empty() {
+        return String::new();
+    }
+    let cwd = PathBuf::from(project_path);
+    let (docs, sources) = agents_md::load_agents_md(&cwd, &cwd);
+    if docs.trim().is_empty() {
+        return String::new();
+    }
+    let source_list = sources
+        .iter()
+        .map(|source| source.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n## Project instructions (AGENTS.md hierarchy from {source_list})\n\n{docs}\n"
     )
 }
 
@@ -481,6 +535,10 @@ struct AgentLoop {
     system: String,
     /// Remaining delegation depth (1 = may spawn sub-agents).
     depth_left: u32,
+    /// Aggregate workspace diff across this turn.
+    turn_diff: Arc<TurnDiffTracker>,
+    /// Interactive sub-agent inbox (`spawn_agent` + `send_input`).
+    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl AgentLoop {
@@ -521,6 +579,11 @@ impl AgentLoop {
         let mut last_assistant_content = String::new();
         for round in 1..=max_rounds {
             self.check_cancel()?;
+            // Codex-style auto compaction: when the estimated input tokens
+            // exceed the threshold, summarize older history before the call.
+            if self.agent_role.is_none() {
+                self.maybe_auto_compact().await?;
+            }
             if self.agent_role.is_none() {
                 self.handle.emit(json!({ "type": "round_started", "round": round }));
             }
@@ -670,7 +733,14 @@ impl AgentLoop {
             let mut inbox = self.handle.inbox.lock().await;
             let queued: Vec<String> = inbox.drain(..).collect();
             drop(inbox);
-            for queued_content in queued {
+            // Interactive sub-agents also fold their own `send_input` queue.
+            let mut agent_queued: Vec<String> = Vec::new();
+            if let Some(agent_inbox) = self.agent_inbox.as_mut() {
+                while let Ok(item) = agent_inbox.try_recv() {
+                    agent_queued.push(item);
+                }
+            }
+            for queued_content in queued.into_iter().chain(agent_queued) {
                 let user_message = self.new_message("user", &queued_content);
                 self.persist_and_emit(&user_message);
                 self.history.push(llm::LlmMessage {
@@ -687,7 +757,7 @@ impl AgentLoop {
 
     /// Executes one tool call, routing interactive/delegation tools to the
     /// orchestrator and workspace tools through permission gating.
-    async fn dispatch_tool(&self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
+    async fn dispatch_tool(&mut self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
         match name {
             "set_chat_title" => {
                 let title = args.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_string();
@@ -723,51 +793,564 @@ impl AgentLoop {
                 }
             }
             "ask_user_question" => self.ask_user_question(args).await,
+            "request_user_input" => {
+                // Codex schema normalization: every question gets a header and
+                // default options so the existing QuestionCard flow can render it.
+                let normalized = normalize_request_user_input(args);
+                self.ask_user_question(&normalized).await
+            }
+            "compact_context" => self.compact_context_tool().await,
             "spawn_agents" if self.depth_left > 0 => self.spawn_agents(args).await,
+            "spawn_agent" if self.depth_left > 0 => self.spawn_agent_tool(args).await,
+            "send_input" if self.depth_left > 0 => self.send_input_tool(args).await,
+            "wait_agent" if self.depth_left > 0 => self.wait_agent_tool(args).await,
+            "close_agent" if self.depth_left > 0 => self.close_agent_tool(args).await,
+            "list_agents" if self.depth_left > 0 => self.list_agents_tool().await,
+            "view_image" => tools::execute(&self.project_path, "view_image", args)
+                .await
+                .map_err(AgentError::Failed),
+            "exec_command" | "apply_patch" => self.gated_execute(call_id, name, args).await,
+            "write_stdin" => self.write_stdin_tool(args).await,
             name if WORKSPACE_TOOLS.contains(&name) => self.gated_execute(call_id, name, args).await,
             other => Err(AgentError::Failed(format!("Unknown tool \"{other}\"."))),
         }
     }
 
+    /// Executes one gated tool after permission decisions have been made.
+    async fn execute_tool(&self, name: &str, args: &Value) -> Result<String, String> {
+        match name {
+            "exec_command" => self.exec_session(args).await,
+            "apply_patch" => self.apply_patch_tool(args).await,
+            _ => tools::execute(&self.project_path, name, args).await,
+        }
+    }
+
+    /// `apply_patch` tool: snapshots turn-diff baselines, applies the patch
+    /// and returns Codex's summary plus the unified diff.
+    async fn apply_patch_tool(&self, args: &Value) -> Result<String, String> {
+        let patch_text = args
+            .get("input")
+            .and_then(Value::as_str)
+            .or_else(|| args.get("patch").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        if patch_text.trim().is_empty() {
+            return Err("apply_patch: patch text is empty.".to_string());
+        }
+        let parsed = apply_patch::parse_patch(&patch_text).map_err(|err| err.to_string())?;
+        let affected = apply_patch::affected_paths(&self.project_path, &parsed)?;
+        // Snapshot baselines before anything mutates the disk.
+        for relative in affected.all() {
+            if let Ok(path) = tools::safe_path(&self.project_path, &relative) {
+                self.turn_diff.snapshot(&path);
+            }
+        }
+        let (summary, diff, _affected) = apply_patch::apply_parsed(&self.project_path, &parsed)?;
+        self.emit_turn_diff();
+        let mut response = summary;
+        if !diff.is_empty() {
+            response.push_str("\n\nUnified diff preview:\n");
+            response.push_str(&diff.chars().take(12_000).collect::<String>());
+        }
+        Ok(response)
+    }
+
+    /// Emits `turn_diff_updated` with the aggregate diff for this turn.
+    fn emit_turn_diff(&self) {
+        let diff = self.turn_diff.unified_diff(&self.project_path);
+        if diff.is_empty() {
+            return;
+        }
+        self.handle.emit(json!({
+            "type": "turn_diff_updated",
+            "diff": diff,
+            "filesChanged": self.turn_diff.changed_files(&self.project_path),
+        }));
+    }
+
+    /// Snapshots turn-diff baselines for a mutating tool call.
+    fn snapshot_turn_diff(&self, name: &str, args: &Value) {
+        if !tools::MUTATION_TOOLS.contains(&name) || name == "apply_patch" {
+            return;
+        }
+        let mut paths: Vec<String> = Vec::new();
+        if let Some(path) = args.get("path").and_then(Value::as_str) {
+            paths.push(path.to_string());
+        }
+        if let Some(from) = args.get("from").and_then(Value::as_str) {
+            paths.push(from.to_string());
+        }
+        if let Some(to) = args.get("to").and_then(Value::as_str) {
+            paths.push(to.to_string());
+        }
+        for relative in paths {
+            if let Ok(path) = tools::safe_path(&self.project_path, &relative) {
+                self.turn_diff.snapshot(&path);
+            }
+        }
+    }
+
+    /// Runs one exec session (`exec_command`): spawns via the ProcessManager,
+    /// waits up to `yield_time_ms` for completion and either returns the
+    /// result or hands back an interactive session id.
+    async fn exec_session(&self, args: &Value) -> Result<String, String> {
+        let command = args
+            .get("cmd")
+            .or_else(|| args.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if command.is_empty() {
+            return Err("exec_command: cmd is empty.".to_string());
+        }
+        let workdir = match str_arg(args, "workdir") {
+            Some(workdir) if !workdir.trim().is_empty() => {
+                let path = tools::safe_path(&self.project_path, workdir)?;
+                if !path.is_dir() {
+                    return Err(format!("exec_command: workdir {workdir:?} is not a directory."));
+                }
+                path
+            }
+            _ => self.project_path.clone(),
+        };
+        let yield_ms = args
+            .get("yield_time_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(10_000)
+            .clamp(500, 60_000);
+        let max_chars = args
+            .get("max_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(20_000)
+            .clamp(1_000, 200_000) as usize * 4;
+
+        let info = self
+            .state
+            .processes
+            .spawn_with_stdin(&command, workdir, Some(tools::exec_session_env()));
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some(poll) = self.state.processes.poll_output(&info.id, max_chars) {
+                if poll.status == "exited" {
+                    self.state.processes.drop_session(&info.id);
+                    return Ok(serde_json::json!({
+                        "exit_code": poll.exit_code.unwrap_or(-1),
+                        "output": poll.output,
+                        "wall_time_ms": started.elapsed().as_millis() as u64,
+                    })
+                    .to_string());
+                }
+            }
+            if started.elapsed().as_millis() as u64 >= yield_ms {
+                break;
+            }
+        }
+        let output = self
+            .state
+            .processes
+            .poll_output(&info.id, max_chars)
+            .map(|poll| poll.output)
+            .unwrap_or_default();
+        Ok(serde_json::json!({
+            "session_id": info.id,
+            "status": "running",
+            "output": output,
+        })
+        .to_string())
+    }
+
+    /// `write_stdin`: feeds characters to a running exec session and polls
+    /// its latest output.
+    async fn write_stdin_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let session_id = str_arg(args, "session_id").unwrap_or_default().to_string();
+        if session_id.is_empty() {
+            return Err(AgentError::Failed("write_stdin: session_id is empty.".into()));
+        }
+        if let Some(chars) = str_arg(args, "chars") {
+            let sent = self.state.processes.write_stdin(&session_id, chars).await;
+            if !sent {
+                return Err(AgentError::Failed(format!(
+                    "write_stdin: session {session_id} has no writable stdin (unknown or already exited)."
+                )));
+            }
+        }
+        let yield_ms = args
+            .get("yield_time_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(2_000)
+            .clamp(100, 60_000);
+        let max_chars = args
+            .get("max_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(20_000)
+            .clamp(1_000, 200_000) as usize * 4;
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some(poll) = self.state.processes.poll_output(&session_id, max_chars) {
+                if poll.status == "exited" {
+                    self.state.processes.drop_session(&session_id);
+                    return Ok(serde_json::json!({
+                        "session_id": session_id,
+                        "status": "exited",
+                        "exit_code": poll.exit_code.unwrap_or(-1),
+                        "output": poll.output,
+                    })
+                    .to_string());
+                }
+                if started.elapsed().as_millis() as u64 >= yield_ms {
+                    return Ok(serde_json::json!({
+                        "session_id": session_id,
+                        "status": "running",
+                        "output": poll.output,
+                    })
+                    .to_string());
+                }
+            } else {
+                return Err(AgentError::Failed(format!(
+                    "write_stdin: unknown session {session_id}."
+                )));
+            }
+        }
+    }
+
+    /// Manual context compaction (`compact_context` tool).
+    async fn compact_context_tool(&mut self) -> Result<String, AgentError> {
+        let before = self.history.len();
+        self.run_compaction().await?;
+        Ok(format!(
+            "Context compacted: {before} messages → {} messages. Older conversation was replaced by a summary block.",
+            self.history.len()
+        ))
+    }
+
+    /// Codex-style compaction: summarize older history with the
+    /// SUMMARIZATION_PROMPT and replace it with a summary block.
+    async fn maybe_auto_compact(&mut self) -> Result<(), AgentError> {
+        if !compact::should_auto_compact(&self.history) {
+            return Ok(());
+        }
+        self.run_compaction().await
+    }
+
+    async fn run_compaction(&mut self) -> Result<(), AgentError> {
+        let Some((system, transcript)) = compact::summarization_request(&self.history, compact::DEFAULT_KEEP_LAST_MESSAGES)
+        else {
+            return Ok(());
+        };
+        let endpoint = resolve_endpoint(
+            &self.state.pi,
+            &self.provider_id,
+            &self.model,
+            self.reasoning_effort.as_deref(),
+            &self.run_id,
+        )
+        .await
+        .map_err(AgentError::Failed)?;
+        let messages = vec![llm::LlmMessage {
+            role: "user".into(),
+            content: transcript,
+            ..Default::default()
+        }];
+        let outcome = llm::stream_chat(
+            &endpoint_http(&self.state),
+            &endpoint,
+            &system,
+            &messages,
+            &[],
+            &mut |_content_delta: &str, _reasoning_delta: &str| {},
+            &|| self.handle.is_cancelled(),
+        )
+        .await
+        .map_err(|err| {
+            if err.to_string() == "cancelled" || self.handle.is_cancelled() {
+                AgentError::Cancelled
+            } else {
+                AgentError::Failed(format!("compact_context: {err}"))
+            }
+        })?;
+        let estimated_tokens = compact::estimate_history_tokens(&self.history);
+        let messages_before = self.history.len();
+        self.history = compact::apply_compaction(&self.history, &outcome.content, compact::DEFAULT_KEEP_LAST_MESSAGES);
+        self.handle.emit(json!({
+            "type": "context_compacted",
+            "estimatedTokensBefore": estimated_tokens,
+            "messagesBefore": messages_before,
+            "messagesAfter": self.history.len(),
+            "summary": outcome.content,
+        }));
+        Ok(())
+    }
+
+    // -- Codex interactive sub-agents --------------------------------------
+
+    async fn spawn_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let task = str_arg(args, "task").unwrap_or_default().trim().to_string();
+        if task.is_empty() {
+            return Err(AgentError::Failed("spawn_agent: task is empty.".into()));
+        }
+        let (role, readonly) = match str_arg(args, "role") {
+            Some("worker") => ("worker", false),
+            _ => ("explorer", true),
+        };
+        let fallback_name = task.chars().take(40).collect::<String>().trim().to_string();
+        let name = str_arg(args, "name")
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(fallback_name.as_str())
+            .to_string();
+        let id = format!("agent-{}", uuid::Uuid::new_v4().simple());
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
+
+        {
+            let mut agents = self.handle.agents.lock().await;
+            agents.insert(
+                id.clone(),
+                SubAgent {
+                    id: id.clone(),
+                    name: name.clone(),
+                    role: role.to_string(),
+                    status: "running".to_string(),
+                    output: None,
+                    error: None,
+                    abort: None,
+                    input_tx: Some(input_tx.clone()),
+                    done: Some(done_rx),
+                },
+            );
+        }
+
+        let spec = SubAgentSpec {
+            state: self.state.clone(),
+            handle: self.handle.clone(),
+            run_id: self.run_id.clone(),
+            project_path: self.project_path.clone(),
+            mode: self.mode.clone(),
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            role,
+            title: name.clone(),
+            task: task.clone(),
+            readonly,
+            depth_left: 0,
+        };
+        let tracker = self.turn_diff.clone();
+        let agents_registry = self.handle.clone();
+        let agent_id = id.clone();
+        let abort = tokio::spawn(async move {
+            let result = run_sub_agent_owned(spec, Some(input_rx), tracker).await;
+            if let Ok(mut agents) = agents_registry.agents.try_lock() {
+                if let Some(entry) = agents.get_mut(&agent_id) {
+                    entry.input_tx = None;
+                    match &result {
+                        Ok(outcome) => {
+                            entry.status = "completed".to_string();
+                            entry.output = Some(outcome.clone());
+                        }
+                        Err(error) => {
+                            entry.status = "failed".to_string();
+                            entry.error = Some(error.clone());
+                        }
+                    }
+                }
+            }
+            let _ = done_tx.send(result);
+        })
+        .abort_handle();
+        if let Ok(mut agents) = self.handle.agents.try_lock() {
+            if let Some(entry) = agents.get_mut(&id) {
+                entry.abort = Some(abort);
+            }
+        }
+        self.handle.emit(json!({
+            "type": "agent_spawned",
+            "agentId": id,
+            "name": name,
+            "role": role,
+        }));
+        Ok(format!(
+            "Spawned {role} sub-agent \"{name}\" as {id}. Use wait_agent to await its output, send_input to continue it, close_agent to terminate it, or list_agents to see all agents."
+        ))
+    }
+
+    async fn send_input_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
+        let input = str_arg(args, "input").unwrap_or_default().trim().to_string();
+        if input.is_empty() {
+            return Err(AgentError::Failed("send_input: input is empty.".into()));
+        }
+        let mut agents = self.handle.agents.lock().await;
+        let Some(entry) = agents.get_mut(&agent_id) else {
+            return Err(AgentError::Failed(format!("send_input: unknown agent {agent_id}.")));
+        };
+        let input_clone = input.clone();
+        if entry.status == "running" {
+            if let Some(input_tx) = &entry.input_tx {
+                if input_tx.send(input_clone).is_ok() {
+                    return Ok(format!("Delivered input to running agent {agent_id}; it will fold it in before its next round."));
+                }
+            }
+        }
+
+        // Completed/failed/closed → start a continuation agent with the
+        // previous output plus the new instruction.
+        let previous = entry.output.clone().unwrap_or_default();
+        let name = entry.name.clone();
+        let role_static: &'static str = if entry.role == "worker" { "worker" } else { "explorer" };
+        let readonly = role_static == "explorer";
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
+        entry.status = "running".to_string();
+        entry.output = None;
+        entry.error = None;
+        entry.input_tx = Some(input_tx.clone());
+        entry.done = Some(done_rx);
+        drop(agents);
+
+        let spec = SubAgentSpec {
+            state: self.state.clone(),
+            handle: self.handle.clone(),
+            run_id: self.run_id.clone(),
+            project_path: self.project_path.clone(),
+            mode: self.mode.clone(),
+            provider_id: self.provider_id.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            role: role_static,
+            title: name.clone(),
+            task: format!(
+                "Previous result of this agent:\n{previous}\n\nFollow-up instruction:\n{input}"
+            ),
+            readonly,
+            depth_left: 0,
+        };
+        let tracker = self.turn_diff.clone();
+        let agents_registry = self.handle.clone();
+        let agent_id_clone = agent_id.clone();
+        let abort = tokio::spawn(async move {
+            let result = run_sub_agent_owned(spec, Some(input_rx), tracker).await;
+            if let Ok(mut agents) = agents_registry.agents.try_lock() {
+                if let Some(entry) = agents.get_mut(&agent_id_clone) {
+                    entry.input_tx = None;
+                    match &result {
+                        Ok(outcome) => {
+                            entry.status = "completed".to_string();
+                            entry.output = Some(outcome.clone());
+                        }
+                        Err(error) => {
+                            entry.status = "failed".to_string();
+                            entry.error = Some(error.clone());
+                        }
+                    }
+                }
+            }
+            let _ = done_tx.send(result);
+        })
+        .abort_handle();
+        if let Ok(mut agents) = self.handle.agents.try_lock() {
+            if let Some(entry) = agents.get_mut(&agent_id) {
+                entry.abort = Some(abort);
+            }
+        }
+        Ok(format!("Continued agent {agent_id} with the new instruction."))
+    }
+
+    async fn wait_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
+        let done = {
+            let mut agents = self.handle.agents.lock().await;
+            let Some(entry) = agents.get_mut(&agent_id) else {
+                return Err(AgentError::Failed(format!("wait_agent: unknown agent {agent_id}.")));
+            };
+            entry.done.take()
+        };
+        if let Some(done) = done {
+            let result = tokio::select! {
+                result = done => result.unwrap_or_else(|_| Err("agent task was dropped.".to_string())),
+                _ = self.handle.cancelled() => return Err(AgentError::Cancelled),
+            };
+            if let Ok(mut agents) = self.handle.agents.try_lock() {
+                if let Some(entry) = agents.get_mut(&agent_id) {
+                    entry.input_tx = None;
+                    match &result {
+                        Ok(outcome) => {
+                            entry.status = "completed".to_string();
+                            entry.output = Some(outcome.clone());
+                        }
+                        Err(error) => {
+                            entry.status = "failed".to_string();
+                            entry.error = Some(error.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let agents = self.handle.agents.lock().await;
+        let Some(entry) = agents.get(&agent_id) else {
+            return Err(AgentError::Failed(format!("wait_agent: unknown agent {agent_id}.")));
+        };
+        let status = entry.status.clone();
+        let output = entry
+            .output
+            .clone()
+            .or_else(|| entry.error.clone())
+            .unwrap_or_else(|| "(no output yet)".to_string());
+        Ok(format!("Agent {agent_id} (\"{}\", {}) status: {status}\n\n{output}", entry.name, entry.role))
+    }
+
+    async fn close_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
+        let mut agents = self.handle.agents.lock().await;
+        let Some(entry) = agents.get_mut(&agent_id) else {
+            return Err(AgentError::Failed(format!("close_agent: unknown agent {agent_id}.")));
+        };
+        if let Some(abort) = entry.abort.take() {
+            abort.abort();
+        }
+        entry.status = "closed".to_string();
+        entry.input_tx = None;
+        entry.done = None;
+        Ok(format!("Agent {agent_id} closed."))
+    }
+
+    async fn list_agents_tool(&self) -> Result<String, AgentError> {
+        let agents = self.handle.agents.lock().await;
+        if agents.is_empty() {
+            return Ok("No sub-agents have been spawned in this run.".to_string());
+        }
+        let mut lines = Vec::new();
+        for entry in agents.values() {
+            lines.push(format!(
+                "- {} \"{}\" ({}): {}{}",
+                entry.id,
+                entry.name,
+                entry.role,
+                entry.status,
+                entry.output.as_deref().map(|_| " (output available — use wait_agent)" ).unwrap_or("")
+            ));
+        }
+        Ok(format!("Sub-agents in this run:\n{}", lines.join("\n")))
+    }
+
     async fn update_plan(&self, args: &Value) -> Result<String, AgentError> {
-        let title = args.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        // Accepts BOTH schemas:
+        // - Codex:   { explanation?, plan: [{ step, status }] }
+        // - Locagens: { title, body?, tasks: [{ text, status }] }
+        let (title, body, tasks) = normalize_plan_args(args);
         if title.is_empty() {
             return Err(AgentError::Failed("update_plan: title is empty.".into()));
         }
-        let tasks = args.get("tasks").cloned().unwrap_or(json!([]));
-        let tasks = match tasks {
-            Value::Array(items) => Value::Array(
-                items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Value::String(text) => Some(json!({ "text": text, "status": "pending" })),
-                        Value::Object(_) => {
-                            let text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
-                            if text.is_empty() {
-                                None
-                            } else {
-                                let status = item.get("status").and_then(Value::as_str).unwrap_or("pending").to_string();
-                                let status = ["pending", "in_progress", "completed"]
-                                    .iter()
-                                    .any(|s| *s == status)
-                                    .then_some(status.clone())
-                                    .unwrap_or_else(|| "pending".to_string());
-                                Some(json!({ "text": text, "status": status }))
-                            }
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => json!([]),
-        };
 
         let existing = self.state.db.get_plan(&self.run_id);
         let now = crate::util::now_iso();
         let plan = match existing {
             Some(mut plan) => {
                 plan.title = title;
-                plan.body = args.get("body").and_then(Value::as_str).map(str::to_string);
+                plan.body = body;
                 plan.tasks = tasks;
                 plan.version += 1;
                 plan.updated_at = now;
@@ -777,7 +1360,7 @@ impl AgentLoop {
                 id: format!("plan-{}", uuid::Uuid::new_v4()),
                 run_id: self.run_id.clone(),
                 title,
-                body: args.get("body").and_then(Value::as_str).map(str::to_string),
+                body,
                 tasks,
                 status: "active".to_string(),
                 version: 1,
@@ -855,35 +1438,30 @@ impl AgentLoop {
         task: &str,
         readonly: bool,
     ) -> Result<String, AgentError> {
-        // Empty provider/model falls back to the run's main model.
-        let provider_id = if provider_id.trim().is_empty() { self.provider_id.clone() } else { provider_id.trim().to_string() };
-        let model = if model.trim().is_empty() { self.model.clone() } else { model.trim().to_string() };
-        let reasoning_effort = reasoning.map(str::to_string).filter(|r| !r.is_empty());
-        let providers = self.state.pi.list_providers().await;
-        let mut sub = AgentLoop {
+        let spec = SubAgentSpec {
             state: self.state.clone(),
             handle: self.handle.clone(),
             run_id: self.run_id.clone(),
             project_path: self.project_path.clone(),
             mode: self.mode.clone(),
-            provider_display_name: provider_display_name(&providers, &provider_id),
-            provider_id,
-            model,
-            reasoning_effort,
-            agent_role: Some(role),
-            agent_name: Some(title.to_string()),
-            history: vec![llm::LlmMessage {
-                role: "user".into(),
-                content: task.to_string(),
-                ..Default::default()
-            }],
-            tools: if readonly { tools::readonly_tool_defs(false) } else { worker_tool_defs() },
-            system: sub_agent_system_prompt(role, title, task, &self.project_path.display().to_string(), readonly),
+            provider_id: if provider_id.trim().is_empty() { self.provider_id.clone() } else { provider_id.trim().to_string() },
+            model: if model.trim().is_empty() { self.model.clone() } else { model.trim().to_string() },
+            reasoning_effort: reasoning.map(str::to_string).filter(|r| !r.is_empty()),
+            role,
+            title: title.to_string(),
+            task: task.to_string(),
+            readonly,
             depth_left: 0,
         };
-        // Boxed to break the recursion cycle (sub-agent → run → dispatch →
-        // spawn → sub-agent).
-        Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS)).await
+        run_sub_agent_owned(spec, None, self.turn_diff.clone())
+            .await
+            .map_err(|err| {
+                if err == "cancelled" || self.handle.is_cancelled() {
+                    AgentError::Cancelled
+                } else {
+                    AgentError::Failed(err)
+                }
+            })
     }
 
     async fn spawn_agents(&self, args: &Value) -> Result<String, AgentError> {
@@ -926,10 +1504,15 @@ impl AgentLoop {
     }
 
     async fn gated_execute(&self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
+        // Codex command safety: under accept_edits (on-request +
+        // workspace-write) known-safe read-only commands run without a prompt.
+        if (name == "run_command" || name == "exec_command")
+            && command_safety::command_bypasses_prompt(&self.mode, &command_safety::command_from_args(args))
+        {
+            return self.execute_tool(name, args).await.map_err(AgentError::Failed);
+        }
         if !tools::needs_permission(&self.mode, name) || self.handle.allow_run.load(Ordering::SeqCst) || self.standing_grant(name, args) {
-            return tools::execute(&self.project_path, name, args)
-                .await
-                .map_err(AgentError::Failed);
+            return self.execute_with_turn_diff(name, args).await;
         }
 
         // Pause for an interactive decision: status → awaiting_permission,
@@ -978,9 +1561,7 @@ impl AgentLoop {
             "deny" => Ok("The user denied permission for this tool call.".to_string()),
             "allow_run" => {
                 self.handle.allow_run.store(true, Ordering::SeqCst);
-                tools::execute(&self.project_path, name, args)
-                    .await
-                    .map_err(AgentError::Failed)
+                self.execute_with_turn_diff(name, args).await
             }
             "allow_project" | "allow_always" => {
                 let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -998,15 +1579,22 @@ impl AgentLoop {
                     domains,
                     &decision,
                 );
-                tools::execute(&self.project_path, name, args)
-                    .await
-                    .map_err(AgentError::Failed)
+                self.execute_with_turn_diff(name, args).await
             }
             // allow_once and unknown decisions just proceed once.
-            _ => tools::execute(&self.project_path, name, args)
-                .await
-                .map_err(AgentError::Failed),
+            _ => self.execute_with_turn_diff(name, args).await,
         }
+    }
+
+    /// Executes a gated tool, snapshotting turn-diff baselines for mutating
+    /// tools first and emitting `turn_diff_updated` afterwards.
+    async fn execute_with_turn_diff(&self, name: &str, args: &Value) -> Result<String, AgentError> {
+        self.snapshot_turn_diff(name, args);
+        let result = self.execute_tool(name, args).await;
+        if result.is_ok() {
+            self.emit_turn_diff();
+        }
+        result.map_err(AgentError::Failed)
     }
 }
 
@@ -1017,6 +1605,117 @@ fn endpoint_http(_state: &AppState) -> reqwest::Client {
         .timeout(Duration::from_secs(600))
         .build()
         .unwrap_or_default()
+}
+
+fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(Value::as_str)
+}
+
+/// Normalizes both `update_plan` schemas into `(title, body, tasks)` where
+/// tasks are Locagens `{ text, status }` objects.
+fn normalize_plan_args(args: &Value) -> (String, Option<String>, Value) {
+    let items = args
+        .get("tasks")
+        .or_else(|| args.get("plan"))
+        .cloned()
+        .unwrap_or(json!([]));
+    let mut first_text: Option<String> = None;
+    let tasks = match items {
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::String(text) => {
+                        let text = text.trim().to_string();
+                        if text.is_empty() {
+                            None
+                        } else {
+                            first_text.get_or_insert_with(|| text.clone());
+                            Some(json!({ "text": text, "status": "pending" }))
+                        }
+                    }
+                    Value::Object(_) => {
+                        let text = item
+                            .get("text")
+                            .or_else(|| item.get("step"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        if text.is_empty() {
+                            None
+                        } else {
+                            first_text.get_or_insert_with(|| text.clone());
+                            let status = item
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("pending")
+                                .to_string();
+                            let status = ["pending", "in_progress", "completed"]
+                                .iter()
+                                .any(|valid| *valid == status)
+                                .then_some(status.clone())
+                                .unwrap_or_else(|| "pending".to_string());
+                            Some(json!({ "text": text, "status": status }))
+                        }
+                    }
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => json!([]),
+    };
+    let title = args
+        .get("title")
+        .or_else(|| args.get("summary"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .or_else(|| first_text.take())
+        .unwrap_or_default();
+    let body = args
+        .get("body")
+        .or_else(|| args.get("explanation"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|body| !body.trim().is_empty());
+    (title, body, tasks)
+}
+
+/// Normalizes Codex `request_user_input` questions for the QuestionCard flow:
+/// every question ends up with a header and at least two options.
+fn normalize_request_user_input(args: &Value) -> Value {
+    let questions = args.get("questions").cloned().unwrap_or(json!([]));
+    let normalized = questions
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|question| {
+                    let header = question
+                        .get("header")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or("Choice")
+                        .to_string();
+                    let options = match question.get("options") {
+                        Some(options) if options.is_array() && !options.as_array().unwrap().is_empty() => {
+                            options.clone()
+                        }
+                        _ => json!([{ "label": "Yes" }, { "label": "No" }]),
+                    };
+                    let mut question = question.clone();
+                    let object = question.as_object_mut().unwrap();
+                    object.insert("header".into(), json!(header));
+                    object.insert("options".into(), options);
+                    question
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({ "questions": normalized })
 }
 
 fn sorted_domains(args: &Value) -> Vec<String> {
@@ -1062,6 +1761,84 @@ fn standing_grant_matches(
 }
 
 // ----------------------------------------------------------------------
+// Sub-agent execution (owned spec so agents can run in background tasks)
+// ----------------------------------------------------------------------
+
+/// Everything needed to run one sub-agent — owned so it can be moved into a
+/// spawned tokio task (`spawn_agent`).
+struct SubAgentSpec {
+    state: Arc<AppState>,
+    handle: Arc<RunHandle>,
+    run_id: String,
+    project_path: PathBuf,
+    mode: String,
+    provider_id: String,
+    model: String,
+    reasoning_effort: Option<String>,
+    role: &'static str,
+    title: String,
+    task: String,
+    readonly: bool,
+    depth_left: u32,
+}
+
+/// Runs a sub-agent to completion. Boxed to break the recursion cycle
+/// (sub-agent → run → dispatch → spawn → sub-agent).
+fn run_sub_agent_owned(
+    spec: SubAgentSpec,
+    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
+    turn_diff: Arc<TurnDiffTracker>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> {
+    Box::pin(run_sub_agent_inner(spec, agent_inbox, turn_diff))
+}
+
+async fn run_sub_agent_inner(
+    spec: SubAgentSpec,
+    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
+    turn_diff: Arc<TurnDiffTracker>,
+) -> Result<String, String> {
+    let providers = spec.state.pi.list_providers().await;
+    let project_display = spec.project_path.display().to_string();
+    let title = spec.title.clone();
+    let task = spec.task.clone();
+    let mut sub = AgentLoop {
+        state: spec.state,
+        handle: spec.handle,
+        run_id: spec.run_id,
+        project_path: spec.project_path,
+        mode: spec.mode,
+        provider_display_name: provider_display_name(&providers, &spec.provider_id),
+        provider_id: spec.provider_id,
+        model: spec.model,
+        reasoning_effort: spec.reasoning_effort,
+        agent_role: Some(spec.role),
+        agent_name: Some(spec.title.clone()),
+        history: vec![llm::LlmMessage {
+            role: "user".into(),
+            content: spec.task.clone(),
+            ..Default::default()
+        }],
+        tools: if spec.readonly { tools::readonly_tool_defs(false) } else { worker_tool_defs() },
+        system: sub_agent_system_prompt(
+            spec.role,
+            &title,
+            &task,
+            &project_display,
+            spec.readonly,
+        ),
+        depth_left: spec.depth_left,
+        turn_diff,
+        agent_inbox,
+    };
+    Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS))
+        .await
+        .map_err(|err| match err {
+            AgentError::Cancelled => "cancelled".to_string(),
+            AgentError::Failed(err) => err,
+        })
+}
+
+// ----------------------------------------------------------------------
 // Drive task
 // ----------------------------------------------------------------------
 
@@ -1083,13 +1860,30 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     handle.emit(json!({ "type": "run_started", "runId": run_id }));
     handle.emit(json!({ "type": "status_changed", "status": "generating" }));
 
-    let history = seed_history(&state.db.list_messages(&run_id));
+    let mut history = seed_history(&state.db.list_messages(&run_id));
     let providers = state.pi.list_providers().await;
 
     let run_full = state.db.get_run_full(&run_id).unwrap_or_else(|| run.clone());
     let mut tool_names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
-    tool_names.extend_from_slice(&["set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question"]);
+    tool_names.extend_from_slice(&[
+        "set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question",
+        "apply_patch", "exec_command", "write_stdin", "view_image", "request_user_input",
+        "compact_context", "spawn_agent", "send_input", "wait_agent", "close_agent", "list_agents",
+    ]);
     tool_names.push("spawn_agents");
+
+    // Codex-style <environment_context> block as the leading user message.
+    if !run_full.project_path.is_empty() && !history.is_empty() {
+        let context = env_context::environment_context_for_run(&run_full.mode, &run_full.project_path);
+        history.insert(
+            0,
+            llm::LlmMessage {
+                role: "user".into(),
+                content: context,
+                ..Default::default()
+            },
+        );
+    }
 
     let mut agent = AgentLoop {
         handle: handle.clone(),
@@ -1107,6 +1901,8 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         system: system_prompt(&state, &run_full),
         depth_left: 1,
         state: state.clone(),
+        turn_diff: Arc::new(TurnDiffTracker::new()),
+        agent_inbox: None,
     };
 
     let result = agent.run(MAX_ROUNDS).await;
@@ -1231,6 +2027,53 @@ mod tests {
         let cost = cost_of(&usage, Some(&info));
         assert!((cost - (3.0 + 1.5 + 0.15)).abs() < 1e-9);
         assert_eq!(cost_of(&usage, None), 0.0);
+    }
+
+    #[test]
+    fn update_plan_normalizes_both_schemas() {
+        // Locagens schema.
+        let (title, body, tasks) = normalize_plan_args(&json!({
+            "title": "Ship it",
+            "body": "rationale",
+            "tasks": ["one", { "text": "two", "status": "completed" }]
+        }));
+        assert_eq!(title, "Ship it");
+        assert_eq!(body.as_deref(), Some("rationale"));
+        assert_eq!(tasks[0]["text"], "one");
+        assert_eq!(tasks[0]["status"], "pending");
+        assert_eq!(tasks[1]["text"], "two");
+        assert_eq!(tasks[1]["status"], "completed");
+
+        // Codex schema: explanation + plan[{step,status}], no title.
+        let (title, body, tasks) = normalize_plan_args(&json!({
+            "explanation": "why",
+            "plan": [
+                { "step": "research", "status": "completed" },
+                { "step": "implement", "status": "in_progress" },
+                { "step": "verify" }
+            ]
+        }));
+        assert_eq!(title, "research");
+        assert_eq!(body.as_deref(), Some("why"));
+        assert_eq!(tasks[0]["text"], "research");
+        assert_eq!(tasks[0]["status"], "completed");
+        assert_eq!(tasks[2]["status"], "pending");
+    }
+
+    #[test]
+    fn request_user_input_normalization_fills_defaults() {
+        let normalized = normalize_request_user_input(&json!({
+            "questions": [
+                { "id": "q1", "question": "Proceed?" },
+                { "question": "Which db?", "options": [{ "label": "SQLite" }] }
+            ]
+        }));
+        let questions = normalized["questions"].as_array().unwrap();
+        assert_eq!(questions[0]["header"], "Choice");
+        assert_eq!(questions[0]["options"][0]["label"], "Yes");
+        assert_eq!(questions[0]["question"], "Proceed?");
+        assert_eq!(questions[1]["header"], "Choice");
+        assert_eq!(questions[1]["options"][0]["label"], "SQLite");
     }
 
     #[test]

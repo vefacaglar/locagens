@@ -1,0 +1,178 @@
+{
+  // Locagens task runner — w64devkit toolchain on Windows (gcc/gdb for cppdbg),
+  // plain cargo elsewhere. Tasks use `rustup run` so the GNU toolchain is
+  // selected even when rustup defaults differ.
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}"
+    }
+  },
+  "windows": {
+    "options": {
+      "env": {
+        "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}"
+      }
+    }
+  },
+  "linux": {
+    "options": {
+      "env": {
+        "PATH": "${env:PATH}"
+      }
+    }
+  },
+  "osx": {
+    "options": {
+      "env": {
+        "PATH": "${env:PATH}"
+      }
+    }
+  },
+  "tasks": [
+    {
+      "label": "cargo: check workspace",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "check", "--workspace"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["check", "--workspace"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["check", "--workspace"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: build desktop (debug)",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "-p", "locagens-desktop"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["build", "-p", "locagens-desktop"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["build", "-p", "locagens-desktop"]
+      },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: build desktop (release)",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "--release", "-p", "locagens-desktop"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["build", "--release", "-p", "locagens-desktop"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["build", "--release", "-p", "locagens-desktop"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: build lcgn CLI (debug)",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["build", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["build", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: build workspace (release)",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "--release", "--workspace"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["build", "--release", "--workspace"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["build", "--release", "--workspace"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: test workspace",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "test", "--workspace"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["test", "--workspace"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["test", "--workspace"]
+      },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: run locagens desktop",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "run", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["run", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["run", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo: run lcgn CLI",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "run", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["run", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["run", "-p", "locagens-backend", "--bin", "lcgn"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}

@@ -199,3 +199,36 @@ coder/utility tiers and no `delegate_tasks`/`delegate_to_utility` tools.
   synchronous-safe otherwise; all are callable from any Tokio runtime.
 * `AppState` is cheap to clone (internally `Arc`'d) and shared across the
   desktop UI and the CLI.
+
+## Phase 9 — Codex Harness Tools (orchestrator)
+
+The agent loop exposes the full Codex toolset in addition to the classic
+workspace tools:
+
+| Tool | Schema | Behaviour |
+| --- | --- | --- |
+| `apply_patch` | `{ input: string }` (`patch` alias accepted) | Applies a `*** Begin Patch` … `*** End Patch` patch inside the workspace (add / delete / update / move, fuzzy context matching) and returns Codex's summary + unified diff. All paths validated with `safe_path`. |
+| `exec_command` | `{ cmd, workdir?, yield_time_ms?, max_output_tokens?, shell?, login?, justification? }` | Runs via the ProcessManager with a secret-stripped env. Finishes → `{ exit_code, output, wall_time_ms }`; otherwise → `{ session_id, status: "running", output }`. |
+| `write_stdin` | `{ session_id, chars?, yield_time_ms?, max_output_tokens? }` | Feeds a running exec session and polls its output (`running` / `exited`). |
+| `view_image` | `{ path }` | Returns `{ ok, path, mime_type, bytes, width, height }` for a workspace image. |
+| `update_plan` | Codex `{ explanation?, plan: [{step, status}] }` **or** Locagens `{ title, body?, tasks }` | Normalized into the same `db::Plan` + `plan_updated` event. |
+| `request_user_input` | Codex `{ questions: [{ id?, header?, question, options? }] }` | Routed through the QuestionCard flow (`question_requested`). |
+| `compact_context` | `{}` | Summarizes older history into a `[Compacted context summary]` block. |
+| `spawn_agent` / `send_input` / `wait_agent` / `close_agent` / `list_agents` | Codex interactive sub-agents | Background sub-agents with ids, input delivery, completion waiting and termination. |
+
+Approval/sandbox policy (Codex-compatible):
+
+```txt
+chat / plan            → on-request + read-only
+accept_edits (Build)   → on-request + workspace-write
+                         (known-safe read-only commands run without prompting)
+ask_permissions        → untrusted + workspace-write (everything prompts)
+auto (Full Access)     → never + danger-full-access
+```
+
+Events added: `turn_diff_updated` (`{ diff, filesChanged }`),
+`context_compacted`, `agent_spawned`.
+
+Auth & provider config: primary directory `~/.locagens` (`$LOCAGENS_HOME`);
+fallback reads from `~/.codex` (`$CODEX_HOME`: `auth.json` `OPENAI_API_KEY`,
+`config.toml` `[model_providers.*]`) and `~/.pi/agent`.

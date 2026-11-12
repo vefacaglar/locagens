@@ -21,7 +21,7 @@ const SEARCH_SKIP_DIRS: [&str; 8] =
 const MAX_SEARCH_DEPTH: usize = 14;
 
 /// Tools that mutate the workspace (permission-gated in `ask_permissions`).
-pub const MUTATION_TOOLS: [&str; 4] = ["write_file", "edit_file", "delete_file", "move_file"];
+pub const MUTATION_TOOLS: [&str; 5] = ["write_file", "edit_file", "delete_file", "move_file", "apply_patch"];
 
 /// Whether a tool call needs interactive permission approval under `mode`.
 pub fn needs_permission(mode: &str, tool: &str) -> bool {
@@ -101,6 +101,75 @@ pub fn all_tool_defs() -> Vec<Value> {
             }), &["command"]),
         def("fetch_url", "Fetch a public http(s) URL and return the response body (30s timeout, private IPs blocked).",
             json!({ "url": json!({ "type": "string", "description": "Absolute http(s) URL." }) }), &["url"]),
+        def("apply_patch", "Apply a Codex-format patch (`*** Begin Patch` … `*** End Patch`) to the workspace: add, delete, update and move files with fuzzy context matching. Preferred for multi-file edits.",
+            json!({
+                "input": json!({ "type": "string", "description": "Patch text in *** Begin Patch ... *** End Patch format." }),
+                "patch": json!({ "type": "string", "description": "Alias for `input` (Codex compatibility)." })
+            }), &["input"]),
+        def("exec_command", "Run a shell command in the workspace (Codex unified exec). If it finishes within yield_time_ms the result is returned directly; otherwise it keeps running as a background session you can drive with write_stdin.",
+            json!({
+                "cmd": json!({ "type": "string", "description": "The command to execute." }),
+                "workdir": json!({ "type": "string", "description": "Optional working directory inside the workspace." }),
+                "yield_time_ms": json!({ "type": "integer", "description": "Wait up to this long for completion (default 10000, clamped 500..60000)." }),
+                "max_output_tokens": json!({ "type": "integer", "description": "Rough bound on returned output (default 20000 tokens ~ 80k chars)." }),
+                "shell": json!({ "type": "string", "description": "Ignored shell hint (Codex compatibility)." }),
+                "login": json!({ "type": "boolean", "description": "Ignored login-shell hint (Codex compatibility)." }),
+                "justification": json!({ "type": "string", "description": "Short reason shown on the permission card." })
+            }), &["cmd"]),
+        def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll.",
+            json!({
+                "session_id": json!({ "type": "string", "description": "Session id returned by exec_command." }),
+                "chars": json!({ "type": "string", "description": "Characters to write to the session's stdin." }),
+                "yield_time_ms": json!({ "type": "integer", "description": "Wait up to this long for new output (default 2000)." }),
+                "max_output_tokens": json!({ "type": "integer", "description": "Rough bound on returned output." })
+            }), &["session_id"]),
+        def("view_image", "Inspect an image file inside the workspace: returns its mime type, byte size and pixel dimensions.",
+            json!({ "path": path_prop("Relative image path inside the workspace.") }), &["path"]),
+        def("request_user_input", "Ask the user one or more multiple-choice questions (Codex schema). The run pauses until the user answers.",
+            json!({
+                "questions": json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "header": { "type": "string" },
+                            "question": { "type": "string" },
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                })
+            }), &["questions"]),
+        def("compact_context", "Manually compact the conversation: summarize older messages into a context-summary block and drop them from the working history (also triggered automatically near the token threshold).",
+            json!({}), &[]),
+        def("spawn_agent", "Spawn a single interactive sub-agent (explorer = read-only research, worker = full workspace tools) that runs in the background; use wait_agent / send_input to interact with it.",
+            json!({
+                "name": json!({ "type": "string", "description": "Short agent name." }),
+                "role": json!({ "type": "string", "enum": ["explorer", "worker"], "description": "Default: explorer." }),
+                "task": json!({ "type": "string", "description": "Self-contained task description." })
+            }), &["task"]),
+        def("send_input", "Continue a spawned sub-agent: deliver `input` to it (as a queued user message if still running, or as a follow-up turn if it finished).",
+            json!({
+                "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }),
+                "input": json!({ "type": "string", "description": "Additional instruction or data for the agent." })
+            }), &["agent_id", "input"]),
+        def("wait_agent", "Wait for a spawned sub-agent to finish and return its final output.",
+            json!({ "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }) }), &["agent_id"]),
+        def("close_agent", "Terminate a spawned sub-agent immediately (its partial output is kept).",
+            json!({ "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }) }), &["agent_id"]),
+        def("list_agents", "List all sub-agents spawned during this run with their ids, roles and statuses.",
+            json!({}), &[]),
         def("set_chat_title", "Set the chat title shown in the sidebar (max ~60 characters). Call this once when the topic of the conversation is clear.",
             json!({ "title": json!({ "type": "string" }) }), &["title"]),
         def("update_plan", "Create or update the visible plan for this run. Tasks appear as a checklist in the plan panel.",
@@ -266,7 +335,118 @@ pub async fn execute(project_path: &Path, name: &str, args: &Value) -> Result<St
         "search_files" => search_files(project_path, args),
         "run_command" => run_command(project_path, args).await,
         "fetch_url" => fetch_url(args).await,
+        "view_image" => view_image(project_path, args),
         _ => Err(format!("Unknown tool \"{name}\".")),
+    }
+}
+
+/// Builds the secret-stripped environment for exec sessions (`exec_command`).
+pub fn exec_session_env() -> std::collections::HashMap<String, String> {
+    const SAFE: [&str; 18] = [
+        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE",
+        "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "NUMBER_OF_PROCESSORS", "OS", "PROCESSOR_ARCHITECTURE",
+        "LANG", "TERM", "SHELL",
+    ];
+    let mut env = std::collections::HashMap::new();
+    for (name, value) in std::env::vars() {
+        if is_secret_env(&name) {
+            continue;
+        }
+        if SAFE.contains(&name.as_str()) || name.starts_with("SYSTEMROOT") {
+            env.insert(name, value);
+        }
+    }
+    env
+}
+
+/// `view_image`: reports mime type, byte size and pixel dimensions of an
+/// image inside the workspace without sending the bytes to the model.
+fn view_image(project: &Path, args: &Value) -> Result<String, String> {
+    let relative = str_arg(args, "path").unwrap_or_default();
+    let path = safe_path(project, relative).map_err(|err| format!("view_image: {err}"))?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|err| format!("view_image: cannot read {}: {err}", path.display()))?;
+    if metadata.is_dir() {
+        return Err("view_image: path is a directory.".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let mime_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "tif" | "tiff" => "image/tiff",
+        "avif" => "image/avif",
+        _ => return Err(format!("view_image: unsupported image extension '{extension}'.")),
+    };
+    let bytes = metadata.len();
+    let (width, height) = image_dimensions(&path, &extension)
+        .unwrap_or_else(|| (0, 0));
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": relative,
+        "mime_type": mime_type,
+        "bytes": bytes,
+        "width": width,
+        "height": height,
+    })
+    .to_string())
+}
+
+/// Reads pixel dimensions from PNG/GIF/BMP headers and JPEG SOF markers.
+fn image_dimensions(path: &Path, extension: &str) -> Option<(u64, u64)> {
+    let mut data = vec![0u8; 64 * 1024];
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let read = file.read(&mut data).ok()?;
+    data.truncate(read);
+    match extension {
+        "png" if data.len() >= 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" => {
+            let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]) as u64;
+            let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as u64;
+            Some((width, height))
+        }
+        "gif" if data.len() >= 10 && &data[0..3] == b"GIF" => {
+            let width = u16::from_le_bytes([data[6], data[7]]) as u64;
+            let height = u16::from_le_bytes([data[8], data[9]]) as u64;
+            Some((width, height))
+        }
+        "bmp" if data.len() >= 26 && &data[0..2] == b"BM" => {
+            let width = i32::from_le_bytes([data[18], data[19], data[20], data[21]]).unsigned_abs() as u64;
+            let height = i32::from_le_bytes([data[22], data[23], data[24], data[25]]).unsigned_abs() as u64;
+            Some((width, height))
+        }
+        "jpg" | "jpeg" => {
+            // Walk JPEG markers to the first SOFn segment.
+            let mut index = 2usize;
+            while index + 9 < data.len() {
+                if data[index] != 0xFF {
+                    break;
+                }
+                let marker = data[index + 1];
+                if marker == 0xD8 || (0xD0..=0xD9).contains(&marker) {
+                    index += 2;
+                    continue;
+                }
+                let length = u16::from_be_bytes([data[index + 2], data[index + 3]]) as usize;
+                let is_sof = (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker);
+                if is_sof {
+                    let height = u16::from_be_bytes([data[index + 5], data[index + 6]]) as u64;
+                    let width = u16::from_be_bytes([data[index + 7], data[index + 8]]) as u64;
+                    return Some((width, height));
+                }
+                index += 2 + length;
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -725,6 +905,34 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
             "newContent": Value::Null,
             "url": str_arg(args, "url").unwrap_or(""),
         }),
+        "exec_command" => json!({
+            "tool": name,
+            "action": "command",
+            "path": "",
+            "absolutePath": absolute.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| project.display().to_string()),
+            "oldContent": Value::Null,
+            "newContent": Value::Null,
+            "command": str_arg(args, "cmd").unwrap_or(""),
+            "networkDomains": json!([]),
+            "justification": str_arg(args, "justification").unwrap_or(""),
+        }),
+        "apply_patch" => {
+            let patch_text = str_arg(args, "input")
+                .or_else(|| str_arg(args, "patch"))
+                .unwrap_or("");
+            let (diff, _) = crate::orchestrator::apply_patch::preview_patch(project, patch_text)
+                .unwrap_or_default();
+            json!({
+                "tool": name,
+                "action": "patch",
+                "path": "",
+                "absolutePath": project.display().to_string(),
+                "oldContent": Value::Null,
+                "newContent": Value::Null,
+                "patch": patch_text.chars().take(12_000).collect::<String>(),
+                "diff": diff.chars().take(12_000).collect::<String>(),
+            })
+        }
         "read_file" => json!({
             "tool": name,
             "action": "read",
@@ -880,7 +1088,9 @@ mod tests {
         let full = all_tool_defs();
         assert_eq!(full.len(), filter_tool_defs(&[
             "read_file", "write_file", "edit_file", "delete_file", "list_directory", "create_directory",
-            "move_file", "search_files", "run_command", "fetch_url", "set_chat_title", "update_plan",
+            "move_file", "search_files", "run_command", "fetch_url", "apply_patch", "exec_command",
+            "write_stdin", "view_image", "request_user_input", "compact_context", "spawn_agent",
+            "send_input", "wait_agent", "close_agent", "list_agents", "set_chat_title", "update_plan",
             "remember", "load_skill", "ask_user_question", "spawn_agents",
         ]).len());
     }
