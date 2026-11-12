@@ -1,90 +1,87 @@
-# Locagens — Yeni Sürüm Yayınlama Rehberi
+# Locagens — Release Guide
 
-Bu belge, Locagens masaüstü uygulamasının nasıl yayınlanacağını açıklar.
-
-Yayın işlemi Rust backend (`apps/backend`, Axum + Tokio, pi tabanlı file-based
-JSON/JSONL storage) üzerine kuruludur; eski Node.js/Fastify API (`apps/api`),
-`node:sqlite` veritabanı ve `@locagens/db-writer` sidecar süreci kalkmıştır.
+How to release the Locagens desktop app and CLI. The product is **100% pure
+Rust**: `apps/backend` (`locagens_core` library + `lcgn` CLI) and
+`apps/desktop-rs` (native Dioxus 0.7 desktop app, binary `locagens`). There is
+no Node.js, no Electron, no Vue web app, and no HTTP server to release.
 
 ---
 
-## Yöntem 1: Önerilen (Tag ile Sürüm)
+## Method 1: Recommended (tag-triggered release)
 
-En temiz yol. Hem DMG üretilir hem de GitHub Release otomatik oluşturulur.
-
-1. `apps/desktop/package.json` içindeki `version` alanını güncelleyin
-   (örn. `0.1.0` → `0.2.0`).
-2. Değişiklikleri commit edin:
+1. Bump the `version` fields in `apps/backend/Cargo.toml` and
+   `apps/desktop-rs/Cargo.toml` (e.g. `0.2.0` → `0.3.0`).
+2. Commit:
    ```bash
-   git add apps/desktop/package.json
-   git commit -m "bump: v0.2.0"
+   git add apps/backend/Cargo.toml apps/desktop-rs/Cargo.toml
+   git commit -m "bump: v0.3.0"
    ```
-3. Tag oluşturun ve push edin:
+3. Tag and push:
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
-4. GitHub Actions otomatik olarak tetiklenir:
-   - Rust backend (`cargo build --release --manifest-path apps/backend/Cargo.toml`) derlenir
-   - shared paket ve web bundle derlenir
-   - electron-builder DMG üretir
-   - DMG dosyası yeni oluşturulan GitHub Release'e eklenir
-   - Sürüm notları otomatik üretilir
+4. GitHub Actions triggers **"Release (macOS & Windows binaries)"**, which:
+   - Builds `locagens` (desktop) and `lcgn` (CLI) release binaries for
+     `aarch64-apple-darwin`, `x86_64-apple-darwin` and
+     `x86_64-pc-windows-msvc`.
+   - Uploads them as workflow artifacts.
+   - Creates a GitHub Release with the binaries and auto-generated notes.
 
-İşlem bittiğinde GitHub Releases sayfasından DMG'yi indirebilirsiniz.
-
----
-
-## Yöntem 2: Manuel (Sadece Build, Release Yok)
-
-Sadece DMG üretmek istiyorsanız (örn. test amaçlı) tag gerekmez:
-
-1. GitHub → Actions → **"Release macOS DMG"** workflow'una gidin.
-2. **Run workflow** butonuna tıklayın.
-3. `tag_name` alanını boş bırakın (sadece build yapılır, release oluşturulmaz).
-4. Build tamamlandıktan sonra **Artifacts** bölümünden DMG'yi indirin
-   (14 gün süreyle saklanır).
-
-Alternatif olarak manuel dispatch'te `tag_name` alanına bir değer girerseniz
-(örn. `v0.2.1`), workflow hem DMG üretir hem de o isimle bir GitHub Release
-oluşturur.
+When done, download the binaries from the GitHub Releases page.
 
 ---
 
-## Kod İmzalama
+## Method 2: Manual (build only, no release)
 
-Henüz kod imzalama yapılmıyor. DMG imzasız üretiliyor. Apple Developer sertifikamız
-olduğunda repository secrets üzerinden eklenecek. O zamana kadar kullanıcılar
-uygulamayı ilk açışta macOS uyarısıyla karşılaşacak (aşağıya bakın).
+To build without creating a release:
 
----
+1. GitHub → Actions → **"Release (macOS & Windows binaries)"** workflow.
+2. Click **Run workflow**.
+3. Leave `tag_name` empty (build only, no release).
+4. After the build, download the binaries from the workflow **Artifacts**
+   (kept for 14 days).
 
-## Otomatik Güncelleme
-
-Henüz otomatik güncelleme desteği yok. Kullanıcılar yeni sürümleri manuel olarak
-GitHub Releases sayfasından indirir.
-
----
-
-## Platform Desteği
-
-Şu an sadece macOS destekleniyor. Windows ve Linux desteği ileride eklenecek.
+If you enter a `tag_name` on manual dispatch (e.g. `v0.3.1`), the workflow
+bumps the crate versions, builds, and creates a GitHub Release with that tag.
 
 ---
 
-## İmzasız DMG Uyarısı Hakkında
+## Local build
 
-macOS, imzasız uygulamaları açarken uyarı gösterir:
+Everything builds with cargo alone:
 
-> "Locagens" cannot be opened because the developer cannot be verified.
+```bash
+cargo build --release -p locagens-backend   # lcgn CLI
+cargo build --release -p locagens-desktop   # locagens desktop app
+```
 
-Bu normaldir. Çözüm:
+Binaries land in `target/release/` (`lcgn` / `lcgn.exe`, `locagens` /
+`locagens.exe`).
 
-1. Uygulamaya **sağ tıklayın** (veya Control + tıklayın).
-2. **Open** seçeneğini seçin.
-3. Açma isteği sorulduğunda **Open** butonuna tıklayın.
+---
 
-Alternatif olarak: **System Settings → Privacy & Security →** en alta inin →
-**Open Anyway** butonuna tıklayın.
+## Code signing
 
-Bu uyarı sadece ilk açılışta görünür.
+Not set up yet. macOS binaries are unsigned — Gatekeeper shows a warning on
+first launch. When we have an Apple Developer certificate, it will be added
+via repository secrets. Until then:
+
+> "locagens" cannot be opened because the developer cannot be verified.
+
+Fix: right-click (or Control-click) the app → **Open** → **Open** in the
+dialog, or System Settings → Privacy & Security → **Open Anyway**.
+
+---
+
+## Auto-update
+
+No auto-update support yet. Users download new versions manually from the
+GitHub Releases page.
+
+---
+
+## Platform support
+
+macOS (Apple Silicon + Intel) and Windows (x86_64 MSVC). Linux support may be
+added later.

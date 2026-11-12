@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04, windows-2025]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,19 +21,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/backend
-      # Rust backend: tests + release build.
-      - run: cargo test --manifest-path apps/backend/Cargo.toml
-      - run: cargo build --release --manifest-path apps/backend/Cargo.toml
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-          run_install: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Shared is a runtime dependency of the frontend (resolved via dist/).
-      - run: pnpm --filter @locagens/shared build
-      - run: pnpm --filter @locagens/web test
-      - run: pnpm build
+      # Pure Rust: tests + release build. No Node.js, pnpm, or Electron.
+      - run: cargo test -p locagens-backend
+      - run: cargo build --release -p locagens-backend

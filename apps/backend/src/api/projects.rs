@@ -1,6 +1,4 @@
 //! Projects facade: registration, workspace file listing, and git operations.
-//! Logic mirrors the `/api/projects` HTTP routes in `routes/projects.rs`, which
-//! are thin adapters over these functions.
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::db;

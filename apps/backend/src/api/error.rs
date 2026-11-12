@@ -1,7 +1,6 @@
 //! Error type shared by every facade function.
 
-/// Coarse category of a facade error; maps 1:1 onto the HTTP status codes the
-/// routes have always used (400/404/409/500).
+/// Coarse category of a facade error (400/404/409/500).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiErrorKind {
     BadRequest,

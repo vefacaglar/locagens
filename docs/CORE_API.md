@@ -1,9 +1,8 @@
 # `locagens_core::api` — Typed In-Process Core API
 
 `locagens_core::api` is the **typed in-process facade** over the Locagens core
-(`apps/backend`, crate `locagens_core`). It exposes the exact same operations
-the HTTP routes serve, but as plain Rust functions returning typed values —
-no HTTP involved.
+(`apps/backend`, crate `locagens_core`). It exposes every core operation as
+plain Rust functions returning typed values — no HTTP involved.
 
 ## Who uses it
 
@@ -11,7 +10,6 @@ no HTTP involved.
 | --- | --- |
 | **Native Rust desktop app** (`apps/desktop-rs`, Dioxus) | calls `api` functions directly on the UI thread / from async tasks |
 | **`lcgn` CLI** (`src/bin/lcgn.rs`, `src/cli/`) | creates runs, answers questions and streams events through the facade |
-| **HTTP routes** (`src/routes/`) | thin adapters: each handler parses input, calls the facade, maps `ApiError` → HTTP status |
 
 ## Startup
 
@@ -23,7 +21,7 @@ Opens the data store (file-based JSON/JSONL under the app-support dir), loads
 `~/.pi/agent` auth/models, runs startup tasks (fail stuck runs, project
 sync), and returns the shared `AppState` (`db`, `orchestrator`, `pi`,
 `processes`, `default_project_path`). The desktop UI calls this once at
-startup — it is what `main.rs` does before serving HTTP.
+startup — it is what the desktop app and `lcgn` do first.
 
 ## Error handling
 
@@ -36,9 +34,9 @@ pub type ApiResult<T> = Result<T, ApiError>;
 ```
 
 Constructors: `ApiError::bad_request`, `not_found`, `conflict`, `internal`.
-`ApiError` implements `std::error::Error` + `Display`; HTTP routes map the
-kind onto the status code and pass the message through unchanged, so the
-in-process and HTTP surfaces behave identically.
+`ApiError` implements `std::error::Error` + `Display`; the kinds map 1:1 onto
+the HTTP status codes the former routes used (400/404/409/500), and messages
+pass through unchanged.
 
 ## Modules
 
@@ -72,8 +70,7 @@ pub type EventRx   = tokio::sync::broadcast::Receiver<RunEvent>;
 pub async fn subscribe_run_events(state: &AppState, run_id: &str) -> EventRx
 ```
 
-Semantics (identical to `GET /api/runs/:id/events`, minus the HTTP-only
-leading `{"type":"connected"}` frame):
+Semantics:
 
 * **terminal run** — replays the terminal event, then closes;
 * **live handle** — replays pending permission/question, then forwards every
@@ -200,5 +197,5 @@ coder/utility tiers and no `delegate_tasks`/`delegate_to_utility` tools.
   the project root (symlink-aware containment) before touching disk.
 * Facade functions are async where they touch the orchestrator/LLM and
   synchronous-safe otherwise; all are callable from any Tokio runtime.
-* `AppState` is cheap to clone (internally `Arc`'d) and shared across
-  desktop UI, CLI and HTTP server.
+* `AppState` is cheap to clone (internally `Arc`'d) and shared across the
+  desktop UI and the CLI.

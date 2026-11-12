@@ -41,10 +41,12 @@ $null | pi --model opencode-go/glm-5.3-flash --no-mcp --no-extensions --approve 
 
 ### Locagens runtime architecture direction
 
-The backend is migrating 100% to **Rust (`Axum` + `Tokio` + `Rusqlite`)** built
-directly on top of `pi` (`pi --mode rpc`, `pi auth` /
-`~/.pi/agent/auth.json`, `models.json`). All new backend, provider, and auth
-work targets the Rust + `pi` model; the Node/Fastify backend is legacy.
+Locagens is **100% pure Rust**: `apps/backend` (`locagens_core` library +
+`lcgn` CLI) and `apps/desktop-rs` (native Dioxus 0.7 desktop app, binary
+`locagens`), built directly on top of `pi` (in-process; `pi auth` /
+`~/.pi/agent/auth.json`, `models.json`). Consumers call the typed in-process
+facade `locagens_core::api` (see `docs/CORE_API.md`). There is no Node
+backend, no Electron shell, no Vue web app, and no HTTP server.
 
 ## Agent Behavior
 
@@ -119,9 +121,9 @@ The orchestrator enforces: workspace path containment (including symlink
 checks), permission gating for dangerous tools, fail-closed command sandbox
 with deny-by-default network, SSRF-safe agent HTTP, cooperative cancellation,
 provider timeouts, startup cleanup of stuck runs, and error persistence that
-never discards prior messages. Provider config lives in OS app-support
-(keychain-backed secrets, `apiKeyRef` in JSON) and raw secrets never reach the
-browser.
+never discards prior messages. Provider config lives in pi's agent directory
+(`~/.pi/agent/auth.json`, `models.json`; keys are masked in metadata) and raw
+secrets never reach the UI.
 
 ## Done Definition
 

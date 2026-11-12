@@ -339,7 +339,7 @@ pub fn delete(id: &str, scope: &str, project_path: Option<&str>) -> Result<bool,
     }
 }
 
-/// Convenience re-exports for routes that need typed payloads.
+/// Convenience re-exports for facade consumers that need typed payloads.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallPayload {

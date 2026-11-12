@@ -1,5 +1,4 @@
-//! Security status & sandbox setup facade
-//! (HTTP equivalent: `routes/security.rs`).
+//! Security status & sandbox setup facade.
 
 use crate::api::error::{ApiError, ApiResult};
 use serde::{Deserialize, Serialize};

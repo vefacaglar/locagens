@@ -1,4 +1,4 @@
-//! Memory CRUD facade (HTTP equivalent: `routes/memory.rs`, Settings → Memory).
+//! Memory CRUD facade (Settings → Memory).
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::AppState;

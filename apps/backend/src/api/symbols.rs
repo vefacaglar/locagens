@@ -1,5 +1,4 @@
-//! Code symbol search facade
-//! (HTTP equivalent: `routes/symbols.rs`, Settings → Symbols / @-symbol mentions).
+//! Code symbol search facade (Settings → Symbols / @-symbol mentions).
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::AppState;
