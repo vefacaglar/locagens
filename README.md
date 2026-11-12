@@ -26,7 +26,7 @@ User Task
 
 ```txt
 Native Rust desktop UI (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
-Rust core (locagens_core + lcgn CLI, apps/backend) built on top of pi
+Rust core (modular crates/* + apps/cli `lcgn`) built on top of pi
 in-process typed API facade (locagens_core::api, see docs/CORE_API.md)
 file-based JSON/JSONL persistence under <app_support_dir>/data/ (no SQLite)
 pi provider engine (~/.pi/agent/auth.json & models.json, models-store.json)
@@ -53,8 +53,8 @@ lcgn CLI (pi-like command line on the same Rust core)
 
 ```txt
 Desktop: native Rust app (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
-Core:    Rust (Tokio) built directly on top of pi (apps/backend,
-         `locagens_core` library + `lcgn` CLI binary)
+Core:    Rust (Tokio) modular workspace (crates/*) built directly on top of
+         pi (apps/cli `lcgn`, apps/desktop-rs `locagens`)
 API:     in-process typed facade (locagens_core::api, docs/CORE_API.md)
 Storage: file-based JSON/JSONL (projects.json, sessions/<run_id>/…, no SQLite)
 Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
@@ -66,16 +66,23 @@ Repository style: monorepo
 
 ```txt
 locagens/
+  crates/
+    protocol/              locagens-protocol: shared data models, ApprovalPolicy,
+                           SandboxMode
+    apply-patch/           locagens-apply-patch: Codex `*** Begin Patch` parser,
+                           seek_sequence fuzzy matcher, unified diff generator
+    execpolicy/            locagens-execpolicy: command_safety classifier +
+                           ProcessManager
+    config/                locagens-config: ~/.locagens + ~/.codex config.toml &
+                           auth.json, provider/model catalog
+    context/               locagens-context: hierarchical AGENTS.md discovery,
+                           <environment_context>, TurnDiffTracker
+    core/                  locagens-core: orchestrator, OpenAI Responses + Chat
+                           Completions + Anthropic SSE streaming, tools,
+                           MCP/skills/plugins/symbols, in-process
+                           locagens_core::api facade
   apps/
-    backend/               Rust core: locagens_core library + lcgn CLI
-      src/
-        api/               typed in-process facade (docs/CORE_API.md)
-        cli/               lcgn command line (args, repl, runner, render)
-        orchestrator/      run lifecycle + workspace tools
-        services/          processes, plugins, skills, symbols, mcp
-        db.rs              file-based JSON/JSONL store
-        paths.rs           settings/data dir resolution
-        pi_providers.rs    ~/.pi/agent auth.json + models.json engine
+    cli/                   locagens-cli, binary `lcgn` (args, repl, runner, render)
     desktop-rs/            native Dioxus 0.7 desktop app (binary `locagens`)
       src/
   docs/                    CORE_API.md, CLI.md, RELEASING.md, database-schema.md
@@ -189,9 +196,9 @@ See `docs/CLI.md` for the full flag reference.
 Everything builds with cargo alone — no Node.js, pnpm, or Electron:
 
 ```bash
-cargo test -p locagens-backend
-cargo build --release -p locagens-backend
-cargo run -p locagens-backend --bin lcgn -- -p "say OK"
+cargo test -p locagens-cli
+cargo build --release -p locagens-cli
+cargo run -p locagens-cli --bin lcgn -- -p "say OK"
 cargo run -p locagens-desktop
 ```
 
@@ -199,7 +206,7 @@ cargo run -p locagens-desktop
 
 Locagens now ships the Codex tool harness (ported from `codex-rs`):
 
-- **`apply_patch`** (`orchestrator/apply_patch.rs`): full `*** Begin Patch` …
+- **`apply_patch`** (`crates/apply-patch`): full `*** Begin Patch` …
   `*** End Patch` parser (add / delete / update / move, multi-chunk updates,
   `@@ context`, `*** End of File`), the fuzzy `seek_sequence` matcher (exact →
   `trim_end` → `trim` → Unicode-punctuation normalization), workspace-safe
@@ -211,7 +218,7 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
   `{ exit_code, output, wall_time_ms }` when they finish within
   `yield_time_ms` (default 10000 ms, clamped 500..60000) and otherwise
   register an interactive session the model can drive with `write_stdin`.
-- **Command safety & policy** (`orchestrator/command_safety.rs`): Codex's
+- **Command safety & policy** (`crates/execpolicy`): Codex's
   `ApprovalPolicy` (`untrusted` / `on-request` / `on-failure` / `never`) and
   `SandboxMode` (`read-only` / `workspace-write` / `danger-full-access`)
   mapped from Locagens modes (`chat`/`plan` → read-only, `accept_edits` →
@@ -219,7 +226,7 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
   danger-full-access + never). Known-safe read-only commands (`git status`,
   `rg`, `cargo check`, …) run without prompting in `accept_edits`; dangerous
   commands (`rm -rf`, `git reset --hard`, `sudo`, …) always prompt.
-- **Hierarchical `AGENTS.md` discovery** (`orchestrator/agents_md.rs`): walks
+- **Hierarchical `AGENTS.md` discovery** (`crates/context`): walks
   from the git root down to the cwd picking at most one doc per level
   (`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` > `.agents.md`), joined
   with `
@@ -228,14 +235,14 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
 
 ` under a 32 KiB budget and injected into
   the system prompt.
-- **`<environment_context>`** (`orchestrator/env_context.rs`): Codex-format
+- **`<environment_context>`** (`crates/context`): Codex-format
   XML block (cwd / shell / approval_policy / sandbox_mode / network_access /
   workspace_roots / current_date) seeded as the first user message of a run.
-- **`TurnDiffTracker`** (`orchestrator/turn_diff_tracker.rs`): snapshots file
+- **`TurnDiffTracker`** (`crates/context`): snapshots file
   baselines before mutations (`apply_patch`, `write_file`, `edit_file`,
   `delete_file`, `move_file`) and streams `turn_diff_updated` events with the
   aggregate unified diff and changed-file count.
-- **Context compaction** (`orchestrator/compact.rs`): automatic compaction
+- **Context compaction** (`locagens-core` orchestrator): automatic compaction
   when the estimated input tokens exceed 90k (also on demand via
   `compact_context`): older history is summarized with Codex's
   SUMMARIZATION_PROMPT and replaced by a `[Compacted context summary]` block

@@ -1,15 +1,16 @@
 # `locagens_core::api` — Typed In-Process Core API
 
 `locagens_core::api` is the **typed in-process facade** over the Locagens core
-(`apps/backend`, crate `locagens_core`). It exposes every core operation as
-plain Rust functions returning typed values — no HTTP involved.
+(`crates/core`, crate `locagens-core`; consumed by `apps/cli` and
+`apps/desktop-rs`). It exposes every core operation as plain Rust functions
+returning typed values — no HTTP involved.
 
 ## Who uses it
 
 | Consumer | How |
 | --- | --- |
 | **Native Rust desktop app** (`apps/desktop-rs`, Dioxus) | calls `api` functions directly on the UI thread / from async tasks |
-| **`lcgn` CLI** (`src/bin/lcgn.rs`, `src/cli/`) | creates runs, answers questions and streams events through the facade |
+| **`lcgn` CLI** (`apps/cli`: `src/bin/lcgn.rs`, `src/cli/`) | creates runs, answers questions and streams events through the facade |
 
 ## Startup
 
@@ -18,7 +19,8 @@ pub fn bootstrap() -> anyhow::Result<AppState>
 ```
 
 Opens the data store (file-based JSON/JSONL under the app-support dir), loads
-`~/.pi/agent` auth/models, runs startup tasks (fail stuck runs, project
+provider auth/models (`crates/config`: `~/.locagens` + `~/.codex` + legacy
+`~/.pi/agent`), runs startup tasks (fail stuck runs, project
 sync), and returns the shared `AppState` (`db`, `orchestrator`, `pi`,
 `processes`, `default_project_path`). The desktop UI calls this once at
 startup — it is what the desktop app and `lcgn` do first.
@@ -200,7 +202,7 @@ coder/utility tiers and no `delegate_tasks`/`delegate_to_utility` tools.
 * `AppState` is cheap to clone (internally `Arc`'d) and shared across the
   desktop UI and the CLI.
 
-## Phase 9 — Codex Harness Tools (orchestrator)
+## Phase 9 — Codex Harness Tools (crates/core orchestrator + crates/* support)
 
 The agent loop exposes the full Codex toolset in addition to the classic
 workspace tools:
