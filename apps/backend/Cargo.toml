@@ -39,6 +39,7 @@ toml = "0.8"
 locagens-protocol = { path = "../../crates/protocol" }
 locagens-apply-patch = { path = "../../crates/apply-patch" }
 locagens-execpolicy = { path = "../../crates/execpolicy" }
+locagens-context = { path = "../../crates/context" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

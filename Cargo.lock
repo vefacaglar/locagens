@@ -3059,6 +3059,7 @@ dependencies = [
  "futures",
  "locagens-apply-patch",
  "locagens-config",
+ "locagens-context",
  "locagens-execpolicy",
  "locagens-protocol",
  "regex",
@@ -3094,6 +3095,18 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "locagens-context"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "locagens-apply-patch",
+ "locagens-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
