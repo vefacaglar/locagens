@@ -1,5 +1,4 @@
-//! Background process facade
-//! (HTTP equivalent: `routes/processes.rs`).
+//! Background process facade.
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::services::processes::{ProcessInfo, ProcessLogEntry};

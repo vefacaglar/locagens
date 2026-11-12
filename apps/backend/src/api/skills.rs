@@ -1,6 +1,5 @@
-//! Skills facade: list, read, install, skills-folder and delete logic for the
-//! Settings → Skills feature. Logic mirrors the `/api/skills` HTTP routes in
-//! `routes/skills.rs`, which are thin adapters over these functions.
+//! Skills facade: list, read, install, skills-folder and delete logic for
+//! the Settings → Skills feature.
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::services::skills as skill_service;

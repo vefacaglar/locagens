@@ -1,6 +1,5 @@
 //! MCP facade: list, create/update, delete, restart and toggle logic for the
-//! Settings → MCP feature. Logic mirrors the `/api/mcp` HTTP routes in
-//! `routes/mcp.rs`, which are thin adapters over these functions.
+//! Settings → MCP feature.
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::services::mcp as mcp_service;

@@ -1,31 +1,27 @@
 //! Locagens core library — the shared Rust core behind both binaries
-//! (`locagens-backend` HTTP server and `lcgn` CLI).
+//! (the `lcgn` CLI and the native Dioxus desktop app).
 //!
 //! `build_core()` resolves the file-based data dir, opens the `Db`, and
 //! builds the `PiProviderManager` (`~/.pi/agent/auth.json`, `models.json`,
 //! `models-store.json`) plus the in-process orchestrator. No `pi` process is
-//! ever spawned.
+//! ever spawned and there is no HTTP server — consumers call the typed
+//! in-process facade in `api` directly.
 
 pub mod api;
-pub mod auth;
 pub mod cli;
 pub mod db;
 pub mod orchestrator;
 pub mod paths;
 pub mod pi_providers;
-pub mod routes;
 pub mod services;
 pub mod state;
 pub mod util;
 
-/// Re-exported so route modules can keep referring to `crate::AppState`.
+/// Re-exported so consumers can keep referring to `crate::AppState`.
 pub use state::AppState;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Default HTTP port of the backend (settings.json / PORT env override it).
-pub const DEFAULT_PORT: u16 = 4321;
 
 /// Shared bootstrap built once per process and reused by both binaries.
 pub struct Core {
@@ -38,7 +34,7 @@ pub struct Core {
 }
 
 impl Core {
-    /// Wraps the core into a full `AppState` (adds process manager + token).
+    /// Wraps the core into a full `AppState` (adds process manager).
     pub fn into_app_state(self, processes: Arc<services::processes::ProcessManager>) -> AppState {
         AppState {
             db: self.db,
@@ -47,9 +43,6 @@ impl Core {
             settings_path: self.settings_path,
             default_project_path: self.default_project_path,
             processes,
-            auth_token: std::env::var("LOCAGENS_API_TOKEN")
-                .ok()
-                .filter(|token| !token.is_empty()),
         }
     }
 }

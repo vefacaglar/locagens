@@ -334,7 +334,7 @@ pub fn delete(target: &str, name: &str, project_path: Option<&str>) -> Result<bo
     Ok(true)
 }
 
-/// Validate a project path for skills routes (registered or not, we only need
+/// Validate a project path for skills callers (registered or not, we only need
 /// an existing directory).
 pub fn validate_project_path(raw: &str) -> Option<String> {
     canonical_project_path(raw).ok().map(|p| p.to_string_lossy().to_string())

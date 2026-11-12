@@ -1,7 +1,7 @@
 # `lcgn` — the Locagens CLI
 
 `lcgn` is a pi-like command line for Locagens. It runs the **same Rust core as
-the HTTP backend** (orchestrator, `PiProviderManager` tools, permission flow,
+the desktop app** (orchestrator, `PiProviderManager` tools, permission flow,
 file-based sessions) **in-process** — no HTTP server and no spawned `pi`
 process. Sessions it creates are normal Locagens runs, so they show up in the
 desktop app and can be continued from there.

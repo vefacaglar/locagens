@@ -1,5 +1,4 @@
-//! Provider and native-`pi` auth facade
-//! (HTTP equivalent: `routes/providers.rs`).
+//! Provider and native-`pi` auth facade.
 //!
 //! Thin wrappers over `PiProviderManager` (pure Rust handling of
 //! `~/.pi/agent/auth.json`, `models.json`, `models-store.json` and Locagens

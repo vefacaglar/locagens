@@ -1,19 +1,10 @@
-//! Small shared helpers: timestamps, canonical paths and JSON error responses.
+//! Small shared helpers: timestamps and canonical paths.
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Current UTC time in the same shape as JS `new Date().toISOString()`.
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-/// Uniform error body: `{ "error": "..." }`.
-pub fn json_error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
 }
 
 /// The filesystem root of a path via its last ancestor component.

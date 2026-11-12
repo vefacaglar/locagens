@@ -1,5 +1,5 @@
 //! Typed in-process API of the Locagens core; no HTTP involved; used by the
-//! desktop UI, `lcgn` and the HTTP adapters in `routes`.
+//! desktop UI (`apps/desktop-rs`) and the `lcgn` CLI.
 
 pub mod error;
 pub mod mcp;

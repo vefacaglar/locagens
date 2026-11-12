@@ -1,11 +1,12 @@
 # Locagens
 
-Locagens is a local-first workspace assistant for local projects.
+Locagens is a local-first workspace assistant for local projects — 100% pure
+Rust, no Node.js, no Electron, no web frontend, no HTTP server.
 
 The user selects one provider/model, chooses a project folder, sends a task, and
-the backend orchestrator runs a tool-calling chat loop. The assistant can read,
-edit, create, move, delete, and search files inside the selected workspace. It
-can also ask for permission to run commands or fetch URLs.
+the in-process orchestrator runs a tool-calling chat loop. The assistant can
+read, edit, create, move, delete, and search files inside the selected
+workspace. It can also ask for permission to run commands or fetch URLs.
 
 The product is a **single-model workspace agent**: one provider/model drives the
 whole run, and the agent can fan work out to sub-agents with `spawn_agents`
@@ -24,10 +25,11 @@ User Task
 ## Current Features
 
 ```txt
-Native Rust desktop UI (Dioxus)
-Rust backend (Axum + Tokio) built on top of pi
-file-based JSON/JSONL persistence (Codex/Claude/Pi-style storage, no SQLite)
-pi provider engine (~/.pi/agent/auth.json & models.json)
+Native Rust desktop UI (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
+Rust core (locagens_core + lcgn CLI, apps/backend) built on top of pi
+in-process typed API facade (locagens_core::api, see docs/CORE_API.md)
+file-based JSON/JSONL persistence under <app_support_dir>/data/ (no SQLite)
+pi provider engine (~/.pi/agent/auth.json & models.json, models-store.json)
 OpenAI-compatible provider adapter
 Anthropic provider adapter
 provider config in pi's agent directory (not the project)
@@ -38,10 +40,10 @@ single provider/model run creation with `spawn_agents` fan-out
 build, plan, and full-access modes
 workspace filesystem + web search tools
 ask_user_question multiple-choice flow
-  two-tier persistent memory (global + project)
-  skill loading (SKILL.md packs via load_skill; Settings → Skills)
-  permission flow for commands and URL fetches
-SSE live updates
+two-tier persistent memory (global + project)
+skill loading (SKILL.md packs via load_skill; Settings → Skills)
+permission flow for commands and URL fetches
+live event stream (in-process channels, no SSE / HTTP)
 run/message/project/permission/memory/usage persistence
 right-hand plan panel
 lcgn CLI (pi-like command line on the same Rust core)
@@ -50,11 +52,12 @@ lcgn CLI (pi-like command line on the same Rust core)
 ## Tech Stack
 
 ```txt
-Frontend: native Rust desktop app (Dioxus, `apps/desktop-rs`)
-Backend: Rust (Axum + Tokio) built directly on top of pi
+Desktop: native Rust app (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
+Core:    Rust (Tokio) built directly on top of pi (apps/backend,
+         `locagens_core` library + `lcgn` CLI binary)
+API:     in-process typed facade (locagens_core::api, docs/CORE_API.md)
 Storage: file-based JSON/JSONL (projects.json, sessions/<run_id>/…, no SQLite)
 Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
-Realtime: SSE
 Package manager: cargo (backend/desktop)
 Repository style: monorepo
 ```
@@ -64,35 +67,26 @@ Repository style: monorepo
 ```txt
 locagens/
   apps/
-    backend/
+    backend/               Rust core: locagens_core library + lcgn CLI
       src/
-        auth.rs
-        db.rs
-        paths.rs
-        pi_providers.rs
-        routes/
-        services/
-    desktop/
+        api/               typed in-process facade (docs/CORE_API.md)
+        cli/               lcgn command line (args, repl, runner, render)
+        orchestrator/      run lifecycle + workspace tools
+        services/          processes, plugins, skills, symbols, mcp
+        db.rs              file-based JSON/JSONL store
+        paths.rs           settings/data dir resolution
+        pi_providers.rs    ~/.pi/agent auth.json + models.json engine
+    desktop-rs/            native Dioxus 0.7 desktop app (binary `locagens`)
       src/
-    web/
-      src/
-        api/
-        components/
-        composables/
-        lib/
-  packages/
-    shared/
-      src/
-  Agents.md
-  Claude.md
-  README.md
+  docs/                    CORE_API.md, CLI.md, RELEASING.md, database-schema.md
+  Agents.md  Claude.md  GEMINI.md  README.md
 ```
 
 ## Provider Configuration
 
-The backend is built directly on top of `pi` and reads/writes `pi`'s
-configuration files under the `pi` agent directory (`~/.pi/agent`, overridable
-via `PI_CODING_AGENT_DIR`), not in the project:
+The core is built directly on top of `pi` and reads/writes `pi`'s configuration
+files under the `pi` agent directory (`~/.pi/agent`, overridable via
+`PI_CODING_AGENT_DIR`), not in the project:
 
 ```txt
 ~/.pi/agent/auth.json           provider id -> credential
@@ -121,9 +115,9 @@ Example `auth.json`:
 }
 ```
 
-Public provider metadata omits credentials. The local settings API returns
-editable provider config with the API key masked by a preserve marker
-(`__LOCAGENS_PRESERVE_API_KEY__`), so the frontend can edit other fields without
+Public provider metadata omits credentials. Provider settings return editable
+config with the API key masked by a preserve marker
+(`__LOCAGENS_PRESERVE_API_KEY__`), so the UI can edit other fields without
 receiving or re-posting the secret.
 
 Locagens model settings may carry a `reasoning` effort, a `contextLimit`, and
@@ -139,10 +133,10 @@ Plan          writes a stable plan to the plan panel; no file mutations
 Full Access   autonomous build; still gates dangerous tools
 ```
 
-The backend also keeps `chat`, `ask_permissions`, and `auto` modes for older
-persisted runs or direct API use, but the UI only exposes the three above.
-`run_command`, `fetch_url`, and `search_web` always require permission unless a
-matching standing grant exists.
+The core also keeps `chat`, `ask_permissions`, and `auto` modes for older
+persisted runs, but the UI only exposes the three above. `run_command`,
+`fetch_url`, and `search_web` always require permission unless a matching
+standing grant exists.
 
 When the main agent fans work out with `spawn_agents`, `explorer` sub-agents get
 read-only tools (read, list, search) and `worker` sub-agents get the full
@@ -177,8 +171,7 @@ escape it.
 
 ## Command line (`lcgn`)
 
-Locagens ships a pi-like CLI that runs the same Rust core in-process — no
-HTTP server needed:
+Locagens ships a pi-like CLI that runs the same Rust core in-process:
 
 ```bash
 lcgn -p "say OK" --model opencode-go/glm-5.3-flash --no-tools
@@ -193,21 +186,11 @@ See `docs/CLI.md` for the full flag reference.
 
 ## Development
 
-```bash
-pnpm install
-pnpm dev
-```
-
-The backend runs from Rust; build and test it with cargo:
+Everything builds with cargo alone — no Node.js, pnpm, or Electron:
 
 ```bash
-cargo test --manifest-path apps/backend/Cargo.toml
-cargo build --release --manifest-path apps/backend/Cargo.toml
-```
-
-Useful frontend checks:
-
-```bash
-pnpm --filter @locagens/web test
-pnpm --filter @locagens/web build
+cargo test -p locagens-backend
+cargo build --release -p locagens-backend
+cargo run -p locagens-backend --bin lcgn -- -p "say OK"
+cargo run -p locagens-desktop
 ```

@@ -14,5 +14,4 @@ pub struct AppState {
     pub settings_path: PathBuf,
     pub default_project_path: PathBuf,
     pub processes: Arc<ProcessManager>,
-    pub auth_token: Option<String>,
 }

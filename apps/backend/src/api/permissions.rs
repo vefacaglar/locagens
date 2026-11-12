@@ -1,5 +1,4 @@
-//! Standing permission list / revoke facade
-//! (HTTP equivalent: `routes/permissions.rs`, Settings → Permissions).
+//! Standing permission list / revoke facade (Settings → Permissions).
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::AppState;

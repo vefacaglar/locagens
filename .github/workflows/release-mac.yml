@@ -1,4 +1,4 @@
-name: Release macOS DMG
+name: Release (macOS & Windows binaries)
 
 on:
   push:
@@ -18,17 +18,18 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            targets: 'aarch64-apple-darwin x86_64-apple-darwin'
+          - os: windows-latest
+            targets: 'x86_64-pc-windows-msvc'
+    runs-on: ${{ matrix.os }}
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Developer ID Application certificate (.p12, base64) + its export password.
-      CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12_BASE64 }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
-      # App Store Connect API key used by electron-builder for notarization.
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
@@ -38,113 +39,68 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Build Rust backend (release)
-        run: cargo build --release --manifest-path apps/backend/Cargo.toml
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
         with:
-          version: 9
-          run_install: false
+          targets: ${{ matrix.targets }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'pnpm'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Update package.json version
+      - name: Update crate version from tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG_NAME: ${{ inputs.tag_name }}
           REF_NAME: ${{ github.ref_name }}
+        shell: bash
         run: |
-          node -e "
-            const fs = require('fs');
-            const eventName = process.env.EVENT_NAME;
-            const inputTagName = process.env.INPUT_TAG_NAME;
-            const refName = process.env.REF_NAME;
-            const tagName = eventName === 'workflow_dispatch' && inputTagName ? inputTagName : refName;
-            const version = tagName.replace(/^v/, '');
-            if (/^\d+\.\d+\.\d+/.test(version)) {
-              console.log('Setting version to:', version);
-              const paths = [
-                'apps/desktop/package.json',
-                'apps/backend/Cargo.toml',
-                'packages/shared/package.json'
-              ];
-              for (const pkgPath of paths) {
-                if (!fs.existsSync(pkgPath)) continue;
-                if (pkgPath.endsWith('Cargo.toml')) {
-                  const toml = fs.readFileSync(pkgPath, 'utf8');
-                  const updated = toml.replace(
-                    /^(version\s*=\s*)"[^"]*"/m,
-                    `$1"${version}"`
-                  );
-                  fs.writeFileSync(pkgPath, updated);
-                } else {
-                  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-                  pkg.version = version;
-                  fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-                }
-                console.log('Updated', pkgPath);
-              }
-            } else {
-              console.log('Skipping version update, using default version. Tag/Ref:', tagName);
-            }
-          "
+          set -e
+          tagName="${INPUT_TAG_NAME:-$REF_NAME}"
+          [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG_NAME" ] && tagName="$INPUT_TAG_NAME"
+          version="${tagName#v}"
+          case "$version" in
+            [0-9]*)
+              echo "Setting version to: $version"
+              for cargo_toml in apps/backend/Cargo.toml apps/desktop-rs/Cargo.toml; do
+                [ -f "$cargo_toml" ] || continue
+                sed -i.bak -E '0,/^version[[:space:]]*=[[:space:]]*"[^"]*"/s//version = "'"$version"'"/' "$cargo_toml"
+                rm -f "$cargo_toml.bak"
+                echo "Updated $cargo_toml"
+              done
+              ;;
+            *)
+              echo "Skipping version update, tag/ref: $tagName"
+              ;;
+          esac
 
-      - name: Check signing secrets
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      # Build the desktop app (locagens) and the CLI (lcgn) for every target.
+      - name: Build release binaries (desktop-rs workspace, builds locagens + lcgn)
+        shell: bash
         run: |
-          missing=""
-          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY_P8; do
-            [ -z "${!name}" ] && missing="$missing $name"
+          for target in ${{ matrix.targets }}; do
+            cargo build --release --target "$target" -p locagens-desktop -p locagens-backend
           done
-          if [ -n "$missing" ]; then
-            echo "::error::Missing signing/notarization secrets:$missing"
-            exit 1
-          fi
 
-      - name: Write App Store Connect API key
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      - name: Collect artifacts
+        shell: bash
         run: |
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
-          echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
+          mkdir -p dist
+          for target in ${{ matrix.targets }}; do
+            for bin in locagens lcgn; do
+              if [ -f "target/$target/release/$bin" ]; then cp "target/$target/release/$bin" dist/; fi
+              if [ -f "target/$target/release/$bin.exe" ]; then cp "target/$target/release/$bin.exe" "dist/$bin.exe"; fi
+            done
+          done
+          ls -lh dist/
 
-      - name: Build, sign and notarize (Rust backend + web + Electron)
-        run: pnpm dist
-
-      - name: Verify signature and notarization
-        run: |
-          app=$(find apps/desktop/release -maxdepth 2 -name "Locagens.app" -type d | head -1)
-          codesign --verify --deep --strict --verbose=2 "$app"
-          spctl --assess --type execute --verbose=4 "$app"
-          xcrun stapler validate "$app"
-
-      - name: List produced DMG
-        run: ls -lh apps/desktop/release/
-
-      - name: Upload DMG as workflow artifact
+      - name: Upload binaries as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: locagens-macos-dmg
-          path: apps/desktop/release/*.dmg
+          name: locagens-${{ matrix.os }}
+          path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create GitHub Release with DMG
+      - name: Create GitHub Release with binaries
         if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.tag_name != '')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-          files: apps/desktop/release/*.dmg
+          files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: false

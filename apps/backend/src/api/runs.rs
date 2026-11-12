@@ -1,7 +1,6 @@
 //! Runs facade: run lifecycle, messages, usage, plan, permission/question
-//! coordination and live event subscription — everything `/api/runs/*` and
-//! `GET /api/usage-logs` offer, without HTTP. Used by the desktop UI, the
-//! `lcgn` CLI and the thin adapters in `routes/runs.rs`.
+//! coordination and live event subscription. Used by the desktop UI and the
+//! `lcgn` CLI.
 
 use crate::api::{ApiError, ApiResult, EventRx, RunEvent};
 use crate::db::{Plan, Run, RunMessage, UsageLogEntry};
@@ -192,7 +191,6 @@ fn state_for_spawn(state: &AppState) -> Arc<AppState> {
         settings_path: state.settings_path.clone(),
         default_project_path: state.default_project_path.clone(),
         processes: state.processes.clone(),
-        auth_token: state.auth_token.clone(),
     })
 }
 

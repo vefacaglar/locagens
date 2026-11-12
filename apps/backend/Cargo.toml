@@ -2,32 +2,25 @@
 name = "locagens-backend"
 version = "0.1.0"
 edition = "2021"
-description = "Locagens Rust backend (Axum + Tokio + file-based JSON/JSONL storage) built on top of pi."
+description = "Locagens pure Rust core (locagens_core library + lcgn CLI) built on top of pi."
+
+default-run = "lcgn"
 
 [lib]
 name = "locagens_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "locagens-backend"
-path = "src/main.rs"
-
-[[bin]]
 name = "lcgn"
 path = "src/bin/lcgn.rs"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "limit"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-subtle = "2.6"
 dirs = "5.0"
 regex = "1"
 walkdir = "2"

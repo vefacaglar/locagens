@@ -1,6 +1,5 @@
-//! Plugins facade: discover, templates, install, toggle and delete logic for
-//! the Settings → Plugins feature. Logic mirrors the `/api/plugins` HTTP
-//! routes in `routes/plugins.rs`, which are thin adapters over these functions.
+//! Plugins facade: discover, templates, install, toggle and delete logic
+//! for the Settings → Plugins feature.
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::services::plugins as plugin_service;
