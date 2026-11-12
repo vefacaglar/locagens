@@ -17,6 +17,11 @@ Update this file continuously as phases complete.
 - Keep the existing **Vue 3 (`apps/web`)** UI and **Electron (`apps/desktop`)** shell, preserving
   Build/Plan/Full Access modes, Permission approval cards, Architect/Coder sub-agent windows,
   and Plan panel while adapting Provider/Settings UI to `pi`.
+- **Final architecture (after Phases 7b + 8)**: a pure Rust workspace with two members —
+  `apps/backend` (library `locagens_core` + CLI binary `lcgn`) and `apps/desktop-rs`
+  (native Dioxus 0.7 desktop binary `locagens`). The legacy Vue web app, the Electron
+  shell, the shared TypeScript contracts and the `locagens-backend` HTTP server are all
+  removed; the desktop UI and `lcgn` call `locagens_core::api` in-process.
 
 ---
 
@@ -238,12 +243,77 @@ Update this file continuously as phases complete.
   - Not verified / known limits: no real end-to-end agent run was driven
     through the new UI yet; select/`value` binding uses `selected` attributes;
     terminal tab is a Phase 7b placeholder.
-- [ ] **Phase 7b: Desktop parity** — provider editing, MCP/plugins/skills
-    management, PTY terminal tab, live usage refresh polish, app icon/packaging.
-- [ ] **Phase 8: Drop legacy `apps/web`, `apps/desktop`, `packages/shared` and the HTTP server**
-  - Remove the Vue/Electron frontend packages and the shared TS contracts once
-    `apps/desktop-rs` reaches parity; retire `locagens-backend` HTTP server if
-    nothing else consumes it (keep `lcgn` + desktop).
+- [x] **Phase 7b: Desktop parity — inspector + settings tabs, unit tests**
+  - `right_panel.rs` **Git tab**: branch/working-tree status, changed-file list from
+    `api::projects::git_diff_details` (kind badges: created/edited/deleted/moved), per-file
+    **Stage/Unstage** plus Stage all/Unstage all via the new `api::projects::git_stage` /
+    `git_unstage` facade functions (backend addition), per-file unified **DiffView** built
+    with `markdown::pseudo_diff` + `parse_diff`, and Commit / Push via `git_commit`.
+    Data auto-refreshes (4 s poll) and re-polls immediately after every action via a
+    version signal.
+  - `right_panel.rs` **Terminal / Processes tab**: launch background commands in the
+    selected project (`api::processes::spawn_process` with `SpawnProcessInput`),
+    auto-refreshing process list (`list_processes`), per-process stdout/stderr log view
+    (`process_logs`, 1.2 s poll, self-terminating when the process dies or the selection
+    changes) and **Stop** (`kill_process`). The legacy placeholder is gone.
+  - `settings.rs` — all 8 tabs fully wired to `locagens_core::api`:
+    - **Providers** (catalog + default picker) and **pi Auth** (`providers::get_pi_auth`).
+    - **Permissions**: standing grants list with delete (`permissions::*`).
+    - **Memory**: list, create (Enter), **Edit → `memory::update_memory`**, delete.
+    - **Skills** (`skills::list_skills/get_skill/install_skill/delete_skill`): list with
+      user/project source badges, create + edit `SKILL.md` in a frontmatter-aware editor
+      (`NEW_SKILL_TEMPLATE`), target scope selector (user scope or the selected project),
+      delete. The previous static info tab is gone.
+    - **MCP** (`mcp::list/upsert/toggle/delete_mcp_server`): server list with transport,
+      scope, tool count and live status/error, enable/disable, delete, and an add form
+      with stdio (command) / SSE (URL) transport selector.
+    - **Plugins** (`plugins::list/install/toggle/delete_plugin` + `InstallPayload`):
+      install from the built-in template catalog or a local folder, per-plugin
+      enable/disable and uninstall. The previous static info tab is gone.
+    - **Security** (`security::security_status` + `setup_sandbox(true)`): sandbox
+      status/warnings/errors, workspace policy (deny-by-default network, workspace-writes
+      only) and the Windows sandbox setup action when available.
+  - **Unit tests (18 in `locagens-desktop`)**: `markdown.rs` — table/tasklist/strikethrough
+    rendering, `parse_diff` kinds, empty input, `looks_like_diff`, `pseudo_diff`,
+    `summarize_args` (command/path/url/edit/fallback/truncation); `theme.rs` —
+    `theme_class`, distinct dark/light styles per platform, Windows Fluent fonts +
+    `#60cdff`/`#0067c0` accents, macOS vibrancy fonts + `#0a84ff`/`#007aff` accents,
+    Linux fallback, core layout section coverage and detected-OS ↔ explicit-platform
+    equivalence (`build_stylesheet_for(platform, dark)` refactor makes every platform
+    testable regardless of the build host).
+  - `settings.rs`/`usage_logs.rs` inspected and confirmed wired to `api::runs::usage_logs`.
+  - Note: the core `ProcessManager` exposes list/spawn/kill/restart/logs; there is no
+    `clear_finished` operation, so the tab relies on the manager's own lifecycle pruning.
+- [x] **Phase 8: Drop legacy `apps/web`, `apps/desktop`, `packages/shared` and the HTTP server** —
+  merged branch `feat/phase8-cleanup` (`19f5422`) into `main` (merge commit `af5be81`),
+  keeping the `PartialEq` derives added in `7283e9d` and the workspace member
+  `apps/desktop-rs` while dropping:
+  - `apps/web`, `apps/desktop`, `packages/shared`, root `package.json`, `tsconfig.json`,
+    `pnpm-lock.yaml`, `pnpm-workspace.yaml` (and the stale untracked `node_modules` /
+    `dist` build outputs).
+  - The legacy HTTP server: `apps/backend/src/main.rs`, `routes/*`, `auth.rs`; the backend
+    crate is now purely library `locagens_core` + binary `lcgn`.
+  - Root `Cargo.toml` members: `["apps/backend", "apps/desktop-rs"]`.
+  - CI updated: `.github/workflows/ci.yml` tests + release-builds both `locagens-backend`
+    (CLI `lcgn`) and `locagens-desktop` (desktop `locagens`) per OS matrix;
+    `.github/workflows/release-mac.yml` already collects both binaries per target.
+
+### Final state (Phases 0–8 complete)
+
+- Workspace: `apps/backend` (`locagens_core` lib + `lcgn` CLI) and `apps/desktop-rs`
+  (native Dioxus 0.7 desktop app, binary `locagens`, in-process `locagens_core::api`,
+  no HTTP). File-based JSON/JSONL storage, pure Rust `pi` provider/auth/model engine,
+  pure Rust streaming agent loop with workspace tools, permission gating, `spawn_agents`
+  fan-out, usage logs with cost.
+- Binaries: **`locagens`** (desktop app) and **`lcgn`** (CLI).
+- Tests: **69 passing** across the workspace — 47 `locagens_core` lib unit tests,
+  4 `lcgn` integration tests (mock OpenAI-compatible server), 18 `locagens-desktop`
+  unit tests (11 markdown + 7 theme) — zero warnings, `cargo build --release --workspace`
+  clean on `stable-x86_64-pc-windows-gnu` + w64devkit.
+- CI: `cargo test/build --release` for both crates on ubuntu/macos/windows matrices.
+- Not verified / known limits: the desktop UI has not been exercised with a real
+  end-to-end agent run in an automated harness (manual verification only); the `lcgn`
+  interactive REPL and permission/question prompts still need a real TTY.
 
 ---
 

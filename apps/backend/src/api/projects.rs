@@ -290,6 +290,48 @@ pub async fn git_diff_details(state: &AppState, path: &str) -> ApiResult<Vec<Git
 /// Generates a conventional-commit style message from the run's diff.
 /// Mirrors `POST /api/projects/git/generate-message` (the "Missing required
 /// body parameter: runId" check stays in the HTTP adapter).
+/// Stages files (`git add -- <files>`); the whole worktree when `files` is
+/// empty. Mirrors what the desktop Git tab needs on top of the legacy HTTP
+/// commit action (which stages everything implicitly).
+pub async fn git_stage(state: &AppState, path: &str, files: &[String]) -> ApiResult<()> {
+    let canonical_path = require_registered_project(state, path)?;
+    let mut args: Vec<&str> = Vec::new();
+    if files.is_empty() {
+        args.extend(["add", "--all", "--", "."]);
+    } else {
+        args.push("add");
+        args.push("--");
+    }
+    if let Err(err) = git(&canonical_path, &args).await {
+        return Err(ApiError::internal(err));
+    }
+    for file in files {
+        if let Err(err) = git(&canonical_path, &["add", "--", file]).await {
+            return Err(ApiError::internal(err));
+        }
+    }
+    Ok(())
+}
+
+/// Unstages files, keeping their worktree content
+/// (`git reset -q HEAD -- <files>`); resets the whole index when `files` is
+/// empty.
+pub async fn git_unstage(state: &AppState, path: &str, files: &[String]) -> ApiResult<()> {
+    let canonical_path = require_registered_project(state, path)?;
+    if files.is_empty() {
+        if let Err(err) = git(&canonical_path, &["reset", "-q", "HEAD"]).await {
+            return Err(ApiError::internal(err));
+        }
+        return Ok(());
+    }
+    for file in files {
+        if let Err(err) = git(&canonical_path, &["reset", "-q", "HEAD", "--", file]).await {
+            return Err(ApiError::internal(err));
+        }
+    }
+    Ok(())
+}
+
 pub async fn git_generate_message(state: &AppState, run_id: &str) -> ApiResult<String> {
     let Some(run) = state.db.get_run(run_id) else {
         return Err(ApiError::not_found("Run not found"));

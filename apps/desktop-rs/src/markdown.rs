@@ -118,3 +118,94 @@ pub fn summarize_args(arguments: &serde_json::Value) -> String {
         .or_else(|| arguments.get("task").and_then(serde_json::Value::as_str).map(str::to_string))
         .or_else(|| serde_json::to_string(arguments).ok()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn renders_tables_and_tasklists() {
+        let table = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert!(table.contains("<table>"), "table tag missing: {table}");
+        assert!(table.contains("<td>1</td>"), "cell missing: {table}");
+
+        let tasks = render_markdown("- [x] done\n- [ ] todo\n");
+        assert!(
+            tasks.contains("checkbox"),
+            "task list checkbox missing: {tasks}"
+        );
+    }
+
+    #[test]
+    fn enables_strikethrough() {
+        let html = render_markdown("~~gone~~");
+        assert!(html.contains("<del>"), "strikethrough missing: {html}");
+    }
+
+    #[test]
+    fn parses_diff_line_kinds() {
+        let lines = parse_diff("@@ -1,2 +1,3 @@\n context\n-removed\n+added\nplain\n");
+        let kinds: Vec<char> = lines.iter().map(|line| line.kind).collect();
+        assert_eq!(kinds, vec!['@', ' ', '-', '+', 'x']);
+        assert_eq!(lines[2].text, "-removed");
+    }
+
+    #[test]
+    fn empty_diff_parses_to_nothing() {
+        assert!(parse_diff("").is_empty());
+    }
+
+    #[test]
+    fn detects_diff_like_text() {
+        assert!(looks_like_diff("--- a.txt\n+++ b.txt\n@@ -1 +1 @@\n-old\n+new"));
+        assert!(looks_like_diff("@@ -1 +1 @@\n+only added"));
+        assert!(!looks_like_diff("just some text\n+with a plus"));
+        assert!(!looks_like_diff("@@ hunk marker only"));
+        assert!(!looks_like_diff(""));
+    }
+
+    #[test]
+    fn builds_pseudo_diff_from_contents() {
+        let diff = pseudo_diff(Some("old line"), Some("new line"));
+        assert!(diff.contains("- old line"));
+        assert!(diff.contains("+ new line"));
+        assert!(pseudo_diff(Some("old"), None).contains("+ (file deleted)"));
+    }
+
+    #[test]
+    fn summarizes_command_args() {
+        let args: Value = serde_json::json!({ "command": "cargo test --workspace" });
+        assert_eq!(summarize_args(&args), "cargo test --workspace");
+    }
+
+    #[test]
+    fn summarizes_path_args() {
+        let args: Value = serde_json::json!({ "path": "src/main.rs" });
+        assert_eq!(summarize_args(&args), "src/main.rs");
+
+        let url_args: Value = serde_json::json!({ "url": "https://example.com" });
+        assert_eq!(summarize_args(&url_args), "https://example.com");
+    }
+
+    #[test]
+    fn summarizes_edit_args() {
+        let args: Value = serde_json::json!({ "old_text": "let x = 1;" });
+        assert_eq!(summarize_args(&args), "edit let x = 1;…");
+    }
+
+    #[test]
+    fn truncates_long_args() {
+        let long = "x".repeat(200);
+        let args: Value = serde_json::json!({ "command": long });
+        let summary = summarize_args(&args);
+        assert_eq!(summary.chars().count(), 121); // 120 chars + ellipsis
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn falls_back_to_json_serialization() {
+        let args: Value = serde_json::json!({ "custom_key": 42 });
+        assert_eq!(summarize_args(&args), r#"{"custom_key":42}"#);
+    }
+}

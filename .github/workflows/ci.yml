@@ -21,6 +21,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/backend
-      # Pure Rust: tests + release build. No Node.js, pnpm, or Electron.
-      - run: cargo test -p locagens-backend
-      - run: cargo build --release -p locagens-backend
+      # Pure Rust: tests + release build for the core (lcgn) and the desktop
+      # app (locagens). No Node.js, pnpm, or Electron.
+      - run: cargo test -p locagens-backend -p locagens-desktop
+      - run: cargo build --release -p locagens-backend -p locagens-desktop
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace

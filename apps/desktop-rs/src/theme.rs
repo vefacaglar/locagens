@@ -15,7 +15,14 @@ pub fn theme_class(dark_mode: bool) -> &'static str {
 
 /// Builds the full stylesheet for the detected OS and the given dark mode.
 pub fn build_stylesheet(dark_mode: bool) -> String {
-    let (font_ui, font_mono, accent, accent_text, bg_app, bg_sidebar, bg_card, bg_hover, border, radius_ctrl, radius_card) = if cfg!(target_os = "macos") {
+    build_stylesheet_for(std::env::consts::OS, dark_mode)
+}
+
+/// Builds the full stylesheet for an explicit platform (`"windows"`,
+/// `"macos"`, anything else = Linux/other) and the given dark mode. Split out
+/// of [`build_stylesheet`] so every platform's output is unit-testable.
+pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
+    let (font_ui, font_mono, accent, accent_text, bg_app, bg_sidebar, bg_card, bg_hover, border, radius_ctrl, radius_card) = if platform == "macos" {
         // macOS: vibrancy-inspired dark surfaces and system blue.
         (
             "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"SF Pro Display\", system-ui, sans-serif",
@@ -30,7 +37,7 @@ pub fn build_stylesheet(dark_mode: bool) -> String {
             "8px",
             "10px",
         )
-    } else if cfg!(target_os = "windows") {
+    } else if platform == "windows" {
         // Windows: Fluent Design / Mica.
         (
             "\"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif",
@@ -68,7 +75,7 @@ pub fn build_stylesheet(dark_mode: bool) -> String {
         ("#1a1a1a", "#4a4a4a", "#777777", "0 4px 14px rgba(0, 0, 0, 0.08)")
     };
 
-    let focus_ring = if cfg!(target_os = "windows") {
+    let focus_ring = if platform == "windows" {
         format!("0 0 0 2px {bg_app}, 0 0 0 4px {accent}")
     } else {
         format!("0 0 0 3px color-mix(in srgb, {accent} 40%, transparent)")
@@ -493,4 +500,93 @@ table.data-table tr:hover td {{ background: {bg_hover}; }}
         shadow = shadow,
         focus_ring = focus_ring,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLATFORMS: [&str; 3] = ["windows", "macos", "linux"];
+
+    #[test]
+    fn theme_class_matches_mode() {
+        assert_eq!(theme_class(true), "theme-dark");
+        assert_eq!(theme_class(false), "theme-light");
+    }
+
+    #[test]
+    fn generates_distinct_dark_and_light_stylesheets_per_platform() {
+        for platform in PLATFORMS {
+            let dark = build_stylesheet_for(platform, true);
+            let light = build_stylesheet_for(platform, false);
+            assert!(!dark.is_empty() && !light.is_empty(), "{platform} styles empty");
+            assert_ne!(dark, light, "{platform} dark and light styles differ");
+        }
+    }
+
+    #[test]
+    fn windows_uses_fluent_design_fonts_and_accent() {
+        let dark = build_stylesheet_for("windows", true);
+        let light = build_stylesheet_for("windows", false);
+        for style in [&dark, &light] {
+            assert!(style.contains("Segoe UI"), "windows font missing");
+            assert!(style.contains("Cascadia Code"), "windows mono font missing");
+        }
+        assert!(dark.contains("#60cdff"), "windows dark accent missing");
+        assert!(light.contains("#0067c0"), "windows light accent missing");
+        assert!(dark.contains("background: #191919"), "windows dark bg missing");
+        assert!(light.contains("background: #f3f3f3"), "windows light bg missing");
+    }
+
+    #[test]
+    fn macos_uses_native_fonts_and_accent() {
+        let dark = build_stylesheet_for("macos", true);
+        let light = build_stylesheet_for("macos", false);
+        for style in [&dark, &light] {
+            assert!(style.contains("-apple-system"), "macos font missing");
+            assert!(style.contains("SF Mono"), "macos mono font missing");
+        }
+        assert!(dark.contains("#0a84ff"), "macos dark accent missing");
+        assert!(light.contains("#007aff"), "macos light accent missing");
+        assert!(dark.contains("background: #1c1c1e"), "macos dark bg missing");
+        assert!(light.contains("background: #f5f5f7"), "macos light bg missing");
+    }
+
+    #[test]
+    fn linux_falls_back_to_neutral_style() {
+        let dark = build_stylesheet_for("linux", true);
+        let light = build_stylesheet_for("linux", false);
+        for style in [&dark, &light] {
+            assert!(style.contains("Ubuntu"), "linux font missing");
+        }
+        assert!(dark.contains("#4493f8"), "linux dark accent missing");
+        assert!(light.contains("#1a73e8"), "linux light accent missing");
+    }
+
+    #[test]
+    fn styles_cover_the_core_layout_sections() {
+        for platform in PLATFORMS {
+            for dark_mode in [true, false] {
+                let style = build_stylesheet_for(platform, dark_mode);
+                for section in [
+                    ".app-shell", ".sidebar", ".chat-area", ".composer", ".right-panel",
+                    ".settings-layout", ".permission-card", ".diff-view", ".toast",
+                ] {
+                    assert!(style.contains(section), "{platform} missing {section}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detected_os_build_matches_explicit_platform() {
+        assert_eq!(
+            build_stylesheet(true),
+            build_stylesheet_for(std::env::consts::OS, true)
+        );
+        assert_eq!(
+            build_stylesheet(false),
+            build_stylesheet_for(std::env::consts::OS, false)
+        );
+    }
 }
