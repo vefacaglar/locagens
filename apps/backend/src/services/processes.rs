@@ -5,7 +5,7 @@
 //! process tree on shutdown requests (`taskkill /T /F` on Windows, `kill -9`).
 
 use crate::util::now_iso;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,7 +15,7 @@ use tokio::process::Child;
 
 const MAX_LOGS_PER_PROCESS: usize = 2000;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessInfo {
     pub id: String,
@@ -28,7 +28,7 @@ pub struct ProcessInfo {
     pub pid: Option<u32>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessLogEntry {
     pub timestamp: String,

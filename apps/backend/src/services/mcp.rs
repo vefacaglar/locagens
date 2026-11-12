@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Serializable shape of one server config (camelCase for the frontend).
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     pub name: String,
@@ -32,7 +32,7 @@ pub struct McpServerConfig {
     pub project_path: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInfo {
     pub config: McpServerConfig,
@@ -41,7 +41,7 @@ pub struct McpServerInfo {
     pub tools: Vec<Value>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServersResponse {
     pub servers: Vec<McpServerInfo>,
@@ -238,7 +238,7 @@ pub fn restart(name: &str, project_path: Option<&str>) -> Result<McpServerInfo, 
 }
 
 /// Input payload for POST /api/mcp/servers.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInput {
     pub name: Option<String>,

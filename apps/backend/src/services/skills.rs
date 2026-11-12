@@ -9,7 +9,7 @@
 use crate::paths;
 use crate::util::canonical_project_path;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -18,7 +18,7 @@ const SKILL_FILE: &str = "SKILL.md";
 const MAX_BODY_CHARS: usize = 100_000;
 const MAX_SKILL_FILE_CHARS: usize = 120_000;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SkillSummary {
     pub name: String,
     pub description: String,
@@ -27,14 +27,14 @@ pub struct SkillSummary {
     pub body: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsListResponse {
     pub skills: Vec<SkillSummary>,
     pub roots: SkillRoots,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SkillRoots {
     pub user: String,
     pub project: Option<String>,

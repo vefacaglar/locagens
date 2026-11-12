@@ -92,6 +92,27 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/usage-logs", get(runs::usage_logs))
 }
 
+/// Maps a facade error to the HTTP status + `{ "error": message }` body the
+/// routes always used.
+pub fn api_error_response(err: crate::api::ApiError) -> axum::response::Response {
+    let status = match err.kind {
+        crate::api::ApiErrorKind::BadRequest => axum::http::StatusCode::BAD_REQUEST,
+        crate::api::ApiErrorKind::NotFound => axum::http::StatusCode::NOT_FOUND,
+        crate::api::ApiErrorKind::Conflict => axum::http::StatusCode::CONFLICT,
+        crate::api::ApiErrorKind::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    crate::util::json_error(status, &err.message)
+}
+
+/// Facade result -> HTTP response: 200 + JSON body on success, error response
+/// otherwise.
+pub fn respond<T: serde::Serialize>(result: crate::api::ApiResult<T>) -> axum::response::Response {
+    match result {
+        Ok(value) => axum::Json(value).into_response(),
+        Err(err) => api_error_response(err),
+    }
+}
+
 pub async fn ping() -> axum::response::Response {
     axum::Json(serde_json::json!({
         "status": "ok",

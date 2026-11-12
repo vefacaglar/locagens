@@ -6,6 +6,7 @@
 //! `models-store.json`) plus the in-process orchestrator. No `pi` process is
 //! ever spawned.
 
+pub mod api;
 pub mod auth;
 pub mod cli;
 pub mod db;

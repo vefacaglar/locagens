@@ -63,7 +63,7 @@ impl AuthCredential {
 }
 
 /// A model entry merged from built-ins, `models-store.json` and `models.json`.
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
@@ -85,7 +85,7 @@ pub struct ModelInfo {
 /// Metadata returned by `GET /api/providers` (web client contract: `type` is
 /// `"openai-compatible"` or `"anthropic"`, `models` are plain model-id
 /// strings, API keys are never included).
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMetadata {
     pub id: String,
@@ -99,7 +99,7 @@ pub struct ProviderMetadata {
 
 /// Editable provider config returned by `GET /api/providers/config` —
 /// API keys are always masked, never exposed raw.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct EditableProviderConfig {
     pub id: String,
@@ -118,7 +118,7 @@ pub struct EditableProviderConfig {
 
 /// One entry of the map submitted to `POST /api/providers/config`
 /// (`{ [providerId]: { type, displayName, baseUrl, apiKey, models, modelSettings } }`).
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveProviderConfigInput {
     #[serde(rename = "type", alias = "api")]
@@ -132,7 +132,7 @@ pub struct SaveProviderConfigInput {
 
 /// Body of `POST /api/providers/fetch-models` — `providerId` is optional;
 /// when absent the `baseUrl`/`apiKey`/`type` from the body are used directly.
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchModelsInput {
     #[serde(rename = "type", alias = "api")]
@@ -143,7 +143,7 @@ pub struct FetchModelsInput {
 }
 
 /// Body of `POST /api/providers/test`.
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProviderInput {
     pub provider_id: String,
@@ -153,7 +153,7 @@ pub struct TestProviderInput {
 }
 
 /// Body of `POST /api/pi/auth`.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SetPiAuthInput {
     pub provider_id: String,

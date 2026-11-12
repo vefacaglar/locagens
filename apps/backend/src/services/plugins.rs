@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST_FILENAME: &str = "plugin.json";
 pub const BUILTIN_TEMPLATES: &str = include_str!("plugins_templates.json");
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginsResponse {
     pub plugins: Vec<Value>,
@@ -340,7 +340,7 @@ pub fn delete(id: &str, scope: &str, project_path: Option<&str>) -> Result<bool,
 }
 
 /// Convenience re-exports for routes that need typed payloads.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallPayload {
     pub source: String,
