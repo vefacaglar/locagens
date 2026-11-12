@@ -56,7 +56,7 @@ jobs:
           case "$version" in
             [0-9]*)
               echo "Setting version to: $version"
-              for cargo_toml in apps/backend/Cargo.toml apps/desktop-rs/Cargo.toml; do
+              for cargo_toml in apps/cli/Cargo.toml apps/desktop-rs/Cargo.toml; do
                 [ -f "$cargo_toml" ] || continue
                 sed -i.bak -E '0,/^version[[:space:]]*=[[:space:]]*"[^"]*"/s//version = "'"$version"'"/' "$cargo_toml"
                 rm -f "$cargo_toml.bak"
@@ -73,7 +73,7 @@ jobs:
         shell: bash
         run: |
           for target in ${{ matrix.targets }}; do
-            cargo build --release --target "$target" -p locagens-desktop -p locagens-backend
+            cargo build --release --target "$target" -p locagens-desktop -p locagens-cli
           done
 
       - name: Collect artifacts

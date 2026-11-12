@@ -20,10 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend
+          workspaces: .
       # Pure Rust: tests + release build for the core (lcgn) and the desktop
       # app (locagens). No Node.js, pnpm, or Electron.
-      - run: cargo test -p locagens-backend -p locagens-desktop
-      - run: cargo build --release -p locagens-backend -p locagens-desktop
+      - run: cargo test -p locagens-cli -p locagens-desktop
+      - run: cargo build --release -p locagens-cli -p locagens-desktop
       - run: cargo test --workspace
       - run: cargo build --release --workspace

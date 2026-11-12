@@ -46,19 +46,21 @@ $null | pi --model opencode-go/glm-5.3-flash --no-mcp --no-extensions --approve 
 
 ### Locagens runtime architecture direction
 
-Locagens is **100% pure Rust**: `apps/backend` (`locagens_core` library +
-`lcgn` CLI) and `apps/desktop-rs` (native Dioxus 0.7 desktop app, binary
-`locagens`), built directly on top of `pi` (in-process; `pi auth` /
-`~/.pi/agent/auth.json`, `models.json`). Consumers call the typed in-process
-facade `locagens_core::api` (see `docs/CORE_API.md`). There is no Node
-backend, no Electron shell, no Vue web app, and no HTTP server.
+Locagens is **100% pure Rust**: a modular workspace of `crates/*`
+(`locagens-protocol`, `locagens-apply-patch`, `locagens-execpolicy`,
+`locagens-config`, `locagens-context`, `locagens-core`) plus `apps/cli`
+(`locagens-cli`, binary `lcgn`) and `apps/desktop-rs` (native Dioxus 0.7
+desktop app, binary `locagens`), built directly on top of `pi` (in-process;
+`pi auth` / `~/.pi/agent/auth.json`, `models.json`). Consumers call the typed
+in-process facade `locagens_core::api` (see `docs/CORE_API.md`). There is no
+Node backend, no Electron shell, no Vue web app, and no HTTP server.
 
 ## Tech Stack
 
 ```txt
 Desktop: native Rust app (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
-Core:    Rust (Tokio) built directly on top of pi (apps/backend,
-         `locagens_core` library + `lcgn` CLI binary)
+Core:    Rust (Tokio) modular workspace (crates/*) built directly on top of
+         pi (apps/cli `lcgn`, apps/desktop-rs `locagens`)
 API:     in-process typed facade (locagens_core::api, docs/CORE_API.md)
 Storage: file-based JSON/JSONL under <app_support_dir>/data/ (no SQLite)
 Realtime: in-process run event channels (no SSE, no HTTP)
@@ -76,28 +78,41 @@ Consult these before reading source:
 ## Repository Structure
 
 ```txt
+crates/
+  protocol/                locagens-protocol: shared data models, ApprovalPolicy,
+                           SandboxMode
+  apply-patch/             locagens-apply-patch: Codex `*** Begin Patch` parser,
+                           seek_sequence fuzzy matcher, unified diff generator
+  execpolicy/              locagens-execpolicy: command_safety classifier &
+                           ProcessManager
+  config/                  locagens-config: ~/.locagens + ~/.codex config.toml &
+                           auth.json, provider/model catalog
+  context/                 locagens-context: hierarchical AGENTS.md discovery,
+                           <environment_context>, TurnDiffTracker
+  core/                    locagens-core: orchestrator, provider SSE streaming,
+                           tools, MCP/skills/plugins/symbols, api facade
+    src/
+      api/                 typed in-process facade: runs, projects, providers,
+                           permissions, memory, plugins, processes, skills,
+                           symbols, security, mcp (error.rs ApiError)
+      orchestrator/        Orchestrator (run lifecycle + drive loop), llm.rs,
+                           tools.rs (workspace tools)
+      services/            processes, plugins, skills, symbols, mcp
+      db.rs                file-based JSON/JSONL store
+      paths.rs             settings/data dir resolution
+      state.rs             shared AppState
+      util.rs              timestamps + canonical paths
 apps/
-  backend/                Rust core (locagens_core library + lcgn CLI)
+  cli/                     locagens-cli, binary `lcgn`
     src/
-      api/                typed in-process facade: runs, projects, providers,
-                          permissions, memory, plugins, processes, skills,
-                          symbols, security, mcp (error.rs ApiError)
-      cli/                lcgn CLI: args, repl, runner, render, auth, models
-      bin/lcgn.rs         CLI entry point
-      orchestrator/       Orchestrator (run lifecycle + drive loop), llm.rs,
-                          tools.rs (workspace tools)
-      services/           processes, plugins, skills, symbols, mcp
-      db.rs               file-based JSON/JSONL store
-      paths.rs            settings/data dir resolution
-      pi_providers.rs     ~/.pi/agent auth.json + models.json engine
-      state.rs            shared AppState
-      util.rs             timestamps + canonical paths
-  desktop-rs/             native Dioxus 0.7 desktop app (binary `locagens`)
+      cli/                 lcgn CLI: args, repl, runner, render, auth, models
+      bin/lcgn.rs          CLI entry point
+  desktop-rs/              native Dioxus 0.7 desktop app (binary `locagens`)
     src/
-      main.rs             bootstrap -> locagens_core::api -> UI
-      components/         Dioxus UI components
+      main.rs              bootstrap -> locagens_core::api -> UI
+      components/          Dioxus UI components
       state_ui.rs  theme.rs  markdown.rs
-docs/                     CORE_API.md, CLI.md, database-schema.md, RELEASING.md
+docs/                      CORE_API.md, CLI.md, database-schema.md, RELEASING.md
 ```
 
 ## Core Principles
@@ -110,8 +125,8 @@ Core:      api facade (typed) -> orchestrator/services (logic)
            -> db/providers (I/O). Facade functions hold no storage logic.
 Desktop:   main.rs -> api facade -> Dioxus components. Components are
            presentational; state flows through the shared AppState.
-Contracts: Rust structs in locagens_core (db.rs, api payloads) shared by
-           both the desktop app and the lcgn CLI.
+Contracts: Rust structs in locagens-protocol / locagens-core (db.rs, api
+           payloads) shared by both the desktop app and the lcgn CLI.
 Naming:    specific (PiProviderManager, Orchestrator, build_core);
            never helper/manager/processor/data.
 ```
@@ -120,7 +135,8 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
 
 - Config lives in pi's agent directory (`~/.pi/agent/auth.json`, `models.json`,
   `models-store.json`; override via `PI_CODING_AGENT_DIR`), handled by
-  `pi_providers.rs` (`PiProviderManager`). Never in the project.
+  `crates/config` (`locagens-config`, `PiProviderManager`). Never in the
+  project.
 - API keys live only in `auth.json` (literal, `!command`, `$ENV_VAR`, or
   OAuth) or environment variables. Never log or expose secrets. Metadata only
   returns safe fields; settings never return raw keys (preserve marker
@@ -135,7 +151,7 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
 
 ## Orchestrator
 
-`orchestrator/mod.rs` owns the run driver. `run()` starts fresh,
+`crates/core/src/orchestrator/mod.rs` owns the run driver. `run()` starts fresh,
 `continue_run()` replays history; both share the same drive loop for the main
 model AND every sub-agent — tool execution stays shared, never duplicated.
 
@@ -157,7 +173,7 @@ a stable document (right panel); live progress is the per-message
 
 ## Tools
 
-Defined in `orchestrator/tools.rs`. All paths must resolve inside the run's
+Defined in `crates/core/src/orchestrator/tools.rs`. All paths must resolve inside the run's
 project workspace; failures return error payloads the model can react to.
 
 ```txt
@@ -265,7 +281,7 @@ multi-user auth / cloud deployment
 
 Locagens now ships the Codex tool harness (ported from `codex-rs`):
 
-- **`apply_patch`** (`orchestrator/apply_patch.rs`): full `*** Begin Patch` …
+- **`apply_patch`** (`crates/apply-patch`): full `*** Begin Patch` …
   `*** End Patch` parser (add / delete / update / move, multi-chunk updates,
   `@@ context`, `*** End of File`), the fuzzy `seek_sequence` matcher (exact →
   `trim_end` → `trim` → Unicode-punctuation normalization), workspace-safe
@@ -277,7 +293,7 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
   `{ exit_code, output, wall_time_ms }` when they finish within
   `yield_time_ms` (default 10000 ms, clamped 500..60000) and otherwise
   register an interactive session the model can drive with `write_stdin`.
-- **Command safety & policy** (`orchestrator/command_safety.rs`): Codex's
+- **Command safety & policy** (`crates/execpolicy`): Codex's
   `ApprovalPolicy` (`untrusted` / `on-request` / `on-failure` / `never`) and
   `SandboxMode` (`read-only` / `workspace-write` / `danger-full-access`)
   mapped from Locagens modes (`chat`/`plan` → read-only, `accept_edits` →
@@ -285,7 +301,7 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
   danger-full-access + never). Known-safe read-only commands (`git status`,
   `rg`, `cargo check`, …) run without prompting in `accept_edits`; dangerous
   commands (`rm -rf`, `git reset --hard`, `sudo`, …) always prompt.
-- **Hierarchical `AGENTS.md` discovery** (`orchestrator/agents_md.rs`): walks
+- **Hierarchical `AGENTS.md` discovery** (`crates/context`): walks
   from the git root down to the cwd picking at most one doc per level
   (`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` > `.agents.md`), joined
   with `
@@ -294,14 +310,14 @@ Locagens now ships the Codex tool harness (ported from `codex-rs`):
 
 ` under a 32 KiB budget and injected into
   the system prompt.
-- **`<environment_context>`** (`orchestrator/env_context.rs`): Codex-format
+- **`<environment_context>`** (`crates/context`): Codex-format
   XML block (cwd / shell / approval_policy / sandbox_mode / network_access /
   workspace_roots / current_date) seeded as the first user message of a run.
-- **`TurnDiffTracker`** (`orchestrator/turn_diff_tracker.rs`): snapshots file
+- **`TurnDiffTracker`** (`crates/context`): snapshots file
   baselines before mutations (`apply_patch`, `write_file`, `edit_file`,
   `delete_file`, `move_file`) and streams `turn_diff_updated` events with the
   aggregate unified diff and changed-file count.
-- **Context compaction** (`orchestrator/compact.rs`): automatic compaction
+- **Context compaction** (`locagens-core` orchestrator): automatic compaction
   when the estimated input tokens exceed 90k (also on demand via
   `compact_context`): older history is summarized with Codex's
   SUMMARIZATION_PROMPT and replaced by a `[Compacted context summary]` block

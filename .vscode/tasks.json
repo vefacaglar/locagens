@@ -107,15 +107,15 @@
       "type": "shell",
       "windows": {
         "command": "rustup",
-        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "build", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "linux": {
         "command": "cargo",
-        "args": ["build", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["build", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "osx": {
         "command": "cargo",
-        "args": ["build", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["build", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "group": { "kind": "build", "isDefault": false },
       "problemMatcher": ["$rustc"]
@@ -179,15 +179,15 @@
       "type": "shell",
       "windows": {
         "command": "rustup",
-        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "run", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "run", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "linux": {
         "command": "cargo",
-        "args": ["run", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["run", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "osx": {
         "command": "cargo",
-        "args": ["run", "-p", "locagens-backend", "--bin", "lcgn"]
+        "args": ["run", "-p", "locagens-cli", "--bin", "lcgn"]
       },
       "group": { "kind": "build", "isDefault": false },
       "problemMatcher": ["$rustc"]
