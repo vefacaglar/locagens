@@ -390,3 +390,26 @@ Update this file continuously as phases complete.
 - `Claude.md`, `Agents.md`, `GEMINI.md`
 - Conversation scratch specs in
   `C:\Users\User\.gemini\antigravity\brain\e0c11c6e-0150-4410-b6e6-439e0ce4221b\scratch\`
+
+---
+
+## Phase 10 — Modular Crates (`crates/*`) + Apps (`apps/cli`, `apps/desktop-rs`) Worktree Refactoring
+
+Parallel worktree refactoring plan (T1–T7). Isolated task worktrees live under
+`C:\Users\User\.gemini\antigravity\worktrees\e0c11c6e-0150-4410-b6e6-439e0ce4221b\`.
+
+- [x] **T1: `crates/protocol` + `crates/apply-patch`** — COMPLETED in commit
+  `db82e33` on `main` (`feat(crates): extract crates/protocol and
+  crates/apply-patch (T1)`).
+- [ ] **T2: `crates/execpolicy`** — IN PROGRESS. Worktree `wt-t2`, branch
+  `feat/t2-execpolicy`.
+- [ ] **T3: `crates/config`** — IN PROGRESS. Worktree `wt-t3`, branch
+  `feat/t3-config`.
+- [ ] **T4: `crates/context`** — IN PROGRESS. Worktree `wt-t4`, branch
+  `feat/t4-context`.
+- [ ] **T5: OpenAI `/v1/responses` SSE streaming** — IN PROGRESS. Worktree
+  `wt-t5`, branch `feat/t5-responses-wire`.
+- [ ] **T6: `crates/core` + `apps/cli` + delete `apps/backend`** — QUEUED;
+  starts after T2–T5 merge.
+- [ ] **T7: `.vscode` + CI + docs** — QUEUED; starts after T2–T5 merge
+  (and T6).
