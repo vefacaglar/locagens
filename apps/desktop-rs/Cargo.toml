@@ -14,7 +14,7 @@ name = "locagens"
 path = "src/main.rs"
 
 [dependencies]
-locagens_core = { package = "locagens-backend", path = "../backend" }
+locagens_core = { package = "locagens-core", path = "../../crates/core" }
 dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { version = "1", features = ["full"] }
 pulldown-cmark = "0.13"

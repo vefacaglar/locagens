@@ -3048,35 +3048,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "locagens-backend"
-version = "0.1.0"
+name = "locagens-cli"
+version = "0.2.0"
 dependencies = [
  "anyhow",
- "chrono",
- "clap",
- "dirs 5.0.1",
- "fs2",
- "futures",
- "locagens-apply-patch",
- "locagens-config",
- "locagens-context",
- "locagens-execpolicy",
- "locagens-protocol",
- "regex",
- "reqwest",
- "rpassword",
- "rustyline",
- "serde",
+ "axum",
+ "locagens-core",
  "serde_json",
- "thiserror 1.0.69",
+ "tempfile",
  "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
  "uuid",
- "walkdir",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3110,12 +3091,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "locagens-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs 5.0.1",
+ "fs2",
+ "futures",
+ "locagens-apply-patch",
+ "locagens-config",
+ "locagens-context",
+ "locagens-execpolicy",
+ "locagens-protocol",
+ "regex",
+ "reqwest",
+ "rpassword",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "walkdir",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "locagens-desktop"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "dioxus",
- "locagens-backend",
+ "locagens-core",
  "pulldown-cmark",
  "rfd 0.15.4",
  "serde",

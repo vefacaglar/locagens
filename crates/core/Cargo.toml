@@ -1,21 +1,15 @@
 [package]
-name = "locagens-backend"
+name = "locagens-core"
 version = "0.1.0"
 edition = "2021"
 description = "Locagens pure Rust core (locagens_core library + lcgn CLI) built on top of pi."
-
-default-run = "lcgn"
 
 [lib]
 name = "locagens_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "lcgn"
-path = "src/bin/lcgn.rs"
-
 [dependencies]
-locagens-config = { path = "../../crates/config" }
+locagens-config = { path = "../config" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,10 +30,10 @@ rustyline = "14"
 fs2 = "0.4"
 rpassword = "7"
 toml = "0.8"
-locagens-protocol = { path = "../../crates/protocol" }
-locagens-apply-patch = { path = "../../crates/apply-patch" }
-locagens-execpolicy = { path = "../../crates/execpolicy" }
-locagens-context = { path = "../../crates/context" }
+locagens-protocol = { path = "../protocol" }
+locagens-apply-patch = { path = "../apply-patch" }
+locagens-execpolicy = { path = "../execpolicy" }
+locagens-context = { path = "../context" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
