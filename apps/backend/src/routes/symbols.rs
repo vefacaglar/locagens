@@ -1,8 +1,11 @@
-//! Code symbol search route (Settings → Symbols / @-symbol mentions).
+//! Code symbol search route (Settings → Symbols / @-symbol mentions). Thin
+//! adapter over `crate::api::symbols`.
 
-use crate::util::json_error;
+use crate::api::symbols;
+use crate::routes::api_error_response;
 use crate::AppState;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -22,30 +25,15 @@ pub async fn search_symbols(
     Query(query): Query<SymbolsQuery>,
 ) -> Response {
     let Some(raw_path) = query.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
-        return json_error(
-            axum::http::StatusCode::BAD_REQUEST,
+        return api_error_response(crate::api::ApiError::bad_request(
             "Missing required query parameter: path",
-        );
+        ));
     };
 
-    // Registered projects search directly; unregistered-but-valid directories
-    // still work so the tab is usable before registration.
-    let symbols = match crate::routes::projects::require_registered_project_pub(&state, raw_path) {
-        Ok(canonical) => crate::services::symbols::search(
-            &canonical,
-            query.query.as_deref().unwrap_or(""),
-            query.kind.as_deref(),
-            60,
-        ),
-        Err(_) => match crate::services::symbols::search_canonical(
-            raw_path,
-            query.query.as_deref().unwrap_or(""),
-            query.kind.as_deref(),
-        ) {
-            Ok(symbols) => symbols,
-            Err(err) => return json_error(axum::http::StatusCode::BAD_REQUEST, &err),
-        },
-    };
-
-    Json(json!({ "symbols": symbols })).into_response()
+    match symbols::search_symbols(&state, raw_path, query.query.as_deref(), query.kind.as_deref())
+        .await
+    {
+        Ok(list) => Json(json!({ "symbols": list })).into_response(),
+        Err(err) => api_error_response(err),
+    }
 }

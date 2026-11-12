@@ -4,8 +4,8 @@
 use crate::cli::models::ResolvedModel;
 use crate::cli::render::{colors_enabled, TextRenderer};
 use crate::orchestrator::RunHandle;
-use crate::routes::runs as runs_route;
-use crate::routes::runs::{CreateRunPayload, ContinueRunPayload};
+use crate::api::runs as runs_api;
+use crate::api::runs::{CreateRunPayload, ContinueRunPayload};
 use crate::state::AppState;
 use serde_json::Value;
 use std::io::Write;
@@ -81,10 +81,10 @@ pub async fn run_turn(
                 append_system_prompt: opts.append_system_prompt.clone(),
                 ..Default::default()
             };
-            match runs_route::start_run_core(state, &payload).await {
-                Ok((run, handle, rx)) => (run.id, rx, handle),
-                Err(message) => {
-                    eprintln!("lcgn: {message}");
+            match runs_api::create_run(state, &payload).await {
+                Ok(started) => (started.run.id, started.events, started.handle),
+                Err(err) => {
+                    eprintln!("lcgn: {}", err.message);
                     return (2, None);
                 }
             }
@@ -101,10 +101,10 @@ pub async fn run_turn(
                 append_system_prompt: opts.append_system_prompt.clone(),
                 ..Default::default()
             };
-            match runs_route::continue_run_core(state, &id, &payload).await {
-                Ok((handle, rx)) => (id.clone(), rx, handle),
-                Err(message) => {
-                    eprintln!("lcgn: {message}");
+            match runs_api::continue_run(state, &id, &payload).await {
+                Ok(continued) => (id.clone(), continued.events, continued.handle),
+                Err(err) => {
+                    eprintln!("lcgn: {}", err.message);
                     return (2, None);
                 }
             }
@@ -134,7 +134,7 @@ pub async fn run_turn(
             _ = ctrl_c.as_mut() => {
                 eprintln!();
                 eprintln!("lcgn: cancelled (Ctrl+C)");
-                runs_route::cancel_run_core(state, &run_id).await;
+                let _ = runs_api::cancel_run(state, &run_id).await;
                 break 1;
             }
         };
@@ -237,7 +237,7 @@ async fn handle_permission(
         eprintln!(
             "lcgn: permission required for `{name}` — denied (non-interactive run). Use --approve or run without -p to approve interactively."
         );
-        runs_route::apply_permission_decision(state, handle, "deny").await;
+        runs_api::apply_permission_decision(state, handle, "deny").await;
         return;
     }
 
@@ -258,7 +258,7 @@ async fn handle_permission(
         "r" => "allow_run",
         _ => "deny",
     };
-    runs_route::apply_permission_decision(state, handle, decision).await;
+    runs_api::apply_permission_decision(state, handle, decision).await;
 }
 
 fn print_preview(preview: &Value) {
@@ -342,7 +342,7 @@ async fn handle_question(handle: &Arc<RunHandle>, event: &Value, opts: &TurnOpti
 
     if !opts.interactive {
         eprintln!("lcgn: question skipped (non-interactive run).");
-        runs_route::answer_question_core(
+        runs_api::answer_question_core(
             handle,
             Vec::new(),
             vec!["(Answered automatically: non-interactive run.)".to_string()],
@@ -396,7 +396,7 @@ async fn handle_question(handle: &Arc<RunHandle>, event: &Value, opts: &TurnOpti
             selections.push(picked);
         }
     }
-    runs_route::answer_question_core(handle, selections, Vec::new()).await;
+    runs_api::answer_question_core(handle, selections, Vec::new()).await;
 }
 
 fn read_line_stdin() -> String {

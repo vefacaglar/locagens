@@ -1,5 +1,8 @@
-//! Memory CRUD routes (Settings → Memory).
+//! Memory CRUD routes (Settings → Memory). Thin adapters over
+//! `crate::api::memory`.
 
+use crate::api::memory::{self, CreateMemoryInput};
+use crate::routes::{api_error_response, respond};
 use crate::util::json_error;
 use crate::AppState;
 use axum::extract::{Path, State};
@@ -10,17 +13,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
-const CATEGORIES: [&str; 4] = ["user", "feedback", "project", "reference"];
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateMemoryInput {
-    pub scope: Option<String>,
-    pub category: Option<String>,
-    pub content: Option<String>,
-    pub project_path: Option<String>,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMemoryInput {
@@ -28,7 +20,7 @@ pub struct UpdateMemoryInput {
 }
 
 pub async fn list_memories(State(state): State<Arc<AppState>>) -> Response {
-    Json(state.db.list_memories()).into_response()
+    respond(memory::list_memories(&state).await)
 }
 
 pub async fn create_memory(
@@ -38,35 +30,7 @@ pub async fn create_memory(
     let Some(Json(input)) = body else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body.");
     };
-    let content = input.content.as_deref().unwrap_or("").trim().to_string();
-    if content.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "content is required");
-    }
-    let scope = if input.scope.as_deref() == Some("global") { "global" } else { "project" };
-    let category = match input.category.as_deref() {
-        Some(cat) if CATEGORIES.contains(&cat) => cat.to_string(),
-        _ => "project".to_string(),
-    };
-    if scope == "project" && input.project_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "projectPath is required for a project-scoped memory",
-        );
-    }
-
-    let project_path = if scope == "project" {
-        input.project_path.as_deref().unwrap_or("").trim().to_string()
-    } else {
-        String::new()
-    };
-
-    match state.db.create_memory(scope, &project_path, &category, &content) {
-        Ok(memory) => Json(memory).into_response(),
-        Err(err) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to save memory: {err}"),
-        ),
-    }
+    respond(memory::create_memory(&state, input).await)
 }
 
 pub async fn update_memory(
@@ -80,17 +44,9 @@ pub async fn update_memory(
     let Some(Json(input)) = body else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body.");
     };
-    let content = input.content.unwrap_or_default().trim().to_string();
-    if content.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "content is required");
-    }
-    match state.db.update_memory(numeric_id, &content) {
-        Some(memory) => Json(memory).into_response(),
-        None => json_error(
-            StatusCode::NOT_FOUND,
-            &format!("Memory with id \"{id}\" not found"),
-        ),
-    }
+    respond(
+        memory::update_memory(&state, numeric_id, &input.content.unwrap_or_default()).await,
+    )
 }
 
 pub async fn delete_memory(
@@ -100,16 +56,15 @@ pub async fn delete_memory(
     let Ok(numeric_id) = id.parse::<i64>() else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid memory id");
     };
-    if !state.db.delete_memory(numeric_id) {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            &format!("Memory with id \"{id}\" not found"),
-        );
+    match memory::delete_memory(&state, numeric_id).await {
+        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Err(err) => api_error_response(err),
     }
-    Json(json!({ "success": true })).into_response()
 }
 
 pub async fn clear_memories(State(state): State<Arc<AppState>>) -> Response {
-    state.db.clear_memories();
-    Json(json!({ "success": true })).into_response()
+    match memory::clear_memories(&state).await {
+        Ok(()) => Json(json!({ "success": true })).into_response(),
+        Err(err) => api_error_response(err),
+    }
 }

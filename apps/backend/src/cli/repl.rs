@@ -60,7 +60,7 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
                         eprintln!();
                         eprintln!("lcgn: cancelling {run_id}…");
                         let _ = std::io::stderr().flush();
-                        crate::routes::runs::cancel_run_core(&state, &run_id).await;
+                        let _ = crate::api::runs::cancel_run(&state, &run_id).await;
                     }
                     None => std::process::exit(0),
                 }
