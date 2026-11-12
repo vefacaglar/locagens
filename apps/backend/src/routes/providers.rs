@@ -14,6 +14,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// `GET /api/providers` — all configured / authenticated providers.
@@ -26,20 +27,18 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Response {
     Json(state.pi.get_configs()).into_response()
 }
 
-/// `POST /api/providers/config` — save provider configuration.
+/// `POST /api/providers/config` — saves the whole provider config map the
+/// web client sends (`Record<providerId, ProviderConfig>`); providers
+/// missing from the map are removed.
 pub async fn save_config(
     State(state): State<Arc<AppState>>,
-    body: Option<Json<SaveProviderConfigInput>>,
+    body: Option<Json<HashMap<String, SaveProviderConfigInput>>>,
 ) -> Response {
-    let Some(Json(input)) = body else {
+    let Some(Json(configs)) = body else {
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body.");
     };
-    match state.pi.save_config(&input) {
-        Ok(()) => {
-            let configs = state.pi.get_configs();
-            let config = configs.get(&input.provider_id).cloned();
-            Json(json!({ "success": true, "config": config })).into_response()
-        }
+    match state.pi.save_configs(&configs) {
+        Ok(()) => Json(json!({ "success": true })).into_response(),
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             &format!("Failed to save provider config: {err}"),
