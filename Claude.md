@@ -14,12 +14,48 @@ User Task -> Orchestrator creates a run -> main model responds (with tools)
 no tool calls -> run done; messages stream live and persist.
 ```
 
+## Development & Agent Workflow (pi + Gemini)
+
+How development work is executed in this repo:
+
+- **Codebase exploration (read-only research & analysis)**: always use
+  `gemini-3.8-flash` (`Gemini 3.8 Flash` / the `research` subagent with
+  `Model: "flash"`). Never burn a coding model on exploration.
+- **All coding, development & file modifications**: always execute via the
+  `pi` CLI using model `opencode-go/glm-5.3-flash`.
+
+### Non-interactive `pi` CLI invocation (Windows PowerShell)
+
+Always close stdin (`$null |`) and pass `--no-mcp --no-extensions --approve -p`.
+For multi-line tasks on Windows, either pass a single-line prompt or pass a
+`@prompt.md` file reference so Windows CLI argument parsing does not split on
+newlines:
+
+```powershell
+$null | pi --model opencode-go/glm-5.3-flash --no-mcp --no-extensions --approve -p @path/to/prompt.md "Execute the instructions in the attached prompt file."
+```
+
+Or for short single-line prompts:
+
+```powershell
+$null | pi --model opencode-go/glm-5.3-flash --no-mcp --no-extensions --approve -p "Single line instruction"
+```
+
+### Locagens runtime architecture direction
+
+The backend is migrating 100% to **Rust (`Axum` + `Tokio` + `Rusqlite`)** built
+directly on top of `pi` (`pi --mode rpc`, `pi auth` /
+`~/.pi/agent/auth.json`, `models.json`). All new backend, provider, and auth
+work targets the Rust + `pi` model; the Node/Fastify backend is legacy.
+
 ## Tech Stack
 
 ```txt
 Frontend: Vue 3 + Vite + TypeScript (Composition API, <script setup>)
-Backend:  Node.js + TypeScript + Fastify
-Database: SQLite via the built-in node:sqlite module
+Backend:  Node.js + TypeScript + Fastify (legacy)
+          migrating 100% to Rust: Axum + Tokio + Rusqlite on top of pi
+          (pi --mode rpc, pi auth, ~/.pi/agent/auth.json, models.json)
+Database: SQLite (node:sqlite today; Rusqlite after the Rust migration)
 Realtime: SSE (Server-Sent Events)
 Packages: pnpm workspaces, monorepo
 ```
@@ -205,41 +241,18 @@ locagens.db stays out of git
 No telemetry or external tracking unless explicitly requested
 ```
 
-## Sub-Agents
+## Development Workflow
 
-Project development uses Claude Code sub-agents defined in `.claude/agents/`:
-
-```txt
-architect           Plan-only before 2+ module changes. No code.
-coder               Implements a scoped task; verifies with typecheck/tests.
-reviewer            Reviews diffs against this file. Read-only.
-searcher            Read-only exploration; paths + short answers.
-tester              Runs/writes tests; may only edit test files.
-provider-specialist Provider adapters, registry, secrets, pricing.
-security-auditor    Permission flow, sandbox, SSRF, path containment.
-prompt-engineer     systemPrompt.ts + prompts/ (agent behavior = product).
-docs-writer         Keeps API_ENDPOINT_MAP.md, database-schema.md, Claude.md in sync.
-debugger            Run triage: errors, states, SSE, SQLite forensics.
-release-engineer    Electron packaging, dist pipeline, signing, updates.
-```
-
-Delegation etiquette for the main agent:
+All work is strictly handled by:
 
 ```txt
-wide "where/what/how" question          -> searcher
-multi-module or non-trivial design      -> architect, then coder
-small single-file fix                   -> just do it yourself
-prompt/agent-behavior change            -> prompt-engineer
-provider/config/secret work             -> provider-specialist
-after a non-trivial diff                -> reviewer (security-sensitive: security-auditor)
-after implementation / before done      -> tester
-failing run or weird state              -> debugger
-docs out of sync with code              -> docs-writer
-packaging / release work                -> release-engineer
+gemini-3.8-flash            exploration (read-only research & analysis)
+pi CLI (glm-5.3-flash)      all coding & development via pi
 ```
 
-Sub-agent reports return as tool results — summarize them for the user.
-Sub-agents share the workspace and must respect the rules above.
+See the "Development & Agent Workflow" section above for the exact
+invocation pattern. The old `.claude/agents/` sub-agent definitions have
+been removed.
 
 ## Future Features
 
