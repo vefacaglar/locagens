@@ -395,20 +395,23 @@ Update this file continuously as phases complete.
 
 ## Phase 10 — Modular Crates (`crates/*`) + Apps (`apps/cli`, `apps/desktop-rs`) Worktree Refactoring
 
-Parallel worktree refactoring plan (T1–T7). Isolated task worktrees live under
-`C:\Users\User\.gemini\antigravity\worktrees\e0c11c6e-0150-4410-b6e6-439e0ce4221b\`.
+Parallel worktree refactoring plan (T1–T7). Isolated task worktrees lived under
+`C:\Users\User\.gemini\antigravity\worktrees\e0c11c6e-0150-4410-b6e6-439e0ce4221b\`
+(all merged into `main` and removed).
 
 - [x] **T1: `crates/protocol` + `crates/apply-patch`** — COMPLETED in commit
   `db82e33` on `main` (`feat(crates): extract crates/protocol and
   crates/apply-patch (T1)`).
-- [ ] **T2: `crates/execpolicy`** — IN PROGRESS. Worktree `wt-t2`, branch
-  `feat/t2-execpolicy`.
-- [ ] **T3: `crates/config`** — IN PROGRESS. Worktree `wt-t3`, branch
-  `feat/t3-config`.
-- [ ] **T4: `crates/context`** — IN PROGRESS. Worktree `wt-t4`, branch
-  `feat/t4-context`.
-- [ ] **T5: OpenAI `/v1/responses` SSE streaming** — IN PROGRESS. Worktree
-  `wt-t5`, branch `feat/t5-responses-wire`.
+- [x] **T2: `crates/execpolicy`** — COMPLETED (`d7ab2ad` on
+  `feat/t2-execpolicy`); merged into `main`, worktree `wt-t2` and branch
+  removed.
+- [x] **T3: `crates/config`** — COMPLETED (`b69a1d0` on `feat/t3-config`);
+  merged into `main`, worktree `wt-t3` and branch removed.
+- [x] **T4: `crates/context`** — COMPLETED (`a2216dd` on `feat/t4-context`);
+  merged into `main`, worktree `wt-t4` and branch removed.
+- [x] **T5: OpenAI `/v1/responses` SSE streaming** — COMPLETED (`dfaa15b` on
+  `feat/t5-responses-wire`); merged into `main`, worktree `wt-t5` and branch
+  removed.
 - [ ] **T6: `crates/core` + `apps/cli` + delete `apps/backend`** — QUEUED;
   starts after T2–T5 merge.
 - [ ] **T7: `.vscode` + CI + docs** — QUEUED; starts after T2–T5 merge
