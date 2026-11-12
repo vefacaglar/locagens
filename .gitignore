@@ -197,6 +197,12 @@ bun.lockb
 
 .deno/
 
+# rust
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+
 # python accidental files
 
 **pycache**/

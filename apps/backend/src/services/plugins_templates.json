@@ -1,0 +1,80 @@
+[
+  {
+    "id": "context-mode",
+    "name": "Context Mode",
+    "description": "Context window optimization for AI coding agents. Sandboxes tool output (98% reduction), persists session memory, and indexes session events with SQLite FTS5/BM25.",
+    "author": "mksglu",
+    "homepage": "https://github.com/mksglu/context-mode",
+    "manifest": {
+      "id": "context-mode",
+      "name": "Context Mode",
+      "version": "1.0.0",
+      "description": "Context window optimization for AI coding agents. Sandboxes tool output (98% reduction), persists session memory, and indexes session events with SQLite FTS5/BM25.",
+      "author": "mksglu",
+      "homepage": "https://github.com/mksglu/context-mode",
+      "mcpServers": {
+        "context-mode": {
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "context-mode"],
+          "enabled": true
+        }
+      },
+      "hooks": {
+        "onSessionStart": "internal:context-mode-init",
+        "postToolUse": "internal:context-mode-sandbox"
+      },
+      "systemPrompt": "Context Mode is active. Large tool outputs and workspace operations are sandboxed and indexed in persistent session memory. You can use ctx_* MCP tools (ctx_execute, ctx_search, ctx_index) when needed."
+    }
+  },
+  {
+    "id": "github-mcp",
+    "name": "GitHub Tools",
+    "description": "Inspect repositories, pull requests, issues, and branches directly via GitHub MCP Server.",
+    "author": "modelcontextprotocol",
+    "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+    "manifest": {
+      "id": "github-mcp",
+      "name": "GitHub Tools",
+      "version": "1.0.0",
+      "description": "Inspect repositories, pull requests, issues, and branches directly via GitHub MCP Server.",
+      "author": "modelcontextprotocol",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+      "mcpServers": {
+        "github": {
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-github"],
+          "env": {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": ""
+          },
+          "enabled": true
+        }
+      },
+      "systemPrompt": "GitHub MCP is connected. You can inspect GitHub issues, pull requests, commits, and repos."
+    }
+  },
+  {
+    "id": "sqlite-explorer",
+    "name": "SQLite Explorer",
+    "description": "Read, inspect schemas, and query SQLite databases safely via MCP.",
+    "author": "modelcontextprotocol",
+    "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+    "manifest": {
+      "id": "sqlite-explorer",
+      "name": "SQLite Explorer",
+      "version": "1.0.0",
+      "description": "Read, inspect schemas, and query SQLite databases safely via MCP.",
+      "author": "modelcontextprotocol",
+      "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+      "mcpServers": {
+        "sqlite": {
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "./data.db"],
+          "enabled": true
+        }
+      }
+    }
+  }
+]
