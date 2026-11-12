@@ -85,6 +85,24 @@
       "problemMatcher": ["$rustc"]
     },
     {
+      "label": "cargo: run locagens desktop (release)",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "run", "--release", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "linux": {
+        "command": "cargo",
+        "args": ["run", "--release", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "osx": {
+        "command": "cargo",
+        "args": ["run", "--release", "-p", "locagens-desktop", "--bin", "locagens"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
       "label": "cargo: build lcgn CLI (debug)",
       "type": "shell",
       "windows": {

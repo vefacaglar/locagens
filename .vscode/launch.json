@@ -1,9 +1,34 @@
 {
-  // Locagens debug configurations. cppdbg/gdb uses the w64devkit gdb; the
-  // CodeLLDB entries work on any platform when the `vadimcn.vscode-lldb`
-  // extension is installed.
+  // Locagens launch configurations.
+  //
+  // The first (default) entries are No-Debug runs using the built-in
+  // `node-terminal` type: they just build and execute the binary in the
+  // integrated terminal, so no C++/LLDB debugger extensions are required.
+  // The cppdbg/gdb entries use the w64devkit gdb; the CodeLLDB entries work
+  // on any platform when the `vadimcn.vscode-lldb` extension is installed.
   "version": "0.2.0",
   "configurations": [
+    {
+      "name": "Run Locagens Desktop (No Debug)",
+      "type": "node-terminal",
+      "command": "${workspaceFolder}/target/debug/locagens.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build desktop (debug)"
+    },
+    {
+      "name": "Run Locagens Desktop Release (No Debug)",
+      "type": "node-terminal",
+      "command": "${workspaceFolder}/target/release/locagens.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build desktop (release)"
+    },
+    {
+      "name": "Run lcgn CLI (No Debug)",
+      "type": "node-terminal",
+      "command": "${workspaceFolder}/target/debug/lcgn.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build lcgn CLI (debug)"
+    },
     {
       "name": "Debug Locagens Desktop (cppdbg / gdb)",
       "type": "cppdbg",
