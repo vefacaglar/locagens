@@ -2996,6 +2996,7 @@ dependencies = [
  "fs2",
  "futures",
  "locagens-apply-patch",
+ "locagens-execpolicy",
  "locagens-protocol",
  "regex",
  "reqwest",
@@ -3026,6 +3027,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "locagens-execpolicy"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "locagens-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
