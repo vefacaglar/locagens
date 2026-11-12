@@ -1,235 +1,210 @@
 # Database Schema — Locagens
 
-**Database engine:** SQLite (node:sqlite `DatabaseSync`)  
-**File:** `apps/api/src/database/db.ts`  
-**Default DB path:** `<workspace-root>/locagens.db` (or `:memory:` during tests)
+**Storage engine:** File-Based Storage (Codex/Claude/Pi-style `JSON` + `JSONL`) — zero SQLite, zero C library dependency.
+**Implementation:** `apps/backend/src/db.rs` (pure Rust, in-memory `RwLock<StorageState>` + durable file persistence).
+**Replaces:** the former SQLite engine (`node:sqlite` / `rusqlite`), `locagens.db`, and the `@locagens/db-writer` sidecar writer process.
+
+**Default data root:** `<app_support_dir>/data`, overridable via `LOCAGENS_DATA_DIR` (or derived from the legacy `LOCAGENS_DB_PATH` parent/stem). Path resolution lives in `apps/backend/src/paths.rs`.
 
 ---
 
-## Table: `runs`
+## File layout
 
-Stores one row per assistant run (conversation session).
+```txt
+<data-root>/
+  projects.json               — list of Project
+  permissions.json            — list of PermissionRule (auto-increment ids)
+  memory.json                 — list of Memory (auto-increment ids)
+  usage_logs.jsonl            — append-only JSONL of UsageLogEntry
+  sessions/<run_id>/run.json       — Run metadata
+  sessions/<run_id>/messages.jsonl — append-only JSONL of RunMessage
+  sessions/<run_id>/plan.json      — active Plan for the run
+```
 
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `TEXT` | `PRIMARY KEY` | UUID or similar unique identifier |
-| `title` | `TEXT` | `NOT NULL` | Human-readable run title |
-| `task` | `TEXT` | `NOT NULL` | The user's task description |
-| `project_path` | `TEXT` | `NOT NULL` `DEFAULT '<workspace-root>'` | Absolute path of the active workspace project |
-| `project_name` | `TEXT` | `NOT NULL` `DEFAULT 'Locagens'` | Display name of the project |
-| `status` | `TEXT` | `NOT NULL` | One of: `created`, `generating`, `awaiting_permission`, `running`, `failed`, `completed`, etc. |
-| `provider_id` | `TEXT` | `NOT NULL` | AI provider identifier (e.g. `openai`, `anthropic`) |
-| `provider_display_name` | `TEXT` | `NOT NULL` | Human-readable provider name |
-| `model` | `TEXT` | `NOT NULL` | Model name (e.g. `gpt-4o`, `claude-sonnet-4`) |
-| `mode` | `TEXT` | `NOT NULL` `DEFAULT 'accept_edits'` | Run mode (e.g. `accept_edits`, `plan`, `architect`) |
-| `error_message` | `TEXT` | nullable | Error text if the run failed |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-| `updated_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-| `last_active_at` | `TEXT` | nullable | ISO-8601 timestamp, populated on startup if null |
-| `coder_provider_id` | `TEXT` | nullable | † Provider ID for the coder sub-agent (dual-model mode) |
-| `coder_model` | `TEXT` | nullable | † Model name for the coder sub-agent |
-| `agent_preset` | `TEXT` | nullable | † Agent preset name (e.g. `architect-coder`) |
-| `utility_provider_id` | `TEXT` | nullable | † Provider ID for utility/fast model calls |
-| `utility_model` | `TEXT` | nullable | † Model name for utility/fast model calls |
-| `coder_reasoning_effort` | `TEXT` | nullable | † Reasoning effort for coder model (e.g. `low`, `medium`, `high`) |
-| `utility_reasoning_effort` | `TEXT` | nullable | † Reasoning effort for utility model |
-| `reasoning_effort` | `TEXT` | nullable | † Optional reasoning-effort selection for the primary model |
+All state is kept in an in-memory `RwLock<StorageState>` so reads are O(1); every
+mutation is durably persisted:
 
-**† Migration columns** – added via `ALTER TABLE … ADD COLUMN` in post-CREATE migrations:
-
-1. `mode` — added in a migration (also present in the current CREATE TABLE)
-2. `last_active_at`
-3. `coder_provider_id`, `coder_model`, `agent_preset`, `utility_provider_id`, `utility_model`
-4. `coder_reasoning_effort`, `utility_reasoning_effort`
-5. `reasoning_effort`
-
-**Indexes:** none declared explicitly.
-
-**Startup routine:** Runs in `'created'`, `'generating'`, or `'awaiting_permission'` status are reset to `'failed'` with `error_message = 'Session interrupted due to server restart.'`.
+- **JSON files** (`projects.json`, `permissions.json`, `memory.json`,
+  `sessions/<run_id>/run.json`, `sessions/<run_id>/plan.json`) are serialized
+  and written to a `.tmp` sibling, then renamed atomically.
+- **JSONL files** (`usage_logs.jsonl`, `sessions/<run_id>/messages.jsonl`) are
+  appended and flushed; when a line is updated in place, the file is rewritten
+  atomically.
+- Deleting a run removes the whole `sessions/<run_id>/` directory. Startup
+  cleanup walks `sessions/` and resets runs stuck in `created`, `generating`, or
+  `awaiting_permission` to `failed` (session folders keep their content).
 
 ---
 
-## Table: `messages`
+## Record types
 
-Stores individual chat messages within a run.
-
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `TEXT` | `PRIMARY KEY` | Unique message identifier |
-| `run_id` | `TEXT` | `NOT NULL` `FK → runs(id)` | Parent run |
-| `role` | `TEXT` | `NOT NULL` | `user`, `assistant`, `system`, `tool`, etc. |
-| `agent_role` | `TEXT` | nullable | Sub-role: `architect`, `coder`, or `null` for single-agent |
-| `agent_name` | `TEXT` | nullable | † Coder sub-agent identity (display name) |
-| `provider_id` | `TEXT` | nullable | Provider used for this message |
-| `provider_display_name` | `TEXT` | nullable | Human-readable provider name |
-| `model` | `TEXT` | nullable | Model used for this message |
-| `content` | `TEXT` | `NOT NULL` | Message body text |
-| `reasoning_content` | `TEXT` | nullable | † Model's chain-of-thought / reasoning text |
-| `raw_response` | `TEXT` | nullable | Full raw API response JSON |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-
-**† Migration columns** – added via `ALTER TABLE`:
-
-1. `reasoning_content` — added for storing chain-of-thought output
-2. `agent_name` — added for identifying coder sub-agent identity
-
-**Foreign keys:**
-
-| Column | References | On Delete |
-|---|---|---|
-| `run_id` | `runs(id)` | (not specified; SQLite default — no action) |
-
-**Indexes:** none declared explicitly.
-
----
-
-## Table: `projects`
+### `projects.json` — `Project`
 
 Tracks known workspace projects.
 
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `path` | `TEXT` | `PRIMARY KEY` | Absolute filesystem path |
-| `name` | `TEXT` | `NOT NULL` | Display name |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
+| Field | Type | Notes |
+|---|---|---|
+| `path` | `string` | Absolute filesystem path (primary key) |
+| `name` | `string` | Display name (default `Locagens` for the workspace root) |
+| `createdAt` | `string` | ISO-8601 timestamp |
 
-**Indexes:** none declared explicitly.
-
-**Default seeding:** On first launch a row is inserted for the workspace root with name `'Locagens'`.
-
-**Startup update:** Sets `name` to the default project name for rows where `path` is the workspace root (or root with trailing `/`) and the current name equals `path.basename(wsRoot)`.
-
----
-
-## Table: `permissions`
+### `permissions.json` — `PermissionRule`
 
 Per-tool and per-command grant records for security approval.
 
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `INTEGER` | `PRIMARY KEY AUTOINCREMENT` | Auto-generated surrogate key |
-| `scope` | `TEXT` | `NOT NULL` | Scope kind — likely `'global'` or `'project'` |
-| `project_path` | `TEXT` | `NOT NULL` `DEFAULT ''` | Project path (empty string = all projects) |
-| `tool` | `TEXT` | `NOT NULL` `DEFAULT ''` | Tool name (e.g. `run_command`, `write_file`, `search_files`) |
-| `command` | `TEXT` | `NOT NULL` `DEFAULT ''` | Exact command string (for `run_command`); empty for other tools |
-| `network_domains` | `TEXT` | `NOT NULL` `DEFAULT '[]'` | Sorted JSON array of exact network domains approved with the command |
-| `status` | `TEXT` | `NOT NULL` | e.g. `'approved'`, `'denied'` |
-| | | `UNIQUE(scope, project_path, tool, command, network_domains)` | Prevents duplicate exact command/domain grants |
-
-**Indexes:** none declared explicitly.
-
-**Migration note:** Legacy tables without `tool` or `network_domains` allowed overly broad grants. If either column is missing, the table is **dropped and recreated**, clearing all existing grants.
-
----
-
-## Table: `plans`
-
-Stores plan documents associated with a run. A run may have multiple plan versions over time.
-
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `TEXT` | `PRIMARY KEY` | Unique plan identifier |
-| `run_id` | `TEXT` | `NOT NULL` `FK → runs(id)` | Parent run |
-| `title` | `TEXT` | `NOT NULL` `DEFAULT 'Plan'` | Plan title |
-| `body` | `TEXT` | nullable | Plan body / description (JSON or Markdown) |
-| `tasks` | `TEXT` | `NOT NULL` `DEFAULT '[]'` | JSON array of task objects |
-| `status` | `TEXT` | `NOT NULL` `DEFAULT 'active'` | `'active'`, `'superseded'`, etc. |
-| `version` | `INTEGER` | `NOT NULL` `DEFAULT 1` | Monotonically increasing version per run |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-| `updated_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-
-**Foreign keys:**
-
-| Column | References | On Delete |
+| Field | Type | Notes |
 |---|---|---|
-| `run_id` | `runs(id)` | (not specified) |
+| `id` | `integer` | Auto-increment surrogate key (monotonic counter in the store) |
+| `scope` | `string` | `'global'` or `'project'` |
+| `projectPath` | `string` | Project path (empty string = all projects) |
+| `tool` | `string` | Tool name (e.g. `run_command`, `write_file`, `search_files`) |
+| `command` | `string` | Exact command string (for `run_command`); empty for other tools |
+| `networkDomains` | `string[]` | Sorted list of exact network domains approved with the command |
+| `status` | `string` | e.g. `'approved'`, `'denied'` |
 
-**Indexes:**
+Duplicate exact command/domain grants are prevented on write (the old SQLite
+`UNIQUE(scope, project_path, tool, command, network_domains)` constraint).
 
-| Index name | On | Notes |
+### `memory.json` — `Memory`
+
+Durable facts the assistant remembers across sessions (set via the `remember`
+tool / Settings → Memory).
+
+| Field | Type | Notes |
 |---|---|---|
-| `idx_plans_run` | `plans(run_id)` | Accelerates lookups by run |
+| `id` | `integer` | Auto-increment surrogate key |
+| `scope` | `string` | `'global'` or `'project'` |
+| `projectPath` | `string` | Empty string = global scope; project path otherwise |
+| `category` | `string` | Category label (default `project`) |
+| `content` | `string` | The remembered fact |
+| `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
 
----
+### `usage_logs.jsonl` — `UsageLogEntry`
 
-## Table: `memory`
+Append-only detailed records of all LLM completions, including token counts,
+cache hits, and calculated costs. One JSON object per line.
 
-Durable facts the assistant remembers across sessions (set via the `remember` tool).
-
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `INTEGER` | `PRIMARY KEY AUTOINCREMENT` | Auto-generated surrogate key |
-| `scope` | `TEXT` | `NOT NULL` | `'global'` or `'project'` |
-| `project_path` | `TEXT` | `NOT NULL` `DEFAULT ''` | Empty string = global scope; project path otherwise |
-| `category` | `TEXT` | `NOT NULL` `DEFAULT 'project'` | Category label |
-| `content` | `TEXT` | `NOT NULL` | The remembered fact |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-| `updated_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-
-**Indexes:**
-
-| Index name | On | Notes |
+| Field | Type | Notes |
 |---|---|---|
-| `idx_memory_scope_project` | `memory(scope, project_path)` | Accelerates queries filtering by scope and project |
+| `id` | `integer` | Auto-increment surrogate key |
+| `runId` | `string` | Parent run (`sessions/<run_id>/`) |
+| `agentRole` | `string?` | Agent role (e.g. `planner`, `coder`, `utility`) |
+| `providerId` | `string` | Provider identifier |
+| `model` | `string` | Model name used for completion |
+| `inputTokens` / `outputTokens` | `integer` | Prompt / completion token counts |
+| `cacheReadTokens` / `cacheWriteTokens` | `integer` | Cache hit / miss-write token counts |
+| `cacheHitRate` | `number` | Cache hit rate as percentage (0–100) |
+| `cost` | `number` | Estimated cost of this call in USD |
+| `createdAt` | `string` | ISO-8601 timestamp |
 
----
+### `sessions/<run_id>/run.json` — `Run`
 
-## Table: `usage_logs`
+One file per assistant run (conversation session).
 
-Detailed records of all LLM completions, including token counts, cache hits, and calculated costs.
-
-| Column | Type | Constraints | Notes |
-|---|---|---|---|
-| `id` | `INTEGER` | `PRIMARY KEY AUTOINCREMENT` | Auto-generated surrogate key |
-| `run_id` | `TEXT` | `NOT NULL` `FK → runs(id)` | Parent run |
-| `agent_role` | `TEXT` | nullable | Agent role (e.g., `planner`, `coder`, `utility`) |
-| `provider_id` | `TEXT` | `NOT NULL` | Provider identifier (e.g. `openai`, `anthropic`) |
-| `model` | `TEXT` | `NOT NULL` | Model name used for completion |
-| `input_tokens` | `INTEGER` | `NOT NULL` `DEFAULT 0` | Input / prompt tokens count |
-| `output_tokens` | `INTEGER` | `NOT NULL` `DEFAULT 0` | Output / completion tokens count |
-| `cache_read_tokens` | `INTEGER` | `NOT NULL` `DEFAULT 0` | Cache hit (read) tokens count |
-| `cache_write_tokens` | `INTEGER` | `NOT NULL` `DEFAULT 0` | Cache miss (written) tokens count |
-| `cache_hit_rate` | `REAL` | `NOT NULL` `DEFAULT 0.0` | Cache hit rate as percentage (0 to 100) |
-| `cost` | `REAL` | `NOT NULL` `DEFAULT 0.0` | Estimated cost of this call in USD |
-| `created_at` | `TEXT` | `NOT NULL` | ISO-8601 timestamp |
-
-**Indexes:**
-
-| Index name | On | Notes |
+| Field | Type | Notes |
 |---|---|---|
-| `idx_usage_logs_run` | `usage_logs(run_id)` | Accelerates lookups of usage logs by run |
+| `id` | `string` | UUID (folder name of the session) |
+| `title` | `string` | Human-readable run title |
+| `task` | `string` | The user's task description |
+| `projectPath` / `projectName` | `string` | Active workspace project (path defaults to the workspace root) |
+| `status` | `string` | `created`, `generating`, `awaiting_permission`, `running`, `failed`, `completed`, … |
+| `providerId` / `providerDisplayName` | `string` | Selected provider (resolved from `~/.pi/agent/auth.json` / `models.json`) |
+| `model` | `string` | Model name |
+| `mode` | `string` | Run mode (`accept_edits`, `plan`, `auto`, `chat`, `ask_permissions`) |
+| `errorMessage` | `string?` | Error text if the run failed |
+| `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
+| `lastActiveAt` | `string?` | Populated on startup if null |
+| `coderProviderId` / `coderModel` | `string?` | Coder sub-agent (dual-model mode) |
+| `agentPreset` | `string?` | Agent preset name (e.g. `architect-coder`) |
+| `utilityProviderId` / `utilityModel` | `string?` | Utility/fast model calls |
+| `coderReasoningEffort` / `utilityReasoningEffort` / `reasoningEffort` | `string?` | Per-model reasoning-effort selections |
+
+Derived view: `db::Db::get_run()` projects this into a `RunRow` with only the
+columns consumed by route modules.
+
+### `sessions/<run_id>/messages.jsonl` — `RunMessage`
+
+Append-only JSONL of individual chat messages within a run.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | Unique message identifier |
+| `runId` | `string` | Parent run (matches the session folder) |
+| `role` | `string` | `user`, `assistant`, `system`, `tool`, … |
+| `agentRole` | `string?` | Sub-role: `architect`, `coder`, or `null` for single-agent |
+| `agentName` | `string?` | Coder sub-agent identity (display name) |
+| `providerId` / `providerDisplayName` / `model` | `string?` | Provider/model used for this message |
+| `content` | `string` | Message body text |
+| `reasoningContent` | `string?` | Model's chain-of-thought / reasoning text |
+| `rawResponse` | `string?` | Full raw API response JSON |
+| `createdAt` | `string` | ISO-8601 timestamp |
+
+### `sessions/<run_id>/plan.json` — `Plan`
+
+The active plan document for a run (drives the right-hand plan panel). A new
+plan supersedes the previous one in place.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | `string` | Unique plan identifier |
+| `runId` | `string` | Parent run (matches the session folder) |
+| `title` | `string` | Plan title (default `Plan`) |
+| `body` | `string?` | Plan body / description (JSON or Markdown) |
+| `tasks` | `array` | JSON array of task objects (default `[]`) |
+| `status` | `string` | `'active'`, `'superseded'`, … (default `active`) |
+| `version` | `integer` | Monotonically increasing version per run (default `1`) |
+| `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
 
 ---
 
 ## Relationship Summary
 
 ```
-runs ──┬── messages     (1:N via run_id)
-       ├── plans        (1:N via run_id)
-       ├── usage_logs   (1:N via run_id)
-       └── (implicitly referenced by permissions/memory via project_path)
+sessions/<run_id>/run.json ──┬── messages.jsonl   (same folder, 1:N)
+                             ├── plan.json        (same folder, 1 active)
+                             └── usage_logs.jsonl (matched by runId)
 ```
 
-- **`projects`** is a standalone lookup table.
-- **`permissions`** uses `scope` + `project_path` (not a foreign key) to associate grants with projects.
-- **`memory`** uses `scope` + `project_path` (not a foreign key) to associate facts with projects.
+- **`projects.json`** is a standalone lookup file.
+- **`permissions.json`** uses `scope` + `projectPath` (not a foreign key) to
+  associate grants with projects.
+- **`memory.json`** uses `scope` + `projectPath` (not a foreign key) to
+  associate facts with projects.
 
 ---
 
-## Index Summary
+## Provider & auth configuration (not app data)
 
-| Table | Index Name | Columns |
-|---|---|---|
-| `plans` | `idx_plans_run` | `run_id` |
-| `memory` | `idx_memory_scope_project` | `scope, project_path` |
-| `usage_logs` | `idx_usage_logs_run` | `run_id` |
+Provider credentials and model catalogs live in `pi`'s agent directory
+(`~/.pi/agent`, overridable via `PI_CODING_AGENT_DIR`) and are managed by
+`apps/backend/src/pi_providers.rs`:
+
+```txt
+~/.pi/agent/auth.json          — provider id → credential
+                                 ({ "type": "api_key", "key": "..." },
+                                  "!command", "$ENV_VAR", or OAuth)
+~/.pi/agent/models.json        — custom provider configs & model overrides
+~/.pi/agent/models-store.json  — pi's cached dynamic model catalog
+```
+
+Plus Locagens UI metadata under the app-support dir:
+
+```txt
+locagens-providers-meta.json   — display names / model settings (pricing, context limits)
+locagens-presets.json          — architect / coder / utility agent presets
+```
+
+Secrets never enter the app data files above.
 
 ---
 
 ## Notes
 
-- All timestamp columns use ISO-8601 text format (`TEXT`).
-- SQLite is configured with `busy_timeout = 10000`, `journal_mode = WAL`, and `synchronous = NORMAL` for concurrency.
-- A `DbWriterClient` background writer (the `@locagens/db-writer` Node.js sidecar process in `apps/db-writer`) is used when not in `:memory:` mode to serialise writes.
-- The `runs` table has a startup cleanup routine: runs stuck in `'created'`, `'generating'`, or `'awaiting_permission'` are marked `'failed'` and a system message is inserted.
-- Migration columns are added idempotently via `ALTER TABLE … ADD COLUMN` wrapped in try/catch.
+- All timestamp fields use ISO-8601 text format.
+- There is no SQLite, no WAL/journal mode, no `busy_timeout`, no `DbWriterClient`
+  background writer, and no `apps/db-writer` sidecar — writes are serialized by
+  the in-process `RwLock` and persisted synchronously.
+- Startup cleanup resets runs stuck in `'created'`, `'generating'`, or
+  `'awaiting_permission'` to `'failed'` with an interrupt error message.
+- Legacy `locagens.db` / `locagens.db-shm` / `locagens.db-wal` files are no
+  longer read or written and can be deleted.

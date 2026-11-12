@@ -24,12 +24,13 @@ User Task
 
 ```txt
 Vue 3 frontend
-Fastify backend
-SQLite persistence
+Rust backend (Axum + Tokio) built on top of pi
+file-based JSON/JSONL persistence (Codex/Claude/Pi-style storage, no SQLite)
+pi provider engine (~/.pi/agent/auth.json & models.json)
 OpenAI-compatible provider adapter
 Anthropic provider adapter
-provider config in OS app settings (not the project)
-API keys kept in the OS keychain, never in JSON
+provider config in pi's agent directory (not the project)
+API keys live in auth.json (literal, !command, $ENV_VAR, or OAuth), never in app data
 per-model context limits and tiered pricing -> local cost / usage logs
 reasoning-effort conversion per model (reasoningWire)
 single provider/model run creation
@@ -49,10 +50,11 @@ right-hand plan panel
 
 ```txt
 Frontend: Vue 3 + Vite + TypeScript
-Backend: Node.js + TypeScript + Fastify
-Database: SQLite via node:sqlite
+Backend: Rust (Axum + Tokio) built directly on top of pi
+Storage: file-based JSON/JSONL (projects.json, sessions/<run_id>/…, no SQLite)
+Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
 Realtime: SSE
-Package manager: pnpm
+Package manager: pnpm (frontend/desktop) + cargo (backend)
 Repository style: monorepo
 ```
 
@@ -61,12 +63,16 @@ Repository style: monorepo
 ```txt
 locagens/
   apps/
-    api/
+    backend/
       src/
-        database/
-        orchestrator/
-        providers/
+        auth.rs
+        db.rs
+        paths.rs
+        pi_providers.rs
         routes/
+        services/
+    desktop/
+      src/
     web/
       src/
         api/
@@ -83,67 +89,50 @@ locagens/
 
 ## Provider Configuration
 
-Provider settings live in the OS application-support directory, not in the
-project:
+The backend is built directly on top of `pi` and reads/writes `pi`'s
+configuration files under the `pi` agent directory (`~/.pi/agent`, overridable
+via `PI_CODING_AGENT_DIR`), not in the project:
 
 ```txt
-macOS    ~/Library/Application Support/Locagens/providers.json
-Windows  %APPDATA%\Locagens\providers.json
-Linux    ~/.config/locagens/providers.json
+~/.pi/agent/auth.json           provider id -> credential
+                                ({ "type": "api_key", "key": "..." },
+                                 "!command", "$ENV_VAR", or OAuth)
+~/.pi/agent/models.json         custom provider configs & model overrides
+~/.pi/agent/models-store.json   pi's cached dynamic model catalog
 ```
 
-API keys are never written to JSON: on macOS the key is stored in the Keychain
-and the file keeps only a non-secret `apiKeyRef` pointer.
+Locagens UI metadata lives under the OS app-support directory:
 
 ```txt
-OS app-support/providers.json   live config (NO secrets)
-OS keychain                     holds the actual API key, referenced by apiKeyRef
+locagens-providers-meta.json    display names / model settings
+locagens-presets.json           architect / coder / utility agent presets
 ```
 
-`LOCAGENS_PROVIDER_CONFIG_PATH` overrides this path (used by tests). On first
-run, if the OS file is missing, the registry seeds it from
-`LOCAGENS_PROVIDER_SEED_PATH` if set, and flattens any leftover
-`providers.user.json` overlay into that single file. After that, saves never
-touch the project. There is no in-repo seed catalog — a fresh checkout (or a
-packaged build) starts with an empty provider list until providers are added
-via Settings.
+API keys never enter the app data or session files — credentials live only in
+`auth.json` (or environment variables via the fallback chain such as
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …).
 
-Example:
+Example `auth.json`:
 
 ```json
 {
-  "providers": {
-    "openai": {
-      "type": "openai-compatible",
-      "displayName": "OpenAI",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKeyRef": "macos-keychain:openai",
-      "models": ["gpt-5.5"]
-    },
-    "anthropic": {
-      "type": "anthropic",
-      "displayName": "Anthropic",
-      "baseUrl": "https://api.anthropic.com",
-      "apiKeyRef": "macos-keychain:anthropic",
-      "models": ["claude-sonnet-4.5"]
-    }
-  }
+  "openai": { "type": "api_key", "key": "sk-..." },
+  "anthropic": { "type": "api_key", "key": "$ANTHROPIC_API_KEY" }
 }
 ```
 
-Public provider metadata omits API keys. The local settings API returns editable
-provider config with the API key masked by a preserve marker, so the frontend can
-edit other fields without receiving or re-posting the secret.
+Public provider metadata omits credentials. The local settings API returns
+editable provider config with the API key masked by a preserve marker
+(`__LOCAGENS_PRESERVE_API_KEY__`), so the frontend can edit other fields without
+receiving or re-posting the secret.
 
-Each provider's `modelSettings[model]` block may carry a `reasoning` effort, a
-`contextLimit`, and `pricing` (tiered input/output/cache rates per 1M tokens).
-Cost is computed locally from these rates and the provider's reported token
-counts, then stored per call in `usage_logs`. A model with no configured pricing
-costs 0.
+Locagens model settings may carry a `reasoning` effort, a `contextLimit`, and
+`pricing` (tiered input/output/cache rates per 1M tokens). Cost is computed
+locally from these rates and the provider's reported token counts, then stored
+per call in `usage_logs.jsonl`. A model with no configured pricing costs 0.
 
-The provider file may also include `agentPresets`, which define an architect
-provider/model, coder provider/model, `maxSubAgents`, and optionally a utility
-provider/model.
+Agent presets (`locagens-presets.json`) define an architect provider/model, coder
+provider/model, `maxSubAgents`, and optionally a utility provider/model.
 
 ## Modes
 
@@ -197,10 +186,16 @@ pnpm install
 pnpm dev
 ```
 
-Useful checks:
+The backend runs from Rust; build and test it with cargo:
 
 ```bash
-pnpm --filter @locagens/api test
-pnpm --filter @locagens/api build
+cargo test --manifest-path apps/backend/Cargo.toml
+cargo build --release --manifest-path apps/backend/Cargo.toml
+```
+
+Useful frontend checks:
+
+```bash
+pnpm --filter @locagens/web test
 pnpm --filter @locagens/web build
 ```

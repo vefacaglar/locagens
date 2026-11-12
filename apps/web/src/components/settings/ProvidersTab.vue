@@ -332,7 +332,8 @@ async function handleFetchModels() {
       <div class="header-info">
         <h3 class="settings-section-title">Providers</h3>
         <p class="settings-section-desc">
-          Configure model providers and API keys. Secrets are stored in macOS Keychain when available.
+          Configure model providers and API keys. Credentials and models are managed natively via pi
+          (~/.pi/agent/auth.json &amp; models.json); secrets are stored locally on this machine and never leave it.
         </p>
       </div>
       <ThemedButton 

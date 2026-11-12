@@ -17,6 +17,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/backend
+      # Rust backend: tests + release build.
+      - run: cargo test --manifest-path apps/backend/Cargo.toml
+      - run: cargo build --release --manifest-path apps/backend/Cargo.toml
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -26,10 +33,7 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # API tests import runtime values from @locagens/shared (resolved via dist/).
+      # Shared is a runtime dependency of the frontend (resolved via dist/).
       - run: pnpm --filter @locagens/shared build
-      - run: pnpm --filter @locagens/api test
-      - run: pnpm --filter @locagens/db-writer test
       - run: pnpm --filter @locagens/web test
       - run: pnpm build
-      - run: pnpm --filter @locagens/api run build:bundle

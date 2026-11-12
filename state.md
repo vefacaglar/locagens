@@ -119,7 +119,7 @@ Update this file continuously as phases complete.
     cancel, usage logs (tokens + cost), SSE terminal replay.
   - `cargo test` 27/27 passed, `cargo check` clean (w64devkit + stable-x86_64-pc-windows-gnu).
 
-- [ ] **Phase 4: Frontend (`apps/web`), Desktop (`apps/desktop`) Integration & Legacy Node.js Removal**
+- [x] **Phase 4: Frontend (`apps/web`), Desktop (`apps/desktop`) Integration & Legacy Node.js Removal**
   - Update `apps/desktop/src/backend.ts` & `paths.ts` to spawn the Rust `locagens-backend` binary.
   - Update `apps/web` provider settings to work natively with `pi` providers/auth.
   - Remove legacy `apps/api` and `apps/db-writer`, update root `package.json` &

@@ -2,6 +2,10 @@
 
 Bu belge, Locagens masaüstü uygulamasının nasıl yayınlanacağını açıklar.
 
+Yayın işlemi Rust backend (`apps/backend`, Axum + Tokio, pi tabanlı file-based
+JSON/JSONL storage) üzerine kuruludur; eski Node.js/Fastify API (`apps/api`),
+`node:sqlite` veritabanı ve `@locagens/db-writer` sidecar süreci kalkmıştır.
+
 ---
 
 ## Yöntem 1: Önerilen (Tag ile Sürüm)
@@ -21,7 +25,8 @@ En temiz yol. Hem DMG üretilir hem de GitHub Release otomatik oluşturulur.
    git push origin v0.2.0
    ```
 4. GitHub Actions otomatik olarak tetiklenir:
-   - db-writer (Node.js sidecar), shared paket, web ve API bundle derlenir
+   - Rust backend (`cargo build --release --manifest-path apps/backend/Cargo.toml`) derlenir
+   - shared paket ve web bundle derlenir
    - electron-builder DMG üretir
    - DMG dosyası yeni oluşturulan GitHub Release'e eklenir
    - Sürüm notları otomatik üretilir

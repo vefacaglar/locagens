@@ -40,16 +40,12 @@
         "to": "web"
       },
       {
-        "from": "../api/dist/server.bundle.cjs",
-        "to": "api/server.bundle.cjs"
-      },
-      {
-        "from": "../db-writer/dist/db-writer.cjs",
-        "to": "db-writer/db-writer.cjs"
-      },
-      {
-        "from": "../api/node_modules/@anthropic-ai/sandbox-runtime/vendor",
-        "to": "sandbox-runtime/vendor"
+        "from": "../../target/release",
+        "to": "bin",
+        "filter": [
+          "locagens-backend",
+          "locagens-backend.exe"
+        ]
       }
     ],
     "mac": {
@@ -59,10 +55,7 @@
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": true,
-      "signIgnore": [
-        "sandbox-runtime/vendor/"
-      ]
+      "notarize": true
     }
   }
 }

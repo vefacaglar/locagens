@@ -36,6 +36,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust backend (release)
+        run: cargo build --release --manifest-path apps/backend/Cargo.toml
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -68,16 +74,24 @@ jobs:
               console.log('Setting version to:', version);
               const paths = [
                 'apps/desktop/package.json',
-                'apps/api/package.json',
+                'apps/backend/Cargo.toml',
                 'packages/shared/package.json'
               ];
               for (const pkgPath of paths) {
-                if (fs.existsSync(pkgPath)) {
+                if (!fs.existsSync(pkgPath)) continue;
+                if (pkgPath.endsWith('Cargo.toml')) {
+                  const toml = fs.readFileSync(pkgPath, 'utf8');
+                  const updated = toml.replace(
+                    /^(version\s*=\s*)"[^"]*"/m,
+                    `$1"${version}"`
+                  );
+                  fs.writeFileSync(pkgPath, updated);
+                } else {
                   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
                   pkg.version = version;
                   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-                  console.log('Updated', pkgPath);
                 }
+                console.log('Updated', pkgPath);
               }
             } else {
               console.log('Skipping version update, using default version. Tag/Ref:', tagName);
@@ -105,7 +119,7 @@ jobs:
           printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
           echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
 
-      - name: Build, sign and notarize (db-writer + web + api + Electron)
+      - name: Build, sign and notarize (Rust backend + web + Electron)
         run: pnpm dist
 
       - name: Verify signature and notarization

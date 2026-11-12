@@ -2,9 +2,5 @@ packages:
   - 'apps/*'
   - 'packages/*'
 allowBuilds:
-  better-sqlite3: true
   electron: true
   electron-winstaller: false
-  esbuild: true
-minimumReleaseAgeExclude:
-  - '@anthropic-ai/sandbox-runtime@0.0.73'
