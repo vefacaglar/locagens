@@ -1,0 +1,24 @@
+[package]
+name = "locagens-desktop"
+version = "0.2.0"
+edition = "2021"
+description = "Locagens native Rust desktop app (Dioxus 0.7) wired in-process to locagens_core::api."
+
+[package.metadata.notes]
+frontend = "Dioxus 0.7 desktop; no HTTP, calls locagens_core::api directly."
+
+default-run = "locagens"
+
+[[bin]]
+name = "locagens"
+path = "src/main.rs"
+
+[dependencies]
+locagens_core = { package = "locagens-backend", path = "../backend" }
+dioxus = { version = "0.7", features = ["desktop"] }
+tokio = { version = "1", features = ["full"] }
+pulldown-cmark = "0.13"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

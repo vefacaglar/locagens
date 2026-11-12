@@ -46,7 +46,7 @@ impl Drop for CrossProcessLock {
 }
 
 /// A durable fact remembered via the `remember` tool / Settings → Memory.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Memory {
     pub id: i64,
@@ -59,7 +59,7 @@ pub struct Memory {
 }
 
 /// A persisted standing approval for workspace tool calls.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PermissionRule {
     pub id: i64,
@@ -72,7 +72,7 @@ pub struct PermissionRule {
 }
 
 /// A registered project folder.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Project {
     pub path: String,
@@ -93,7 +93,7 @@ pub struct RunRow {
 }
 
 /// Full run metadata, persisted as `sessions/<run_id>/run.json`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Run {
     pub id: String,
@@ -121,7 +121,7 @@ pub struct Run {
 
 /// One chat message of a run, persisted as a line of
 /// `sessions/<run_id>/messages.jsonl`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunMessage {
     pub id: String,
@@ -139,7 +139,7 @@ pub struct RunMessage {
 }
 
 /// The active plan of a run, persisted as `sessions/<run_id>/plan.json`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Plan {
     pub id: String,
@@ -154,7 +154,7 @@ pub struct Plan {
 }
 
 /// One usage entry, persisted as a line of `usage_logs.jsonl`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UsageLogEntry {
     pub id: i64,

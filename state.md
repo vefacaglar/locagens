@@ -180,11 +180,66 @@ Update this file continuously as phases complete.
 
 ## Next Phases
 
-- [ ] **Phase 7: Native Rust Dioxus Desktop App (`apps/desktop-rs`)**
-  - Dioxus desktop shell calling `locagens_core::api` in-process (no HTTP):
-    chat/session UI, Build/Plan/Full-Access mode picker, permission approval
-    cards, plan panel, provider settings (pi auth.json), sub-agent windows
-    (`agentRole`/`agentName`), usage panel.
+- [x] **Phase 7a: Native Rust Dioxus desktop foundation (`apps/desktop-rs`)**
+  - New workspace member `apps/desktop-rs` (crate `locagens-desktop`, binary
+    `locagens`, Dioxus 0.7 + tokio + pulldown-cmark + rfd) wired directly
+    in-process to `locagens_core::api` — no HTTP. `api::bootstrap()` runs in
+    `main`, the shared `AppState` is stored in a global and every component /
+    spawned task reads it via `state_ui::core()`.
+  - `src/main.rs`: launches `dioxus::LaunchBuilder::desktop()` with a 1380x860
+    resizable `"Locagens"` window; root `App` provides the `UiStore` context.
+  - `src/theme.rs`: `build_stylesheet(dark)` + `theme_class(dark)` generate a
+    complete stylesheet per runtime OS — Windows 11 Fluent (Segoe UI Variable,
+    Mica-like `#191919/#202020/#272727` layers, `#0078d4/#60cdff` accent),
+    macOS vibrancy (SF Pro, `#1c1c1e/#242426/#2c2c2e`, `#0a84ff`), neutral
+    Linux fallback — including the 3-column shell, chat thread, tool groups,
+    reasoning panels, diff views, permission/question cards, composer, modals,
+    settings/usage tables and badges.
+  - `src/markdown.rs`: `render_markdown` (pulldown-cmark tables + strike +
+    task lists), `DiffLine`/`parse_diff`, `looks_like_diff`, `pseudo_diff`
+    (old/new content → diff lines) and `summarize_args`.
+  - `src/state_ui.rs`: `UiStore` (Copy struct of Signals — dark_mode, page
+    Chat/Settings/UsageLogs, projects, selected_project, runs, search,
+    active run + messages + plan + usage, pending permission/question,
+    provider catalog + provider/model/effort/mode, right panel, toast,
+    prompt) with `refresh_initial`, `refresh_runs/projects`, `select_run`
+    (loads run/messages/plan/usage/pending and attaches a live event stream
+    for active runs) and `attach_event_stream` processing all emitted event
+    types (`message_created/updated`, `status_changed`,
+    `permission_requested`, `question_requested`, `plan_updated`,
+    `run_title_changed`, `run_completed`, `run_failed`; `message_delta` /
+    `tool_call_*` arrive as `message_updated` full-message replays).
+  - `src/components/`: `sidebar.rs` (brand + OS badge, New Chat, Add Project
+    via rfd folder picker or manual path modal, run search, project tree with
+    status dots/model badges/per-run delete, footer nav), `chat_header.rs`
+    (title, project pill, mode/status badges, token+cost summary, theme
+    toggle, Stop Run via `runs::cancel_run`, Inspector toggle),
+    `message_thread.rs` (user bubbles, Markdown assistant answers with
+    collapsible `ReasoningPanel`, `ToolGroupCard`s pairing tool calls with
+    their tool responses incl. auto `DiffView` for write/edit diffs,
+    `SubAgentCard` groups for explorer/worker messages), `cards.rs`
+    (`PermissionCard` with Allow Once/Run/Project/Always/Deny →
+    `runs::permission_decision`; stepped `QuestionCard` with multi/single
+    select options + custom notes → `runs::answer_question`), `composer.rs`
+    (Enter/Shift+Enter textarea, 📎 file attach via rfd appending `@path`,
+    @file/@symbol quick-insert bar with real project file chips, mode +
+    provider + model + effort selectors, Send/Continue/Queue →
+    `runs::create_run` / `continue_run` / `queue_message` attaching the
+    pre-subscribed event receiver), `right_panel.rs` (Plan/Agents/Git/
+    Terminal tabs — plan tasks, sub-agent summary, git status + commit/push),
+    `settings.rs` (Providers with default picker, pi auth accounts, permission
+    rule deletion, memory CRUD, info tabs for Skills/MCP/Plugins/Security),
+    `usage_logs.rs` (metrics cards + paged 50-row table with search).
+  - Backend: added `PartialEq` derives to `db.rs` structs and
+    `ProviderMetadata` (required by the Dioxus component macro).
+  - Verified: `cargo check --workspace` zero warnings/errors;
+    `cargo build -p locagens-desktop` links; backend `cargo test` 48 unit + 4
+    integration still pass; the window launches and stays running.
+  - Not verified / known limits: no real end-to-end agent run was driven
+    through the new UI yet; select/`value` binding uses `selected` attributes;
+    terminal tab is a Phase 7b placeholder.
+- [ ] **Phase 7b: Desktop parity** — provider editing, MCP/plugins/skills
+    management, PTY terminal tab, live usage refresh polish, app icon/packaging.
 - [ ] **Phase 8: Drop legacy `apps/web`, `apps/desktop`, `packages/shared` and the HTTP server**
   - Remove the Vue/Electron frontend packages and the shared TS contracts once
     `apps/desktop-rs` reaches parity; retire `locagens-backend` HTTP server if

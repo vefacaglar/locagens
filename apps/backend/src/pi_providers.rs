@@ -84,7 +84,7 @@ pub struct ModelInfo {
 /// Metadata returned by `GET /api/providers` (web client contract: `type` is
 /// `"openai-compatible"` or `"anthropic"`, `models` are plain model-id
 /// strings, API keys are never included).
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMetadata {
     pub id: String,
