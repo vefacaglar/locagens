@@ -22,6 +22,7 @@
 //! rewritten atomically when a line is updated in place.
 
 use crate::util::now_iso;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -29,6 +30,20 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+
+/// Held for the duration of one cross-process mutation of a shared file.
+/// Backed by an advisory exclusive lock on `<data_root>/.lock` so the
+/// backend server and `lcgn` can run concurrently on the same data dir
+/// without overwriting each other's `projects.json` / `permissions.json` /
+/// `memory.json` / `usage_logs.jsonl`. Per-run files under `sessions/` are
+/// not locked (they are private to the run that owns them).
+struct CrossProcessLock(std::fs::File);
+
+impl Drop for CrossProcessLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 /// A durable fact remembered via the `remember` tool / Settings → Memory.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -101,6 +116,12 @@ pub struct Run {
     pub utility_provider_id: Option<String>,
     pub utility_model: Option<String>,
     pub utility_reasoning_effort: Option<String>,
+    /// Custom system prompt (`--system-prompt` in `lcgn`); replaces the base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Extra system-prompt text (`--append-system-prompt` in `lcgn`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -199,9 +220,35 @@ impl Db {
         &self.root
     }
 
+    /// Takes the advisory cross-process lock (`<root>/.lock`, blocking).
+    fn cross_process_lock(&self) -> CrossProcessLock {
+        let path = self.root.join(".lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|err| panic!("Failed to open lock file {}: {err}", path.display()));
+        if let Err(err) = file.lock_exclusive() {
+            tracing::warn!("[Database] Advisory lock not taken on {}: {err}", path.display());
+        }
+        CrossProcessLock(file)
+    }
+
+    /// Runs `mutate` under the cross-process lock after re-reading the
+    /// shared files from disk, so mutations that raced with another process
+    /// are applied on top of the latest on-disk state instead of clobbering
+    /// it. The closure is expected to persist the files it changed.
+    fn with_shared_mutation<T>(&self, mutate: impl FnOnce(&mut StorageState) -> T) -> T {
+        let _lock = self.cross_process_lock();
+        let mut state = self.write();
+        reload_shared_files(&self.root, &mut state);
+        mutate(&mut state)
+    }
+
     /// Seeds the default project and fails any run left active by a restart.
     pub fn run_startup_tasks(&self, ws_root: &Path, default_project_name: &str) {
-        let mut state = self.write();
+        self.with_shared_mutation(|state| {
+        let root = self.root.clone();
 
         // Seed default project if projects.json is empty.
         if state.projects.is_empty() {
@@ -228,7 +275,7 @@ impl Db {
                 run.status = "failed".to_string();
                 run.error_message = Some("Session interrupted due to server restart.".to_string());
                 run.updated_at = now.clone();
-                persist_run(&self.root, run);
+                persist_run(&root, run);
             }
             let message = RunMessage {
                 id: format!("msg-err-restart-{}-{}", run_id, chrono::Utc::now().timestamp_millis()),
@@ -240,8 +287,9 @@ impl Db {
             };
             let messages = state.messages.entry(run_id.clone()).or_default();
             messages.push(message.clone());
-            append_jsonl(&self.messages_path(&run_id), &message);
+            append_jsonl(&root.join("sessions").join(&run_id).join("messages.jsonl"), &message);
         }
+        })
     }
 
     // ------------------------------------------------------------------
@@ -261,37 +309,39 @@ impl Db {
     }
 
     pub fn create_project(&self, path: &str, name: &str) -> Project {
-        let mut state = self.write();
-        let mut updated: Option<Project> = None;
-        for existing in state.projects.iter_mut() {
-            if existing.path == path {
-                existing.name = name.to_string();
-                existing.created_at = now_iso();
-                updated = Some(existing.clone());
-                break;
+        self.with_shared_mutation(|state| {
+            let mut updated: Option<Project> = None;
+            for existing in state.projects.iter_mut() {
+                if existing.path == path {
+                    existing.name = name.to_string();
+                    existing.created_at = now_iso();
+                    updated = Some(existing.clone());
+                    break;
+                }
             }
-        }
-        if let Some(existing) = updated {
+            if let Some(existing) = updated {
+                persist_projects(&self.root, &state.projects);
+                return existing;
+            }
+            let project = Project {
+                path: path.to_string(),
+                name: name.to_string(),
+                created_at: now_iso(),
+            };
+            state.projects.push(project.clone());
             persist_projects(&self.root, &state.projects);
-            return existing;
-        }
-        let project = Project {
-            path: path.to_string(),
-            name: name.to_string(),
-            created_at: now_iso(),
-        };
-        state.projects.push(project.clone());
-        persist_projects(&self.root, &state.projects);
-        project
+            project
+        })
     }
 
     pub fn delete_project(&self, path: &str) {
-        let mut state = self.write();
-        let before = state.projects.len();
-        state.projects.retain(|project| project.path != path);
-        if state.projects.len() != before {
-            persist_projects(&self.root, &state.projects);
-        }
+        self.with_shared_mutation(|state| {
+            let before = state.projects.len();
+            state.projects.retain(|project| project.path != path);
+            if state.projects.len() != before {
+                persist_projects(&self.root, &state.projects);
+            }
+        })
     }
 
     // ------------------------------------------------------------------
@@ -311,58 +361,62 @@ impl Db {
         category: &str,
         content: &str,
     ) -> anyhow::Result<Memory> {
-        let mut state = self.write();
-        let now = now_iso();
-        let memory = Memory {
-            id: state.next_memory_id,
-            scope: scope.to_string(),
-            project_path: project_path.to_string(),
-            category: category.to_string(),
-            content: content.to_string(),
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        state.next_memory_id += 1;
-        state.memories.push(memory.clone());
-        persist_memories(&self.root, &state.memories);
-        Ok(memory)
+        self.with_shared_mutation(|state| {
+            let now = now_iso();
+            let memory = Memory {
+                id: state.next_memory_id,
+                scope: scope.to_string(),
+                project_path: project_path.to_string(),
+                category: category.to_string(),
+                content: content.to_string(),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            state.next_memory_id += 1;
+            state.memories.push(memory.clone());
+            persist_memories(&self.root, &state.memories);
+            Ok(memory)
+        })
     }
 
     pub fn update_memory(&self, id: i64, content: &str) -> Option<Memory> {
-        let mut state = self.write();
-        let updated = state
-            .memories
-            .iter_mut()
-            .find(|memory| memory.id == id)
-            .map(|memory| {
-                memory.content = content.to_string();
-                memory.updated_at = now_iso();
-                memory.clone()
-            });
-        if updated.is_some() {
-            persist_memories(&self.root, &state.memories);
-        }
-        updated
+        self.with_shared_mutation(|state| {
+            let updated = state
+                .memories
+                .iter_mut()
+                .find(|memory| memory.id == id)
+                .map(|memory| {
+                    memory.content = content.to_string();
+                    memory.updated_at = now_iso();
+                    memory.clone()
+                });
+            if updated.is_some() {
+                persist_memories(&self.root, &state.memories);
+            }
+            updated
+        })
     }
 
     pub fn delete_memory(&self, id: i64) -> bool {
-        let mut state = self.write();
-        let before = state.memories.len();
-        state.memories.retain(|memory| memory.id != id);
-        if state.memories.len() != before {
-            persist_memories(&self.root, &state.memories);
-            true
-        } else {
-            false
-        }
+        self.with_shared_mutation(|state| {
+            let before = state.memories.len();
+            state.memories.retain(|memory| memory.id != id);
+            if state.memories.len() != before {
+                persist_memories(&self.root, &state.memories);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     pub fn clear_memories(&self) {
-        let mut state = self.write();
-        if !state.memories.is_empty() {
-            state.memories.clear();
-            persist_memories(&self.root, &state.memories);
-        }
+        self.with_shared_mutation(|state| {
+            if !state.memories.is_empty() {
+                state.memories.clear();
+                persist_memories(&self.root, &state.memories);
+            }
+        })
     }
 
     // ------------------------------------------------------------------
@@ -386,61 +440,64 @@ impl Db {
         network_domains: Vec<String>,
         status: &str,
     ) -> PermissionRule {
-        let mut state = self.write();
-        let mut sorted_domains = network_domains.clone();
-        sorted_domains.sort();
-        let mut updated: Option<PermissionRule> = None;
-        for existing in state.permissions.iter_mut() {
-            let mut domains = existing.network_domains.clone();
-            domains.sort();
-            if existing.scope == scope
-                && existing.project_path == project_path
-                && existing.tool == tool
-                && existing.command == command
-                && domains == sorted_domains
-            {
-                existing.status = status.to_string();
-                updated = Some(existing.clone());
-                break;
+        self.with_shared_mutation(|state| {
+            let mut sorted_domains = network_domains.clone();
+            sorted_domains.sort();
+            let mut updated: Option<PermissionRule> = None;
+            for existing in state.permissions.iter_mut() {
+                let mut domains = existing.network_domains.clone();
+                domains.sort();
+                if existing.scope == scope
+                    && existing.project_path == project_path
+                    && existing.tool == tool
+                    && existing.command == command
+                    && domains == sorted_domains
+                {
+                    existing.status = status.to_string();
+                    updated = Some(existing.clone());
+                    break;
+                }
             }
-        }
-        if let Some(existing) = updated {
+            if let Some(existing) = updated {
+                persist_permissions(&self.root, &state.permissions);
+                return existing;
+            }
+            let rule = PermissionRule {
+                id: state.next_permission_id,
+                scope: scope.to_string(),
+                project_path: project_path.to_string(),
+                tool: tool.to_string(),
+                command: command.to_string(),
+                network_domains,
+                status: status.to_string(),
+            };
+            state.next_permission_id += 1;
+            state.permissions.push(rule.clone());
             persist_permissions(&self.root, &state.permissions);
-            return existing;
-        }
-        let rule = PermissionRule {
-            id: state.next_permission_id,
-            scope: scope.to_string(),
-            project_path: project_path.to_string(),
-            tool: tool.to_string(),
-            command: command.to_string(),
-            network_domains,
-            status: status.to_string(),
-        };
-        state.next_permission_id += 1;
-        state.permissions.push(rule.clone());
-        persist_permissions(&self.root, &state.permissions);
-        rule
+            rule
+        })
     }
 
     pub fn delete_permission(&self, id: i64) -> bool {
-        let mut state = self.write();
-        let before = state.permissions.len();
-        state.permissions.retain(|rule| rule.id != id);
-        if state.permissions.len() != before {
-            persist_permissions(&self.root, &state.permissions);
-            true
-        } else {
-            false
-        }
+        self.with_shared_mutation(|state| {
+            let before = state.permissions.len();
+            state.permissions.retain(|rule| rule.id != id);
+            if state.permissions.len() != before {
+                persist_permissions(&self.root, &state.permissions);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     pub fn clear_permissions(&self) {
-        let mut state = self.write();
-        if !state.permissions.is_empty() {
-            state.permissions.clear();
-            persist_permissions(&self.root, &state.permissions);
-        }
+        self.with_shared_mutation(|state| {
+            if !state.permissions.is_empty() {
+                state.permissions.clear();
+                persist_permissions(&self.root, &state.permissions);
+            }
+        })
     }
 
     // ------------------------------------------------------------------
@@ -606,14 +663,25 @@ impl Db {
     // ------------------------------------------------------------------
 
     pub fn append_usage(&self, mut entry: UsageLogEntry) -> UsageLogEntry {
+        self.with_shared_mutation(|state| {
+            if entry.id == 0 {
+                entry.id = state.next_usage_id;
+                state.next_usage_id += 1;
+            }
+            state.usage.push(entry.clone());
+            append_jsonl(&self.usage_logs_path(), &entry);
+            entry
+        })
+    }
+
+    /// Re-reads `sessions/` from disk so runs created by another process
+    /// (the desktop backend or a second `lcgn`) become visible.
+    pub fn refresh_runs(&self) {
         let mut state = self.write();
-        if entry.id == 0 {
-            entry.id = state.next_usage_id;
-            state.next_usage_id += 1;
-        }
-        state.usage.push(entry.clone());
-        append_jsonl(&self.usage_logs_path(), &entry);
-        entry
+        state.runs.clear();
+        state.messages.clear();
+        state.plans.clear();
+        load_sessions_from_disk(&self.root, &mut state);
     }
 
     pub fn list_usage(&self, run_id: Option<&str>) -> Vec<UsageLogEntry> {
@@ -784,6 +852,14 @@ fn load_state(root: &Path) -> anyhow::Result<StorageState> {
     state.next_memory_id = state.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
     state.next_usage_id = state.usage.iter().map(|u| u.id).max().unwrap_or(0) + 1;
 
+    load_sessions_from_disk(root, &mut state);
+
+    Ok(state)
+}
+
+/// Scans `sessions/` into `state`, replacing whatever was loaded before
+/// (used at startup and by `refresh_runs`).
+fn load_sessions_from_disk(root: &Path, state: &mut StorageState) {
     let sessions_dir = root.join("sessions");
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
@@ -805,13 +881,30 @@ fn load_state(root: &Path) -> anyhow::Result<StorageState> {
             }
         }
     }
-
-    Ok(state)
 }
 
 fn load_optional_plan(path: &Path) -> Option<Plan> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// Re-reads the cross-process-shared files from disk into `state` (used by
+/// `with_shared_mutation`, under the advisory lock, so a mutation always
+/// applies on top of the latest on-disk state written by another process).
+fn reload_shared_files(root: &Path, state: &mut StorageState) {
+    state.projects = read_json_or::<Vec<Project>>(&root.join("projects.json"));
+    state.permissions = read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json"));
+    state.memories = read_json_or::<Vec<Memory>>(&root.join("memory.json"));
+    state.usage = read_jsonl_or::<UsageLogEntry>(&root.join("usage_logs.jsonl"));
+    state.next_permission_id = state
+        .permissions
+        .iter()
+        .map(|rule| rule.id)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    state.next_memory_id = state.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+    state.next_usage_id = state.usage.iter().map(|u| u.id).max().unwrap_or(0) + 1;
 }
 
 /// Resolve the storage data root: `LOCAGENS_DATA_DIR`, else the
@@ -971,6 +1064,50 @@ mod tests {
         assert_eq!(entry.id, 1);
         assert_eq!(db2.list_usage(Some("run-x")).len(), 1);
         assert_eq!(db2.list_usage(Some("run-y")).len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two `Db` instances on one data dir (backend server + `lcgn`) must not
+    /// overwrite each other's shared files: mutations re-read the files from
+    /// disk under the advisory lock before applying the change.
+    #[test]
+    fn two_instances_interleave_without_losing_writes() {
+        let root = temp_root("cross");
+        let db1 = Db::open(&root).unwrap();
+        let db2 = Db::open(&root).unwrap();
+
+        db1.create_project("C:/a", "A");
+        db2.create_project("C:/b", "B");
+        db1.create_memory("project", "C:/a", "reference", "one").unwrap();
+        db2.create_memory("project", "C:/b", "reference", "two").unwrap();
+        let p1 = db1.upsert_permission("run", "C:/a", "run_command", "git status", vec![], "allow_once");
+        let p2 = db2.upsert_permission("run", "C:/b", "run_command", "git push", vec![], "allow_once");
+        let u1 = db1.append_usage(UsageLogEntry {
+            run_id: "r1".into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            ..Default::default()
+        });
+        let u2 = db2.append_usage(UsageLogEntry {
+            run_id: "r2".into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            ..Default::default()
+        });
+
+        // Fresh instance sees everything both wrote, with no id collisions.
+        let db3 = Db::open(&root).unwrap();
+        let paths: Vec<String> = db3.list_projects().iter().map(|p| p.path.clone()).collect();
+        assert!(paths.contains(&"C:/a".to_string()) && paths.contains(&"C:/b".to_string()));
+        let memories = db3.list_memories();
+        assert_eq!(memories.len(), 2);
+        assert!(memories.iter().any(|m| m.content == "one"));
+        assert!(memories.iter().any(|m| m.content == "two"));
+        assert_eq!(db3.list_permissions().len(), 2);
+        assert_ne!(p1.id, p2.id, "ids must not collide across processes");
+        assert_eq!(db3.list_usage(None).len(), 2);
+        assert_ne!(u1.id, u2.id, "usage ids must not collide across processes");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

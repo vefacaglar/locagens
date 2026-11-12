@@ -400,6 +400,25 @@ fn mode_rules(mode: &str) -> String {
 }
 
 fn system_prompt(state: &AppState, run: &crate::db::Run) -> String {
+    // `--system-prompt` replaces the base prompt; `--append-system-prompt`
+    // appends to whatever base ends up being used.
+    if run.system_prompt.as_deref().map(str::trim).map(str::is_empty) == Some(false)
+        || run.append_system_prompt.is_some()
+    {
+        let mut prompt = match run.system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(custom) => custom.to_string(),
+            None => base_system_prompt(state, run),
+        };
+        if let Some(append) = run.append_system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            prompt.push_str("\n\n");
+            prompt.push_str(append);
+        }
+        return prompt;
+    }
+    base_system_prompt(state, run)
+}
+
+fn base_system_prompt(state: &AppState, run: &crate::db::Run) -> String {
     let project = if run.project_path.is_empty() {
         "No project folder selected."
     } else {

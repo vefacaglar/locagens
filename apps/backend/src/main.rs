@@ -1,39 +1,17 @@
-//! Locagens backend (Axum + Tokio + file-based JSON/JSONL storage) built on
-//! top of `pi`.
+//! Locagens backend binary (Axum + Tokio + file-based JSON/JSONL storage)
+//! built on top of `pi`.
 //!
 //! Bootstraps the file-based data store, resolves the HTTP port
 //! (settings.json → `PORT` env → 4321), binds to `127.0.0.1:{port}` and
 //! prints `[locagens:backend-ready] port={port}` immediately after binding.
-
-mod auth;
-mod db;
-mod orchestrator;
-mod paths;
-mod pi_providers;
-mod routes;
-mod services;
-mod util;
+//! All shared logic lives in the `locagens_core` library (see `src/lib.rs`).
 
 use axum::http::{header, HeaderValue, Method};
 use axum::middleware;
 use axum::Router;
-use services::processes::ProcessManager;
-use std::path::PathBuf;
+use locagens_core::{build_core, routes, services, DEFAULT_PORT};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-
-pub const DEFAULT_PORT: u16 = 4321;
-
-/// Shared application state passed to every handler.
-pub struct AppState {
-    pub db: Arc<db::Db>,
-    pub pi: Arc<pi_providers::PiProviderManager>,
-    pub orchestrator: Arc<orchestrator::Orchestrator>,
-    pub settings_path: PathBuf,
-    pub default_project_path: PathBuf,
-    pub processes: Arc<ProcessManager>,
-    pub auth_token: Option<String>,
-}
 
 fn resolve_port(settings_path: &std::path::Path) -> u16 {
     // settings.json wins, then PORT env, then the built-in default.
@@ -59,33 +37,20 @@ async fn main() {
         )
         .init();
 
-    let settings_path = paths::default_settings_path();
-    let port = resolve_port(&settings_path);
-    let data_root = db::resolve_data_root();
-
-    let database = match db::Db::open(&data_root) {
-        Ok(db) => db,
+    let core = match build_core() {
+        Ok(core) => core,
         Err(err) => {
-            eprintln!("[locagens] Failed to open data store at {}: {err}", data_root.display());
+            eprintln!("[locagens] {err}");
             std::process::exit(1);
         }
     };
+    let settings_path = core.settings_path.clone();
+    let port = resolve_port(&settings_path);
+    let workspace_root = core.default_project_path.clone();
 
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    database.run_startup_tasks(&workspace_root, "Locagens");
+    core.db.run_startup_tasks(&workspace_root, "Locagens");
 
-    let default_project_path = workspace_root.clone();
-    let state = Arc::new(AppState {
-        db: Arc::new(database),
-        pi: Arc::new(pi_providers::PiProviderManager::new()),
-        orchestrator: Arc::new(orchestrator::Orchestrator::new()),
-        settings_path,
-        default_project_path,
-        processes: Arc::new(ProcessManager::new()),
-        auth_token: std::env::var("LOCAGENS_API_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty()),
-    });
+    let state = Arc::new(core.into_app_state(Arc::new(services::processes::ProcessManager::new())));
 
     let cors = CorsLayer::new()
         .allow_origin([
@@ -106,7 +71,7 @@ async fn main() {
         .merge(routes::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::auth_middleware,
+            locagens_core::auth::auth_middleware,
         ))
         .layer(cors)
         .with_state(state);
