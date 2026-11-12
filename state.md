@@ -412,7 +412,15 @@ Parallel worktree refactoring plan (T1–T7). Isolated task worktrees lived unde
 - [x] **T5: OpenAI `/v1/responses` SSE streaming** — COMPLETED (`dfaa15b` on
   `feat/t5-responses-wire`); merged into `main`, worktree `wt-t5` and branch
   removed.
-- [ ] **T6: `crates/core` + `apps/cli` + delete `apps/backend`** — QUEUED;
-  starts after T2–T5 merge.
-- [ ] **T7: `.vscode` + CI + docs** — QUEUED; starts after T2–T5 merge
-  (and T6).
+- [x] **T6: `crates/core` + `apps/cli` + delete `apps/backend`** — COMPLETED
+  (`fd2b9d4` on `feat/t6-core-and-cli`); merged into `main`, worktree `wt-t6`
+  and branch removed.
+- [x] **T7: `.vscode` + CI + docs** — COMPLETED (`0639867` on
+  `feat/t7-docs-ci`); merged into `main` (`36f6690`), worktree `wt-t7` and
+  branch removed.
+
+**Phase 10 COMPLETED.** Final workspace layout (8 members):
+`crates/protocol`, `crates/apply-patch`, `crates/execpolicy`, `crates/config`,
+`crates/context`, `crates/core`, `apps/cli` (binary `lcgn`),
+`apps/desktop-rs` (binary `locagens`). Full workspace test suite:
+**107/107 passing**; release build verified.
