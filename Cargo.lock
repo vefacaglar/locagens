@@ -2996,6 +2996,7 @@ dependencies = [
  "fs2",
  "futures",
  "locagens-apply-patch",
+ "locagens-context",
  "locagens-protocol",
  "regex",
  "reqwest",
@@ -3012,6 +3013,18 @@ dependencies = [
  "uuid",
  "walkdir",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "locagens-context"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "locagens-apply-patch",
+ "locagens-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
