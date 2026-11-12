@@ -128,7 +128,7 @@ Update this file continuously as phases complete.
   - Remove legacy `apps/api` and `apps/db-writer`, update root `package.json` &
     `pnpm-workspace.yaml`, run full build & tests, commit & push.
 
-- [x] **Phase 5: `lcgn` CLI (pi-like command line on the shared Rust core)** — branch `feat/loc-cli`, not pushed, pending verifier + merge
+- [x] **Phase 5: `lcgn` CLI (pi-like command line on the shared Rust core)** — branch `feat/loc-cli`, implemented in 5e07b88, verified (cargo test 50 unit + 4 integration pass, live lcgn checks), merged into main in 7615bc5
   - `apps/backend` is now a library (`locagens_core`, `src/lib.rs`, `build_core()`, `state.rs`) plus two binaries: `locagens-backend` (unchanged behavior/routes) and `lcgn` (`src/bin/lcgn.rs`, helpers in `src/cli/`: args, auth, models, render, repl, runner).
   - `routes/runs.rs`: create/continue/cancel/permission/answer logic extracted into `*_core` functions shared by the HTTP handlers and the CLI (HTTP statuses/bodies unchanged). `orchestrator/mod.rs`: only adds `--system-prompt`/`--append-system-prompt` support (`Run.system_prompt`/`append_system_prompt`, skipped in JSON when unset).
   - `db.rs`: advisory cross-process lock `<data>/.lock` (fs2) around every mutation of `projects.json`, `permissions.json`, `memory.json`, `usage_logs.jsonl`, re-reading them from disk under the lock; two-`Db` interleave test.
