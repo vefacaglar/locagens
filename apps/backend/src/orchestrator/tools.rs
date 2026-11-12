@@ -154,22 +154,6 @@ pub fn all_tool_defs() -> Vec<Value> {
                     }
                 })
             }), &["questions"]),
-        def("delegate_tasks", "Delegate implementation sub-tasks to the coder sub-agent(s). Each task runs its own agent with full workspace tools. Provide focused, self-contained tasks.",
-            json!({
-                "tasks": json!({
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": { "type": "string", "description": "Short task title, used as the coder window label." },
-                            "description": { "type": "string", "description": "Detailed, self-contained instructions including exact file paths." }
-                        },
-                        "required": ["title", "description"]
-                    }
-                })
-            }), &["tasks"]),
-        def("delegate_to_utility", "Delegate a small mechanical chore (locating files/symbols, summarizing, simple rename) to the lightweight utility model.",
-            json!({ "task": json!({ "type": "string", "description": "Self-contained task description." }) }), &["task"]),
         def("spawn_agents", "Run parallel sub-agents with the current model: 'explorer' (read-only research) or 'worker' (full workspace tools).",
             json!({
                 "agents": json!({
@@ -897,8 +881,7 @@ mod tests {
         assert_eq!(full.len(), filter_tool_defs(&[
             "read_file", "write_file", "edit_file", "delete_file", "list_directory", "create_directory",
             "move_file", "search_files", "run_command", "fetch_url", "set_chat_title", "update_plan",
-            "remember", "load_skill", "ask_user_question", "delegate_tasks", "delegate_to_utility",
-            "spawn_agents",
+            "remember", "load_skill", "ask_user_question", "spawn_agents",
         ]).len());
     }
 }

@@ -3,7 +3,7 @@
 //! Owns the per-run handles (cancellation token, SSE broadcast channel,
 //! mid-run message inbox, pending permission/question coordinators) and the
 //! `AgentLoop` that drives model ↔ tool rounds for the main agent and every
-//! delegated sub-agent (coder / utility / explorer / worker).
+//! spawned sub-agent (explorer / worker).
 //!
 //! Message flow:
 //! ```txt
@@ -52,7 +52,7 @@ const WORKSPACE_TOOLS: [&str; 10] = [
     "fetch_url",
 ];
 
-/// Full (coder/worker) sub-agent toolset: workspace + dangerous tools.
+/// Full (worker) sub-agent toolset: workspace + dangerous tools.
 fn worker_tool_defs() -> Vec<Value> {
     tools::filter_tool_defs(&WORKSPACE_TOOLS)
 }
@@ -432,7 +432,7 @@ fn base_system_prompt(state: &AppState, run: &crate::db::Run) -> String {
 - Prefer edit_file for small changes; write_file for new files.\n\
 - Keep answers concise and concrete; summarize what you did.\n\
 - Use update_plan for multi-step work so the user can follow progress.\n\
-- Delegate independent implementation sub-tasks via delegate_tasks when a coder model is configured; delegate chores via delegate_to_utility when a utility model is configured.\n\
+- Fan independent research or implementation sub-tasks out via spawn_agents (explorer / worker).\n\
 - Use ask_user_question when a decision genuinely needs the user.\n",
         project = project,
         path = run.project_path,
@@ -723,8 +723,6 @@ impl AgentLoop {
                 }
             }
             "ask_user_question" => self.ask_user_question(args).await,
-            "delegate_tasks" if self.depth_left > 0 => self.delegate_tasks(args).await,
-            "delegate_to_utility" if self.depth_left > 0 => self.delegate_to_utility(args).await,
             "spawn_agents" if self.depth_left > 0 => self.spawn_agents(args).await,
             name if WORKSPACE_TOOLS.contains(&name) => self.gated_execute(call_id, name, args).await,
             other => Err(AgentError::Failed(format!("Unknown tool \"{other}\"."))),
@@ -884,72 +882,8 @@ impl AgentLoop {
             depth_left: 0,
         };
         // Boxed to break the recursion cycle (sub-agent → run → dispatch →
-        // delegate → sub-agent).
+        // spawn → sub-agent).
         Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS)).await
-    }
-
-    async fn delegate_tasks(&self, args: &Value) -> Result<String, AgentError> {
-        let tasks = args.get("tasks").and_then(Value::as_array).cloned().unwrap_or_default();
-        if tasks.is_empty() {
-            return Err(AgentError::Failed("delegate_tasks: tasks must be a non-empty array.".into()));
-        }
-        let run = self.state.db.get_run_full(&self.run_id);
-        let coder_provider = run.as_ref().and_then(|run| run.coder_provider_id.as_deref()).unwrap_or_default().to_string();
-        let coder_model = run.as_ref().and_then(|run| run.coder_model.as_deref()).unwrap_or_default().to_string();
-        let coder_reasoning = run.as_ref().and_then(|run| run.coder_reasoning_effort.clone());
-        let mut results = Vec::new();
-        for task in tasks.iter().take(MAX_SUB_AGENTS) {
-            let title = task.get("title").and_then(Value::as_str).unwrap_or("Task").to_string();
-            let description = task
-                .get("description")
-                .or_else(|| task.get("task"))
-                .and_then(Value::as_str)
-                .unwrap_or(&title)
-                .to_string();
-            let outcome = self
-                .run_sub_agent(
-                    "coder",
-                    &title,
-                    &coder_provider,
-                    &coder_model,
-                    coder_reasoning.as_deref(),
-                    &description,
-                    false,
-                )
-                .await;
-            match outcome {
-                Ok(answer) => results.push(format!("## {title}\n{answer}")),
-                Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
-                Err(AgentError::Failed(err)) => results.push(format!("## {title}\n(task failed: {err})")),
-            }
-        }
-        Ok(format!(
-            "Delegated task results:\n\n{}",
-            results.join("\n\n")
-        ))
-    }
-
-    async fn delegate_to_utility(&self, args: &Value) -> Result<String, AgentError> {
-        let task = args
-            .get("task")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if task.is_empty() {
-            return Err(AgentError::Failed("delegate_to_utility: task is empty.".into()));
-        }
-        let run = self.state.db.get_run_full(&self.run_id);
-        self.run_sub_agent(
-            "utility",
-            "Utility task",
-            run.as_ref().and_then(|run| run.utility_provider_id.as_deref()).unwrap_or_default(),
-            run.as_ref().and_then(|run| run.utility_model.as_deref()).unwrap_or_default(),
-            run.as_ref().and_then(|run| run.utility_reasoning_effort.as_deref()),
-            &task,
-            true,
-        )
-        .await
     }
 
     async fn spawn_agents(&self, args: &Value) -> Result<String, AgentError> {
@@ -1152,19 +1086,10 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     let history = seed_history(&state.db.list_messages(&run_id));
     let providers = state.pi.list_providers().await;
 
-    // Delegation tools depend on the run's configured tiers.
     let run_full = state.db.get_run_full(&run_id).unwrap_or_else(|| run.clone());
-    let preset = run_full.agent_preset.is_some() || run_full.coder_model.is_some();
     let mut tool_names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
     tool_names.extend_from_slice(&["set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question"]);
-    if preset {
-        tool_names.push("delegate_tasks");
-        if run_full.utility_model.is_some() {
-            tool_names.push("delegate_to_utility");
-        }
-    } else {
-        tool_names.push("spawn_agents");
-    }
+    tool_names.push("spawn_agents");
 
     let mut agent = AgentLoop {
         handle: handle.clone(),

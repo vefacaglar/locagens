@@ -137,6 +137,59 @@ Update this file continuously as phases complete.
   - Verified: `cargo test` 50 unit tests (33 pre-existing + 17 new) + 4 integration tests (mock OpenAI-compatible server) all pass; live against `opencode-go/glm-5.3-flash`: `--list-models`, `-p ... --no-tools`, tool round trip with `--approve`, denial without `--approve`, `--mode json`, `-c`, `--plan`, bad model → exit 2.
   - Not verified / known limits: the interactive REPL, Ctrl+C cancel and the permission/question prompts were not exercised on a real TTY (no TTY in the test harness). A running `locagens-backend` keeps runs/projects in memory, so sessions created by `lcgn` appear in the desktop app after its next start (no live refresh yet). With an open non-TTY stdin that never closes, `lcgn -p` waits for stdin EOF (same as pi); close it with `$null |` or `< NUL`. Full-screen TUI is out of scope.
 
+- [x] **Phase 6a: `locagens_core::api` in-process facade** — commits `35d3f1c` + `07daa4a`
+  - `src/api/` modules (`error`, `runs`, `projects`, `providers`, `permissions`,
+    `memory`, `mcp`, `plugins`, `processes`, `security`, `skills`, `symbols`):
+    typed Rust functions with the exact semantics of the HTTP routes, returning
+    `ApiResult<T>` (`ApiError` + `ApiErrorKind` mapping 1:1 to 400/404/409/500).
+  - `api::bootstrap() -> anyhow::Result<AppState>` opens the data store, runs
+    startup tasks and returns the shared `AppState` for the desktop UI / `lcgn`.
+  - `runs::subscribe_run_events(state, run_id) -> EventRx` (broadcast receiver of
+    JSON run events; terminal replay / pending replay / live forward / poll).
+  - HTTP routes became thin adapters (`routes/*` call `api::*`); `lcgn` and the
+    future desktop app call the facade directly.
+
+- [x] **Phase 6b: Remove model/agent presets feature + `docs/CORE_API.md`**
+  - Removed the dual/tri-model preset feature completely:
+    - `db.rs`: `Run`/`RunRow` no longer carry `coder*`/`utility*`/`agentPreset`
+      fields (no `deny_unknown_fields`, so legacy `run.json` files on disk
+      still deserialize cleanly).
+    - `pi_providers.rs`: dropped `AgentPreset*` types, `presets_path`,
+      `get_presets`/`save_presets`/`default_presets` and both preset tests;
+      no `locagens-presets.json` anymore.
+    - Removed `GET|PUT /api/agent-presets` (routes + api facade).
+    - `api/runs.rs`: `CreateRunPayload`/`ContinueRunPayload` no longer accept
+      preset/coder/utility fields.
+    - `orchestrator/tools.rs`: removed `delegate_tasks`/`delegate_to_utility`
+      tool defs (kept `spawn_agents`); `orchestrator/mod.rs`: removed the
+      delegation methods/match arms and preset tool selection — build modes
+      always include the workspace mutation tools + `spawn_agents`
+      (`explorer` read-only / `worker` full tools, run's own model).
+  - Runs are now strictly single-model: one provider/model + `spawn_agents` fan-out.
+  - Created `docs/CORE_API.md` documenting `locagens_core::api` (bootstrap,
+    `ApiError`/`ApiErrorKind`/`ApiResult`, per-module signatures, event
+    subscription, single-model run model).
+  - Docs updated (`Claude.md`, `Agents.md`, `README.md`,
+    `docs/API_ENDPOINT_MAP.md`, `docs/database-schema.md`): preset references
+    removed; noted single-model runs with `spawn_agents` and the native Rust
+    desktop UI (Dioxus).
+  - Verified: `cargo test` (stable-x86_64-pc-windows-gnu, w64devkit) 48 unit +
+    4 integration tests pass, zero warnings.
+
+---
+
+## Next Phases
+
+- [ ] **Phase 7: Native Rust Dioxus Desktop App (`apps/desktop-rs`)**
+  - Dioxus desktop shell calling `locagens_core::api` in-process (no HTTP):
+    chat/session UI, Build/Plan/Full-Access mode picker, permission approval
+    cards, plan panel, provider settings (pi auth.json), sub-agent windows
+    (`agentRole`/`agentName`), usage panel.
+- [ ] **Phase 8: Drop legacy `apps/web`, `apps/desktop`, `packages/shared` and the HTTP server**
+  - Remove the Vue/Electron frontend packages and the shared TS contracts once
+    `apps/desktop-rs` reaches parity; retire `locagens-backend` HTTP server if
+    nothing else consumes it (keep `lcgn` + desktop).
+
 ---
 
 ## 4. Build Notes (this Windows machine)

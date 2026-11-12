@@ -1,4 +1,4 @@
-//! Provider, agent-preset and native-`pi` auth facade
+//! Provider and native-`pi` auth facade
 //! (HTTP equivalent: `routes/providers.rs`).
 //!
 //! Thin wrappers over `PiProviderManager` (pure Rust handling of
@@ -127,23 +127,6 @@ pub async fn test_provider(
             error: Some(err.to_string()),
         },
     })
-}
-
-/// Returns the architect / coder / utility presets (`GET /api/agent-presets`).
-pub async fn get_agent_presets(state: &AppState) -> ApiResult<Vec<serde_json::Value>> {
-    Ok(state.pi.get_presets())
-}
-
-/// Merges presets into `locagens-presets.json` and returns the merged list
-/// (`PUT /api/agent-presets`).
-pub async fn save_agent_presets(
-    state: &AppState,
-    body: &serde_json::Value,
-) -> ApiResult<Vec<serde_json::Value>> {
-    state
-        .pi
-        .save_presets(body)
-        .map_err(|err| ApiError::bad_request(format!("Failed to save agent presets: {err}")))
 }
 
 /// Returns masked credential status from `~/.pi/agent/auth.json`

@@ -1,4 +1,4 @@
-//! Provider, agent-preset and native-`pi` auth routes. Thin adapters over
+//! Provider and native-`pi` auth routes. Thin adapters over
 //! `crate::api::providers`.
 
 use crate::api::providers;
@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -64,25 +64,6 @@ pub async fn test_provider(
         return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body.");
     };
     respond(providers::test_provider(&state, &input).await)
-}
-
-/// `GET /api/agent-presets` — architect / coder / utility presets.
-pub async fn get_presets(State(state): State<Arc<AppState>>) -> Response {
-    respond(providers::get_agent_presets(&state).await)
-}
-
-/// `PUT /api/agent-presets` — merge presets into `locagens-presets.json`.
-pub async fn put_presets(
-    State(state): State<Arc<AppState>>,
-    body: Option<Json<Value>>,
-) -> Response {
-    let Some(Json(body)) = body else {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid JSON body.");
-    };
-    match providers::save_agent_presets(&state, &body).await {
-        Ok(presets) => Json(presets).into_response(),
-        Err(err) => api_error_response(err),
-    }
 }
 
 /// `GET /api/pi/auth` — masked credential status from `~/.pi/agent/auth.json`.

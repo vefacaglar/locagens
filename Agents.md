@@ -4,13 +4,11 @@
 
 How the agent works inside Locagens at runtime.
 
-A run is a single workspace agent by default: the user picks a provider/model
-and a project folder, then the model works the task with workspace tools until
-it returns a final answer. Optional **presets** turn the main model into an
-architect that delegates implementation to a coder model (`delegate_tasks`)
-and small chores to a utility model (`delegate_to_utility`). Runs without a
-preset can fan work out with `spawn_agents` (explore/general) using the run's
-own model.
+A run is a single workspace agent: the user picks a provider/model and a
+project folder, then the model works the task with workspace tools until it
+returns a final answer. The main agent can fan work out with `spawn_agents`
+(`explorer` read-only research / `worker` full workspace tools) using the
+run's own model. There are no agent presets and no coder/utility tiers.
 
 ## Development & Agent Workflow (pi + Gemini)
 
@@ -82,8 +80,7 @@ create_directory  move_file  search_files
 run_command(command, network_domains?)  fetch_url(url)   dangerous
 set_chat_title  ask_user_question  remember  load_skill
 update_plan                                 plan mode
-delegate_tasks / delegate_to_utility        preset build modes
-spawn_agents                                single-model runs
+spawn_agents (explorer / worker)            single-model fan-out
 ```
 
 All paths are relative to the project folder and confined to it; failures
@@ -93,9 +90,6 @@ set; fetches: per host). The bookkeeping tools (`update_plan`, `set_chat_title`,
 `remember`) run silently. `load_skill` pulls a SKILL.md body from the user or
 project skills directory (Settings → Skills). Plugins (Settings → Plugins) can
 add MCP servers, custom tools, and lifecycle hooks.
-
-In preset runs the architect cannot mutate files directly — mutations go
-through coder sub-agents; utility sub-agents get read/list/search/move only.
 
 ## Permission Flow
 
@@ -133,7 +127,8 @@ browser.
 
 ```txt
 one provider/model + one project folder is enough to run a task
-presets and single-model delegation behave predictably per mode
+single-model runs with `spawn_agents` (explorer / worker) behave
+predictably per mode
 all file access stays in the workspace; dangerous tools pause and resume
 messages, status, permissions, and plans stream live and survive restarts
 provider secrets stay local and masked

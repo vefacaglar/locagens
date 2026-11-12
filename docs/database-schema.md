@@ -88,7 +88,7 @@ cache hits, and calculated costs. One JSON object per line.
 |---|---|---|
 | `id` | `integer` | Auto-increment surrogate key |
 | `runId` | `string` | Parent run (`sessions/<run_id>/`) |
-| `agentRole` | `string?` | Agent role (e.g. `planner`, `coder`, `utility`) |
+| `agentRole` | `string?` | Agent role (`main`, `explorer`, `worker`) |
 | `providerId` | `string` | Provider identifier |
 | `model` | `string` | Model name used for completion |
 | `inputTokens` / `outputTokens` | `integer` | Prompt / completion token counts |
@@ -114,10 +114,12 @@ One file per assistant run (conversation session).
 | `errorMessage` | `string?` | Error text if the run failed |
 | `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
 | `lastActiveAt` | `string?` | Populated on startup if null |
-| `coderProviderId` / `coderModel` | `string?` | Coder sub-agent (dual-model mode) |
-| `agentPreset` | `string?` | Agent preset name (e.g. `architect-coder`) |
-| `utilityProviderId` / `utilityModel` | `string?` | Utility/fast model calls |
-| `coderReasoningEffort` / `utilityReasoningEffort` / `reasoningEffort` | `string?` | Per-model reasoning-effort selections |
+| `reasoningEffort` | `string?` | Per-model reasoning-effort selection |
+| `systemPrompt` / `appendSystemPrompt` | `string?` | Custom system prompt (`lcgn --system-prompt` / `--append-system-prompt`); omitted from JSON when unset |
+
+Legacy `run.json` files may still contain `coder*`/`utility*`/`agentPreset`
+keys from before preset removal; they deserialize cleanly (unknown keys are
+ignored) but are no longer read or written.
 
 Derived view: `db::Db::get_run()` projects this into a `RunRow` with only the
 columns consumed by route modules.
@@ -131,8 +133,8 @@ Append-only JSONL of individual chat messages within a run.
 | `id` | `string` | Unique message identifier |
 | `runId` | `string` | Parent run (matches the session folder) |
 | `role` | `string` | `user`, `assistant`, `system`, `tool`, … |
-| `agentRole` | `string?` | Sub-role: `architect`, `coder`, or `null` for single-agent |
-| `agentName` | `string?` | Coder sub-agent identity (display name) |
+| `agentRole` | `string?` | Sub-role: `explorer`, `worker`, or `null` for the main agent |
+| `agentName` | `string?` | Sub-agent identity (display name) |
 | `providerId` / `providerDisplayName` / `model` | `string?` | Provider/model used for this message |
 | `content` | `string` | Message body text |
 | `reasoningContent` | `string?` | Model's chain-of-thought / reasoning text |
@@ -191,7 +193,6 @@ Plus Locagens UI metadata under the app-support dir:
 
 ```txt
 locagens-providers-meta.json   — display names / model settings (pricing, context limits)
-locagens-presets.json          — architect / coder / utility agent presets
 ```
 
 Secrets never enter the app data files above.

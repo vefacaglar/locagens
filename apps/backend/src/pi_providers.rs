@@ -9,8 +9,7 @@
 //! - `models-store.json` — `pi`'s cached dynamic model catalog.
 //!
 //! Plus Locagens UI metadata under the app-support dir:
-//! `locagens-providers-meta.json` (display names / model settings) and
-//! `locagens-presets.json` (architect / coder / utility agent presets).
+//! `locagens-providers-meta.json` (display names / model settings).
 
 use crate::paths;
 use anyhow::Result;
@@ -159,35 +158,6 @@ pub struct SetPiAuthInput {
     pub provider_id: String,
     pub action: String,
     pub api_key: Option<String>,
-}
-
-/// One end (architect / coder / utility) of a dual-model agent preset.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPresetEndpoint {
-    pub provider_id: String,
-    pub model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-}
-
-/// An agent preset — `{ [presetId]: AgentPreset }` in the web client
-/// contract. Arbitrary preset ids are allowed (e.g. `"opusplan"`).
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPreset {
-    #[serde(default)]
-    pub display_name: String,
-    #[serde(default)]
-    pub architect: AgentPresetEndpoint,
-    #[serde(default)]
-    pub coder: AgentPresetEndpoint,
-    #[serde(default)]
-    pub max_sub_agents: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub utility: Option<AgentPresetEndpoint>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fallback: Option<bool>,
 }
 
 struct BuiltinProvider {
@@ -354,10 +324,6 @@ impl PiProviderManager {
 
     fn meta_path(&self) -> PathBuf {
         self.app_support_dir.join("locagens-providers-meta.json")
-    }
-
-    fn presets_path(&self) -> PathBuf {
-        self.app_support_dir.join("locagens-presets.json")
     }
 
     // ------------------------------------------------------------------
@@ -1355,120 +1321,6 @@ impl PiProviderManager {
         self.write_auth_map(auth)
     }
 
-    // ------------------------------------------------------------------
-    // Agent presets
-    // ------------------------------------------------------------------
-
-    /// Default presets, used when `locagens-presets.json` is missing or
-    /// empty.
-    fn default_presets() -> Map<String, Value> {
-        let block = |display_name: &str, model: &str| {
-            json!({
-                "displayName": display_name,
-                "architect": { "providerId": "opencode-go", "model": model },
-                "coder": { "providerId": "opencode-go", "model": model },
-                "maxSubAgents": 1,
-            })
-        };
-        Map::from_iter([
-            ("architect".to_string(), block("Architect", "glm-5.3-flash")),
-            ("coder".to_string(), block("Coder", "glm-5.3-flash")),
-            ("utility".to_string(), block("Utility", "glm-5.3-flash")),
-        ])
-    }
-
-    /// Normalized `{ providerId, model, reasoningEffort? }` preset endpoint,
-    /// or `None` when the value is not a usable endpoint.
-    fn preset_endpoint(value: Option<&Value>) -> Option<Value> {
-        let value = value?;
-        let provider_id = value
-            .get("providerId")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())?;
-        let model = value
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())?;
-        let mut endpoint = json!({ "providerId": provider_id, "model": model });
-        if let Some(effort) = value
-            .get("reasoningEffort")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|effort| !effort.is_empty())
-        {
-            endpoint["reasoningEffort"] = json!(effort);
-        }
-        Some(endpoint)
-    }
-
-    /// Normalizes a stored preset block into the web client's `AgentPreset`
-    /// shape (`id`, `displayName`, `architect`, `coder`, `maxSubAgents`,
-    /// optional `utility`/`fallback`). Legacy single-model blocks
-    /// (`{ providerId, model, reasoningEffort }`) map onto both ends.
-    fn normalize_preset_block(id: &str, block: &Value) -> Value {
-        let architect = Self::preset_endpoint(block.get("architect"))
-            .or_else(|| Self::preset_endpoint(Some(block)))
-            .unwrap_or_else(|| json!({ "providerId": "", "model": "" }));
-        let coder = Self::preset_endpoint(block.get("coder"))
-            .or_else(|| Self::preset_endpoint(Some(block)))
-            .unwrap_or_else(|| architect.clone());
-        let mut preset = json!({
-            "id": id,
-            "displayName": block
-                .get("displayName")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(id),
-            "architect": architect,
-            "coder": coder,
-            "maxSubAgents": block.get("maxSubAgents").and_then(Value::as_u64).unwrap_or(1),
-        });
-        if let Some(utility) = Self::preset_endpoint(block.get("utility")) {
-            preset["utility"] = utility;
-        }
-        if block.get("fallback").and_then(Value::as_bool).unwrap_or(false) {
-            preset["fallback"] = json!(true);
-        }
-        preset
-    }
-
-    /// `GET /api/agent-presets` — the stored presets from
-    /// `locagens-presets.json` (or the defaults when the file is missing or
-    /// empty) as the `AgentPreset[]` array the web client expects, each item
-    /// carrying its `id` (the map key).
-    pub fn get_presets(&self) -> Vec<Value> {
-        let stored = Self::read_json(&self.presets_path());
-        let presets = match stored {
-            Value::Object(map) if !map.is_empty() => map,
-            _ => Self::default_presets(),
-        };
-        presets
-            .iter()
-            .map(|(id, block)| Self::normalize_preset_block(id, block))
-            .collect()
-    }
-
-    /// `PUT /api/agent-presets` — replaces the stored presets with the
-    /// submitted `{ [presetId]: AgentPreset }` map. Arbitrary preset ids are
-    /// allowed (e.g. `"opusplan"`). The returned array mirrors
-    /// `GET /api/agent-presets`.
-    pub fn save_presets(&self, body: &Value) -> Result<Vec<Value>> {
-        let Value::Object(submitted) = body else {
-            anyhow::bail!("Expected an object of preset id → AgentPreset");
-        };
-        for (id, value) in submitted {
-            if id.trim().is_empty() {
-                anyhow::bail!("Preset id must not be empty");
-            }
-            serde_json::from_value::<AgentPreset>(value.clone())
-                .map_err(|err| anyhow::anyhow!("Invalid preset \"{id}\": {err}"))?;
-        }
-        Self::write_json(&self.presets_path(), &Value::Object(submitted.clone()))?;
-        Ok(self.get_presets())
-    }
 }
 
 /// Short human-readable error summary from an API error body.
@@ -1889,89 +1741,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(support);
     }
 
-    #[test]
-    fn presets_defaults_when_missing() {
-        let (agent, support) = temp_dirs("presets-default");
-        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
-        let presets = manager.get_presets();
-        assert!(presets.len() >= 3);
-        assert!(presets.iter().all(|preset| preset.get("id").is_some()));
-        assert!(presets
-            .iter()
-            .all(|preset| preset["architect"]["model"] == "glm-5.3-flash"));
-        let _ = std::fs::remove_dir_all(agent);
-        let _ = std::fs::remove_dir_all(support);
-    }
-
-    #[test]
-    fn presets_roundtrip_arbitrary_ids() {
-        let (agent, support) = temp_dirs("presets");
-        let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
-
-        // Arbitrary preset ids (not just architect/coder/utility) are saved.
-        let saved = manager
-            .save_presets(&json!({
-                "opusplan": {
-                    "displayName": "Opus Plan",
-                    "architect": { "providerId": "anthropic", "model": "claude-opus-4-5", "reasoningEffort": "high" },
-                    "coder": { "providerId": "opencode-go", "model": "glm-5.3" },
-                    "maxSubAgents": 2,
-                    "utility": { "providerId": "opencode-go", "model": "glm-5.3-flash" },
-                    "fallback": true
-                }
-            }))
-            .unwrap();
-        let opusplan = saved
-            .iter()
-            .find(|preset| preset["id"] == "opusplan")
-            .unwrap();
-        assert_eq!(opusplan["displayName"], "Opus Plan");
-        assert_eq!(opusplan["architect"]["model"], "claude-opus-4-5");
-        assert_eq!(opusplan["architect"]["reasoningEffort"], "high");
-        assert_eq!(opusplan["coder"]["model"], "glm-5.3");
-        assert_eq!(opusplan["maxSubAgents"], 2);
-        assert_eq!(opusplan["utility"]["model"], "glm-5.3-flash");
-        assert_eq!(opusplan["fallback"], true);
-
-        // The saved map round-trips through locagens-presets.json.
-        let reloaded = manager.get_presets();
-        let reloaded_opusplan = reloaded
-            .iter()
-            .find(|preset| preset["id"] == "opusplan")
-            .unwrap();
-        assert_eq!(reloaded_opusplan["architect"]["providerId"], "anthropic");
-
-        // Saving a new map replaces the stored presets entirely.
-        let replaced = manager
-            .save_presets(&json!({
-                "tiny": {
-                    "displayName": "Tiny",
-                    "architect": { "providerId": "openai", "model": "gpt-5" },
-                    "coder": { "providerId": "openai", "model": "gpt-5" },
-                    "maxSubAgents": 1
-                }
-            }))
-            .unwrap();
-        assert_eq!(replaced.len(), 1);
-        assert_eq!(replaced[0]["id"], "tiny");
-
-        // Legacy single-model blocks stored on disk normalize onto both ends.
-        std::fs::write(
-            support.join("locagens-presets.json"),
-            json!({ "old": { "providerId": "google", "model": "gemini-2.5-pro" } }).to_string(),
-        )
-        .unwrap();
-        let presets = manager.get_presets();
-        let old = presets
-            .iter()
-            .find(|preset| preset["id"] == "old")
-            .unwrap();
-        assert_eq!(old["architect"]["model"], "gemini-2.5-pro");
-        assert_eq!(old["coder"]["model"], "gemini-2.5-pro");
-        assert_eq!(old["displayName"], "old");
-        assert_eq!(old["maxSubAgents"], 1);
-
-        let _ = std::fs::remove_dir_all(agent);
-        let _ = std::fs::remove_dir_all(support);
-    }
 }

@@ -90,8 +90,6 @@ pub struct RunRow {
     pub provider_id: String,
     pub provider_display_name: String,
     pub model: String,
-    pub coder_provider_id: Option<String>,
-    pub coder_model: Option<String>,
 }
 
 /// Full run metadata, persisted as `sessions/<run_id>/run.json`.
@@ -109,13 +107,6 @@ pub struct Run {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub mode: String,
-    pub coder_provider_id: Option<String>,
-    pub coder_model: Option<String>,
-    pub coder_reasoning_effort: Option<String>,
-    pub agent_preset: Option<String>,
-    pub utility_provider_id: Option<String>,
-    pub utility_model: Option<String>,
-    pub utility_reasoning_effort: Option<String>,
     /// Custom system prompt (`--system-prompt` in `lcgn`); replaces the base.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -523,7 +514,7 @@ impl Db {
     }
 
     /// Applies an arbitrary metadata patch to a run (title, model fields,
-    /// preset fields, status, …) and persists it atomically.
+    /// status, …) and persists it atomically.
     pub fn patch_run(&self, id: &str, patch: impl FnOnce(&mut Run)) -> Option<Run> {
         let mut state = self.write();
         let updated = state.runs.get_mut(id).map(|run| {
@@ -565,8 +556,6 @@ impl Db {
             provider_id: run.provider_id,
             provider_display_name: run.provider_display_name,
             model: run.model,
-            coder_provider_id: run.coder_provider_id,
-            coder_model: run.coder_model,
         })
     }
 

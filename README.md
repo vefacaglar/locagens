@@ -7,15 +7,16 @@ the backend orchestrator runs a tool-calling chat loop. The assistant can read,
 edit, create, move, delete, and search files inside the selected workspace. It
 can also ask for permission to run commands or fetch URLs.
 
-The default product is a **single-model workspace agent**. Optionally, the user
-can select an agent preset that splits the run into an architect model plus coder
-sub-agents, with an optional utility model for small read/search/rename tasks.
+The product is a **single-model workspace agent**: one provider/model drives the
+whole run, and the agent can fan work out to sub-agents with `spawn_agents`
+(`explorer` read-only research / `worker` full workspace tools). The UI is a
+native Rust desktop app built with Dioxus.
 
 ```txt
 User Task
-  -> Selected Model or Preset Architect
+  -> Selected Model
   -> Optional Workspace Tool Calls
-  -> Optional Coder / Utility Delegation
+  -> Optional spawn_agents Fan-Out (explorer / worker)
   -> Tool Results Back To Model
   -> Final Assistant Response
 ```
@@ -23,7 +24,7 @@ User Task
 ## Current Features
 
 ```txt
-Vue 3 frontend
+Native Rust desktop UI (Dioxus)
 Rust backend (Axum + Tokio) built on top of pi
 file-based JSON/JSONL persistence (Codex/Claude/Pi-style storage, no SQLite)
 pi provider engine (~/.pi/agent/auth.json & models.json)
@@ -33,8 +34,7 @@ provider config in pi's agent directory (not the project)
 API keys live in auth.json (literal, !command, $ENV_VAR, or OAuth), never in app data
 per-model context limits and tiered pricing -> local cost / usage logs
 reasoning-effort conversion per model (reasoningWire)
-single provider/model run creation
-optional architect/coder/utility agent presets
+single provider/model run creation with `spawn_agents` fan-out
 build, plan, and full-access modes
 workspace filesystem + web search tools
 ask_user_question multiple-choice flow
@@ -50,12 +50,12 @@ lcgn CLI (pi-like command line on the same Rust core)
 ## Tech Stack
 
 ```txt
-Frontend: Vue 3 + Vite + TypeScript
+Frontend: native Rust desktop app (Dioxus, `apps/desktop-rs`)
 Backend: Rust (Axum + Tokio) built directly on top of pi
 Storage: file-based JSON/JSONL (projects.json, sessions/<run_id>/…, no SQLite)
 Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
 Realtime: SSE
-Package manager: pnpm (frontend/desktop) + cargo (backend)
+Package manager: cargo (backend/desktop)
 Repository style: monorepo
 ```
 
@@ -106,7 +106,6 @@ Locagens UI metadata lives under the OS app-support directory:
 
 ```txt
 locagens-providers-meta.json    display names / model settings
-locagens-presets.json           architect / coder / utility agent presets
 ```
 
 API keys never enter the app data or session files — credentials live only in
@@ -132,9 +131,6 @@ Locagens model settings may carry a `reasoning` effort, a `contextLimit`, and
 locally from these rates and the provider's reported token counts, then stored
 per call in `usage_logs.jsonl`. A model with no configured pricing costs 0.
 
-Agent presets (`locagens-presets.json`) define an architect provider/model, coder
-provider/model, `maxSubAgents`, and optionally a utility provider/model.
-
 ## Modes
 
 ```txt
@@ -148,10 +144,10 @@ persisted runs or direct API use, but the UI only exposes the three above.
 `run_command`, `fetch_url`, and `search_web` always require permission unless a
 matching standing grant exists.
 
-When an agent preset is active in Build mode, the architect receives read-only
-workspace tools and delegates mutations through `delegate_tasks`. Coder
-sub-agents receive the normal workspace tools. Utility sub-agents receive read,
-list, search, and move tools.
+When the main agent fans work out with `spawn_agents`, `explorer` sub-agents get
+read-only tools (read, list, search) and `worker` sub-agents get the full
+workspace toolset. Sub-agents run with the run's own model and depth is capped
+at 1 (sub-agents cannot spawn further agents).
 
 ## Workspace Tools
 
@@ -173,8 +169,7 @@ set_chat_title
 ask_user_question
 remember
 update_plan            (plan mode)
-delegate_tasks         (preset build modes)
-delegate_to_utility    (preset build modes)
+spawn_agents           (explorer / worker fan-out)
 ```
 
 All file paths are resolved relative to the selected project folder and cannot

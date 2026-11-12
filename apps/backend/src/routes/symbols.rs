@@ -5,7 +5,6 @@ use crate::api::symbols;
 use crate::routes::api_error_response;
 use crate::AppState;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;

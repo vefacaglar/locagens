@@ -31,8 +31,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/providers/config", get(providers::get_config).post(providers::save_config))
         .route("/api/providers/fetch-models", post(providers::fetch_models))
         .route("/api/providers/test", post(providers::test_provider))
-        // Agent presets
-        .route("/api/agent-presets", get(providers::get_presets).put(providers::put_presets))
         // Native pi auth endpoints
         .route("/api/pi/auth", get(providers::get_pi_auth).post(providers::set_pi_auth))
         // Projects & files & git

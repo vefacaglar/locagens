@@ -35,13 +35,6 @@ pub struct CreateRunPayload {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub append_system_prompt: Option<String>,
-    pub coder_provider_id: Option<String>,
-    pub coder_model: Option<String>,
-    pub coder_reasoning_effort: Option<String>,
-    pub utility_provider_id: Option<String>,
-    pub utility_model: Option<String>,
-    pub utility_reasoning_effort: Option<String>,
-    pub agent_preset: Option<String>,
 }
 
 /// `POST /api/runs/:id/continue` body — same fields, all provider fields
@@ -60,13 +53,6 @@ pub struct ContinueRunPayload {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub append_system_prompt: Option<String>,
-    pub coder_provider_id: Option<String>,
-    pub coder_model: Option<String>,
-    pub coder_reasoning_effort: Option<String>,
-    pub utility_provider_id: Option<String>,
-    pub utility_model: Option<String>,
-    pub utility_reasoning_effort: Option<String>,
-    pub agent_preset: Option<String>,
 }
 
 /// `GET /api/usage-logs` query parameters.
@@ -325,13 +311,6 @@ pub async fn create_run(
         model: payload.model.clone(),
         reasoning_effort: payload.reasoning_effort.clone().filter(|e| !e.is_empty()),
         mode: mode.clone(),
-        coder_provider_id: payload.coder_provider_id.clone().filter(|p| !p.is_empty()),
-        coder_model: payload.coder_model.clone().filter(|m| !m.is_empty()),
-        coder_reasoning_effort: payload.coder_reasoning_effort.clone().filter(|e| !e.is_empty()),
-        agent_preset: payload.agent_preset.clone().filter(|p| !p.is_empty()),
-        utility_provider_id: payload.utility_provider_id.clone().filter(|p| !p.is_empty()),
-        utility_model: payload.utility_model.clone().filter(|m| !m.is_empty()),
-        utility_reasoning_effort: payload.utility_reasoning_effort.clone().filter(|e| !e.is_empty()),
         system_prompt: payload.system_prompt.clone().filter(|p| !p.is_empty()),
         append_system_prompt: payload.append_system_prompt.clone().filter(|p| !p.is_empty()),
         created_at: now_iso(),
@@ -404,13 +383,6 @@ pub async fn continue_run(
             run.model = model.to_string();
         }
         run.reasoning_effort = payload.reasoning_effort.clone().filter(|e| !e.is_empty());
-        run.agent_preset = payload.agent_preset.clone().filter(|p| !p.is_empty());
-        run.coder_provider_id = payload.coder_provider_id.clone().filter(|p| !p.is_empty());
-        run.coder_model = payload.coder_model.clone().filter(|m| !m.is_empty());
-        run.coder_reasoning_effort = payload.coder_reasoning_effort.clone().filter(|e| !e.is_empty());
-        run.utility_provider_id = payload.utility_provider_id.clone().filter(|p| !p.is_empty());
-        run.utility_model = payload.utility_model.clone().filter(|m| !m.is_empty());
-        run.utility_reasoning_effort = payload.utility_reasoning_effort.clone().filter(|e| !e.is_empty());
         if payload.system_prompt.is_some() {
             run.system_prompt = payload.system_prompt.clone().filter(|p| !p.trim().is_empty());
         }

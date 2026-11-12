@@ -4,9 +4,10 @@
 
 Locagens is a local-first AI orchestration tool. The user picks one provider
 and model, gives it a task, and the assistant works inside a selected project
-folder. Runs are single-model by default. An optional agent preset turns the
-main model into an architect that delegates to coder/utility sub-agents; runs
-without a preset can fan work out via `spawn_agents` (explore/general).
+folder. Runs are single-model: one provider/model drives the whole run, and the
+main agent can fan work out to sub-agents via `spawn_agents` (`explorer`
+read-only / `worker` full tools). The UI is a native Rust desktop app (Dioxus).
+There are no agent presets and no coder/utility model tiers.
 
 ```txt
 User Task -> Orchestrator creates a run -> main model responds (with tools)
@@ -132,8 +133,7 @@ Naming:   specific (ProviderRegistry, RunRepository, buildSystemPrompt);
 - API keys never touch JSON or the database: macOS Keychain behind a non-secret
   `apiKeyRef`. Never log or expose secrets. Public metadata endpoints return
   only safe fields; the settings API never returns raw keys (preserve marker).
-- `agentPresets`: architect + coder model, `maxSubAgents`, optional utility
-  model. `modelSettings[model]`: `reasoning`, `contextLimit`, `pricing` tiers
+- `modelSettings[model]`: `reasoning`, `contextLimit`, `pricing` tiers
   (USD per 1M tokens). No built-in pricing table — unpriced models cost 0; cost
   is computed locally into `usage_logs`.
 - Adapters implement `ModelProvider.complete(request)`. The orchestrator only
@@ -148,8 +148,8 @@ replays history; both share `drive()`, which uses `runAgentLoop()` for the main
 model AND every sub-agent — tool execution stays shared, never duplicated.
 
 ```txt
-load run -> build mode-aware prompt (systemPrompt.ts)
--> pick tools from mode + preset -> call model
+load run -> build mode-aware prompt
+-> pick tools from mode -> call model
 -> gate each tool call, execute, feed results back
 -> finish when no tool calls, on cancel, or on error
 ```
@@ -174,8 +174,7 @@ create_directory  move_file  search_files
 run_command(command)   fetch_url(url)          dangerous: permission-gated
 set_chat_title  ask_user_question  remember  load_skill   orchestrator tools
 update_plan                                  plan mode only
-delegate_tasks / delegate_to_utility         preset build modes only
-spawn_agents                                 single-model runs
+spawn_agents (explorer / worker)             single-model fan-out
 ```
 
 - `run_command` (workspace cwd, 120s, env secrets stripped) and `fetch_url`
@@ -185,10 +184,10 @@ spawn_agents                                 single-model runs
 - Silent tools (no I/O, no prompt): `set_chat_title`, `update_plan`, `remember`.
   `ask_user_question` pauses the run (`awaiting_input`). `load_skill` returns a
   `SKILL.md` body from user/project skill roots (sub-agents get no skills).
-- Delegation tools start nested `runAgentLoop()` calls in the same run (messages
+- `spawn_agents` starts nested `runAgentLoop()` calls in the same run (messages
   tagged `agentRole` + `agentName`, rendered as sub-agent windows). Depth is
-  capped at 1: sub-agents never receive delegation tools. In preset runs,
-  architect mutation calls are trapped and redirected to `delegate_tasks`.
+  capped at 1: sub-agents never receive `spawn_agents`. `explorer` sub-agents
+  are read-only; `worker` sub-agents get full workspace tools.
 
 ## Permission Flow
 
@@ -261,7 +260,7 @@ been removed.
 Not implemented; do not build without an explicit request:
 
 ```txt
-separate reviewer/acceptance loop after coder delegation
+separate reviewer/acceptance loop after sub-agent fan-out
 direct git integration
 manual approval checkpoints beyond the permission flow
 multi-user auth / cloud deployment

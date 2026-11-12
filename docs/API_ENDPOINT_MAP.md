@@ -44,7 +44,7 @@ through `apps/backend/src/db.rs` (JSON/JSONL session files) — there is no SQLi
 
 ---
 
-## `routes/providers.rs` — provider & agent presets
+## `routes/providers.rs` — providers & native `pi` auth
 
 | Method | Path | Description | Handler (Rust) / Storage |
 |--------|------|-------------|--------------------------|
@@ -52,8 +52,6 @@ through `apps/backend/src/db.rs` (JSON/JSONL session files) — there is no SQLi
 | POST | `/api/providers/test` | Test a provider/model with a one-off completion | `pi_providers::PiProviderManager::test` |
 | GET | `/api/providers/config` | Get editable provider configurations (API keys masked) | `pi_providers.rs` + `locagens-providers-meta.json` |
 | POST | `/api/providers/config` | Save provider configurations | `pi_providers.rs` → `auth.json` / `models.json` writes |
-| GET | `/api/agent-presets` | Dual-model agent presets (architect + coder) | `locagens-presets.json` via `pi_providers.rs` |
-| PUT | `/api/agent-presets` | Save the full agent-preset set | `pi_providers.rs` → `locagens-presets.json` |
 | POST | `/api/providers/fetch-models` | Fetch available models dynamically from a provider endpoint | inline `reqwest` fetch to provider API (`/models` or `/model`) |
 | GET | `/api/pi/auth` | Native `pi` auth status (`~/.pi/agent/auth.json`) | `pi_providers::PiProviderManager` |
 | POST | `/api/pi/auth` | Set a `pi` credential entry | `pi_providers.rs` → `~/.pi/agent/auth.json` |
