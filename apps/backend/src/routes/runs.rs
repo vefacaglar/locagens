@@ -4,6 +4,7 @@
 //! Wire-compatible with `apps/web/src/api/client.ts` and `useChatSession.ts`.
 
 use crate::db::{Run, RunMessage, UsageLogEntry};
+use crate::orchestrator::RunHandle;
 use crate::util::{json_error, now_iso};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
@@ -20,6 +21,10 @@ use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as _;
 
+/// Receiver of a run's live event broadcast, subscribed before the drive
+/// task starts so no event is missed.
+pub type EventRx = tokio::sync::broadcast::Receiver<Value>;
+
 /// `POST /api/runs` body.
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +38,10 @@ pub struct CreateRunPayload {
     pub mode: Option<String>,
     #[serde(default)]
     pub bypass_permissions: bool,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub append_system_prompt: Option<String>,
     pub coder_provider_id: Option<String>,
     pub coder_model: Option<String>,
     pub coder_reasoning_effort: Option<String>,
@@ -54,6 +63,10 @@ pub struct ContinueRunPayload {
     pub mode: Option<String>,
     #[serde(default)]
     pub bypass_permissions: bool,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub append_system_prompt: Option<String>,
     pub coder_provider_id: Option<String>,
     pub coder_model: Option<String>,
     pub coder_reasoning_effort: Option<String>,
@@ -128,15 +141,18 @@ fn truncate_title(task: &str) -> String {
 // POST /api/runs
 // ----------------------------------------------------------------------
 
-pub async fn create_run(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<CreateRunPayload>,
-) -> Response {
+/// Shared run-creation logic used by the HTTP route and the `lcgn` CLI.
+/// The event receiver is subscribed before the drive task starts so no
+/// event is lost.
+pub async fn start_run_core(
+    state: &AppState,
+    payload: &CreateRunPayload,
+) -> Result<(Run, Arc<RunHandle>, EventRx), String> {
     if payload.task.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Task is required.");
+        return Err("Task is required.".to_string());
     }
     if payload.provider_id.trim().is_empty() || payload.model.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Provider and model are required.");
+        return Err("Provider and model are required.".to_string());
     }
 
     let project_path = payload
@@ -166,7 +182,7 @@ pub async fn create_run(
         project_name,
         status: "created".to_string(),
         provider_id: payload.provider_id.clone(),
-        provider_display_name: provider_display_name(&state, &payload.provider_id),
+        provider_display_name: provider_display_name(state, &payload.provider_id),
         model: payload.model.clone(),
         reasoning_effort: payload.reasoning_effort.clone().filter(|e| !e.is_empty()),
         mode: mode.clone(),
@@ -177,6 +193,8 @@ pub async fn create_run(
         utility_provider_id: payload.utility_provider_id.clone().filter(|p| !p.is_empty()),
         utility_model: payload.utility_model.clone().filter(|m| !m.is_empty()),
         utility_reasoning_effort: payload.utility_reasoning_effort.clone().filter(|e| !e.is_empty()),
+        system_prompt: payload.system_prompt.clone().filter(|p| !p.is_empty()),
+        append_system_prompt: payload.append_system_prompt.clone().filter(|p| !p.is_empty()),
         created_at: now_iso(),
         updated_at: now_iso(),
         last_active_at: Some(now_iso()),
@@ -195,9 +213,34 @@ pub async fn create_run(
     };
     state.db.append_message(message.clone());
 
-    state.orchestrator.spawn(state.clone(), &run_id);
+    let handle = state.orchestrator.ensure_handle(&run_id);
+    let rx = handle.events.subscribe();
+    state.orchestrator.spawn(state_for_spawn(state), &run_id);
 
-    Json(serde_json::to_value(&run).unwrap_or(Value::Null)).into_response()
+    Ok((run, handle, rx))
+}
+
+/// Clones the shared state for the spawned drive task.
+fn state_for_spawn(state: &AppState) -> Arc<AppState> {
+    Arc::new(AppState {
+        db: state.db.clone(),
+        pi: state.pi.clone(),
+        orchestrator: state.orchestrator.clone(),
+        settings_path: state.settings_path.clone(),
+        default_project_path: state.default_project_path.clone(),
+        processes: state.processes.clone(),
+        auth_token: state.auth_token.clone(),
+    })
+}
+
+pub async fn create_run(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateRunPayload>,
+) -> Response {
+    match start_run_core(&state, &payload).await {
+        Ok((run, _, _)) => Json(serde_json::to_value(&run).unwrap_or(Value::Null)).into_response(),
+        Err(message) => json_error(StatusCode::BAD_REQUEST, &message),
+    }
 }
 
 /// The run's effective mode: explicit bypass wins over a milder mode.
@@ -214,41 +257,42 @@ fn effective_mode(mode: Option<&str>, bypass: bool) -> String {
 // POST /api/runs/:id/continue
 // ----------------------------------------------------------------------
 
-pub async fn continue_run(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-    Json(payload): Json<ContinueRunPayload>,
-) -> Response {
-    let Some(existing) = state.db.get_run_full(&run_id) else {
-        return json_error(StatusCode::NOT_FOUND, "Run not found.");
+/// Shared continue logic used by the HTTP route and the `lcgn` CLI.
+pub async fn continue_run_core(
+    state: &AppState,
+    run_id: &str,
+    payload: &ContinueRunPayload,
+) -> Result<(Arc<RunHandle>, EventRx), String> {
+    let Some(existing) = state.db.get_run_full(run_id) else {
+        return Err("Run not found.".to_string());
     };
     if active_run_statuses().contains(&existing.status.as_str()) && existing.status != "generating" {
-        return json_error(
-            StatusCode::CONFLICT,
-            "Run is awaiting your input or approval; resolve it before sending a new message.",
+        return Err(
+            "Run is awaiting your input or approval; resolve it before sending a new message."
+                .to_string(),
         );
     }
     if payload.task.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Task is required.");
+        return Err("Task is required.".to_string());
     }
 
     let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions);
     let message = RunMessage {
         id: format!("msg-{}", uuid::Uuid::new_v4()),
-        run_id: run_id.clone(),
+        run_id: run_id.to_string(),
         role: "user".to_string(),
         content: payload.task.clone(),
         created_at: now_iso(),
         ..Default::default()
     };
 
-    state.db.patch_run(&run_id, |run| {
+    state.db.patch_run(run_id, |run| {
         run.status = "generating".to_string();
         run.error_message = None;
         run.mode = mode.clone();
         if let Some(provider_id) = payload.provider_id.as_deref().filter(|p| !p.is_empty()) {
             run.provider_id = provider_id.to_string();
-            run.provider_display_name = provider_display_name(&state, provider_id);
+            run.provider_display_name = provider_display_name(state, provider_id);
         }
         if let Some(model) = payload.model.as_deref().filter(|m| !m.is_empty()) {
             run.model = model.to_string();
@@ -261,27 +305,59 @@ pub async fn continue_run(
         run.utility_provider_id = payload.utility_provider_id.clone().filter(|p| !p.is_empty());
         run.utility_model = payload.utility_model.clone().filter(|m| !m.is_empty());
         run.utility_reasoning_effort = payload.utility_reasoning_effort.clone().filter(|e| !e.is_empty());
+        if payload.system_prompt.is_some() {
+            run.system_prompt = payload.system_prompt.clone().filter(|p| !p.trim().is_empty());
+        }
+        if payload.append_system_prompt.is_some() {
+            run.append_system_prompt = payload
+                .append_system_prompt
+                .clone()
+                .filter(|p| !p.trim().is_empty());
+        }
     });
     state.db.append_message(message.clone());
 
-    if let Some(handle) = state.orchestrator.handle(&run_id) {
-        handle.emit(json!({
-            "type": "message_created",
-            "message": serde_json::to_value(&message).unwrap_or(Value::Null),
-        }));
-    }
-    state.orchestrator.emit_status(&run_id, "generating");
-    state.orchestrator.spawn(state.clone(), &run_id);
+    let handle = state
+        .orchestrator
+        .handle(run_id)
+        .unwrap_or_else(|| state.orchestrator.ensure_handle(run_id));
+    handle.emit(json!({
+        "type": "message_created",
+        "message": serde_json::to_value(&message).unwrap_or(Value::Null),
+    }));
+    state.orchestrator.emit_status(run_id, "generating");
+    let rx = handle.events.subscribe();
+    state.orchestrator.spawn(state_for_spawn(state), run_id);
 
-    Json(json!({ "success": true })).into_response()
+    Ok((handle, rx))
+}
+
+pub async fn continue_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+    Json(payload): Json<ContinueRunPayload>,
+) -> Response {
+    match continue_run_core(&state, &run_id, &payload).await {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(message) => {
+            if message == "Run not found." {
+                json_error(StatusCode::NOT_FOUND, &message)
+            } else if message.starts_with("Run is awaiting") {
+                json_error(StatusCode::CONFLICT, &message)
+            } else {
+                json_error(StatusCode::BAD_REQUEST, &message)
+            }
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
 // POST /api/runs/:id/cancel
 // ----------------------------------------------------------------------
 
-pub async fn cancel_run(State(state): State<Arc<AppState>>, Path(run_id): Path<String>) -> Response {
-    if let Some(handle) = state.orchestrator.handle(&run_id) {
+/// Shared cancel logic used by the HTTP route, the `lcgn` CLI and Ctrl+C.
+pub async fn cancel_run_core(state: &AppState, run_id: &str) {
+    if let Some(handle) = state.orchestrator.handle(run_id) {
         handle.cancel();
         // Resolve any pending permission/question so the loop can unwind.
         {
@@ -300,12 +376,16 @@ pub async fn cancel_run(State(state): State<Arc<AppState>>, Path(run_id): Path<S
         }
     }
 
-    if let Some(run) = state.db.get_run_full(&run_id) {
+    if let Some(run) = state.db.get_run_full(run_id) {
         if active_run_statuses().contains(&run.status.as_str()) {
-            state.db.patch_run(&run_id, |run| run.status = "cancelled".to_string());
-            state.orchestrator.emit_status(&run_id, "cancelled");
+            state.db.patch_run(run_id, |run| run.status = "cancelled".to_string());
+            state.orchestrator.emit_status(run_id, "cancelled");
         }
     }
+}
+
+pub async fn cancel_run(State(state): State<Arc<AppState>>, Path(run_id): Path<String>) -> Response {
+    cancel_run_core(&state, &run_id).await;
     Json(json!({ "success": true })).into_response()
 }
 
@@ -333,21 +413,13 @@ pub async fn queue_message(
 // POST /api/runs/:id/permission
 // ----------------------------------------------------------------------
 
-pub async fn permission_decision(
-    State(state): State<Arc<AppState>>,
-    Path(run_id): Path<String>,
-    Json(payload): Json<PermissionPayload>,
-) -> Response {
-    let decision = payload.decision.trim().to_string();
-    if !["allow_once", "allow_project", "allow_always", "allow_run", "deny"]
-        .contains(&decision.as_str())
-    {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid permission decision.");
-    }
-    let Some(handle) = state.orchestrator.handle(&run_id) else {
-        return json_error(StatusCode::CONFLICT, "No pending permission request for this run.");
-    };
-
+/// Shared permission-decision logic used by the HTTP route and the `lcgn`
+/// interactive prompt. Returns `false` when nothing was pending.
+pub async fn apply_permission_decision(
+    state: &AppState,
+    handle: &Arc<RunHandle>,
+    decision: &str,
+) -> bool {
     let mut slot = handle.permission.lock().await;
     let (pending, sender) = (slot.pending.take(), slot.sender.take());
     drop(slot);
@@ -370,8 +442,8 @@ pub async fn permission_decision(
                     .unwrap_or("{}"),
             )
             .unwrap_or_else(|_| json!({}));
-            if matches!(decision.as_str(), "allow_project" | "allow_always") {
-                if let Some(run) = state.db.get_run_full(&run_id) {
+            if matches!(decision, "allow_project" | "allow_always") {
+                if let Some(run) = state.db.get_run_full(&handle.run_id) {
                     let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
                     let domains = args
                         .get("network_domains")
@@ -385,7 +457,7 @@ pub async fn permission_decision(
                         &name,
                         &command,
                         domains,
-                        &decision,
+                        decision,
                     );
                 }
             }
@@ -393,16 +465,59 @@ pub async fn permission_decision(
     }
     match sender {
         Some(sender) => {
-            let _ = sender.send(decision);
-            Json(json!({ "success": true })).into_response()
+            let _ = sender.send(decision.to_string());
+            true
         }
-        None => json_error(StatusCode::CONFLICT, "No pending permission request for this run."),
+        None => false,
+    }
+}
+
+pub async fn permission_decision(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+    Json(payload): Json<PermissionPayload>,
+) -> Response {
+    let decision = payload.decision.trim().to_string();
+    if !["allow_once", "allow_project", "allow_always", "allow_run", "deny"]
+        .contains(&decision.as_str())
+    {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid permission decision.");
+    }
+    let Some(handle) = state.orchestrator.handle(&run_id) else {
+        return json_error(StatusCode::CONFLICT, "No pending permission request for this run.");
+    };
+    if apply_permission_decision(&state, &handle, &decision).await {
+        Json(json!({ "success": true })).into_response()
+    } else {
+        json_error(StatusCode::CONFLICT, "No pending permission request for this run.")
     }
 }
 
 // ----------------------------------------------------------------------
 // POST /api/runs/:id/answer
 // ----------------------------------------------------------------------
+
+/// Shared answer logic used by the HTTP route and the `lcgn` prompt.
+pub async fn answer_question_core(
+    handle: &Arc<RunHandle>,
+    selections: Vec<Vec<String>>,
+    notes: Vec<String>,
+) -> bool {
+    let mut slot = handle.question.lock().await;
+    let sender = slot.sender.take();
+    slot.pending = None;
+    drop(slot);
+    match sender {
+        Some(sender) => {
+            let _ = sender.send(json!({
+                "selections": selections,
+                "notes": notes,
+            }));
+            true
+        }
+        None => false,
+    }
+}
 
 pub async fn answer_question(
     State(state): State<Arc<AppState>>,
@@ -412,19 +527,10 @@ pub async fn answer_question(
     let Some(handle) = state.orchestrator.handle(&run_id) else {
         return json_error(StatusCode::CONFLICT, "No pending question for this run.");
     };
-    let mut slot = handle.question.lock().await;
-    let sender = slot.sender.take();
-    slot.pending = None;
-    drop(slot);
-    match sender {
-        Some(sender) => {
-            let _ = sender.send(json!({
-                "selections": payload.selections,
-                "notes": payload.notes,
-            }));
-            Json(json!({ "success": true })).into_response()
-        }
-        None => json_error(StatusCode::CONFLICT, "No pending question for this run."),
+    if answer_question_core(&handle, payload.selections.clone(), payload.notes.clone()).await {
+        Json(json!({ "success": true })).into_response()
+    } else {
+        json_error(StatusCode::CONFLICT, "No pending question for this run.")
     }
 }
 

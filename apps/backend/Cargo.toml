@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "Locagens Rust backend (Axum + Tokio + file-based JSON/JSONL storage) built on top of pi."
 
+[lib]
+name = "locagens_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "locagens-backend"
 path = "src/main.rs"
+
+[[bin]]
+name = "lcgn"
+path = "src/bin/lcgn.rs"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
@@ -29,3 +37,10 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+fs2 = "0.4"
+rpassword = "7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

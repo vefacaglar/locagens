@@ -44,6 +44,7 @@ ask_user_question multiple-choice flow
 SSE live updates
 run/message/project/permission/memory/usage persistence
 right-hand plan panel
+lcgn CLI (pi-like command line on the same Rust core)
 ```
 
 ## Tech Stack
@@ -178,6 +179,22 @@ delegate_to_utility    (preset build modes)
 
 All file paths are resolved relative to the selected project folder and cannot
 escape it.
+
+## Command line (`lcgn`)
+
+Locagens ships a pi-like CLI that runs the same Rust core in-process — no
+HTTP server needed:
+
+```bash
+lcgn -p "say OK" --model opencode-go/glm-5.3-flash --no-tools
+lcgn --model opencode-go/glm-5.3-flash        # interactive REPL
+lcgn --list-models                            # table of authenticated models
+lcgn auth login opencode-go                   # store a key in ~/.pi/agent/auth.json
+lcgn -c "keep going"                          # continue the most recent session
+```
+
+Sessions are normal Locagens runs, so they also appear in the desktop app.
+See `docs/CLI.md` for the full flag reference.
 
 ## Development
 

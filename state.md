@@ -128,6 +128,15 @@ Update this file continuously as phases complete.
   - Remove legacy `apps/api` and `apps/db-writer`, update root `package.json` &
     `pnpm-workspace.yaml`, run full build & tests, commit & push.
 
+- [x] **Phase 5: `lcgn` CLI (pi-like command line on the shared Rust core)** — branch `feat/loc-cli`, not pushed, pending verifier + merge
+  - `apps/backend` is now a library (`locagens_core`, `src/lib.rs`, `build_core()`, `state.rs`) plus two binaries: `locagens-backend` (unchanged behavior/routes) and `lcgn` (`src/bin/lcgn.rs`, helpers in `src/cli/`: args, auth, models, render, repl, runner).
+  - `routes/runs.rs`: create/continue/cancel/permission/answer logic extracted into `*_core` functions shared by the HTTP handlers and the CLI (HTTP statuses/bodies unchanged). `orchestrator/mod.rs`: only adds `--system-prompt`/`--append-system-prompt` support (`Run.system_prompt`/`append_system_prompt`, skipped in JSON when unset).
+  - `db.rs`: advisory cross-process lock `<data>/.lock` (fs2) around every mutation of `projects.json`, `permissions.json`, `memory.json`, `usage_logs.jsonl`, re-reading them from disk under the lock; two-`Db` interleave test.
+  - Flags: `-p`, `--model`, `--provider`, `--thinking`, `--mode text|json`, `--plan`, `--approve/-a`, `-c`, `-r`, `--session`, `--no-session`, `--no-tools`, `--system-prompt`, `--append-system-prompt`, `--cwd`, `--list-models`; `auth login|logout|check`; `sessions`; `@file` + piped stdin; exit codes 0/1/2; interactive REPL with slash commands (`/model /thinking /plan /build /new /sessions /usage /help /exit`).
+  - `docs/CLI.md`, README CLI section; `apps/desktop/package.json` `extraResources` now also bundles `lcgn`/`lcgn.exe` (`build:backend` already builds both bins).
+  - Verified: `cargo test` 50 unit tests (33 pre-existing + 17 new) + 4 integration tests (mock OpenAI-compatible server) all pass; live against `opencode-go/glm-5.3-flash`: `--list-models`, `-p ... --no-tools`, tool round trip with `--approve`, denial without `--approve`, `--mode json`, `-c`, `--plan`, bad model → exit 2.
+  - Not verified / known limits: the interactive REPL, Ctrl+C cancel and the permission/question prompts were not exercised on a real TTY (no TTY in the test harness). A running `locagens-backend` keeps runs/projects in memory, so sessions created by `lcgn` appear in the desktop app after its next start (no live refresh yet). With an open non-TTY stdin that never closes, `lcgn -p` waits for stdin EOF (same as pi); close it with `$null |` or `< NUL`. Full-screen TUI is out of scope.
+
 ---
 
 ## 4. Build Notes (this Windows machine)

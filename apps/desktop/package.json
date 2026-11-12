@@ -44,7 +44,9 @@
         "to": "bin",
         "filter": [
           "locagens-backend",
-          "locagens-backend.exe"
+          "locagens-backend.exe",
+          "lcgn",
+          "lcgn.exe"
         ]
       }
     ],
