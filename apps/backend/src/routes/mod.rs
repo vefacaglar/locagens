@@ -8,6 +8,7 @@ pub mod plugins;
 pub mod processes;
 pub mod projects;
 pub mod providers;
+pub mod runs;
 pub mod security;
 pub mod settings;
 pub mod skills;
@@ -74,6 +75,21 @@ pub fn router() -> Router<Arc<AppState>> {
         // Security
         .route("/api/security/status", get(security::status))
         .route("/api/security/sandbox/setup", post(security::sandbox_setup))
+        // Runs (agent orchestrator + SSE)
+        .route("/api/runs", get(runs::list_runs).post(runs::create_run))
+        .route("/api/runs/:id", get(runs::get_run))
+        .route("/api/runs/:id/continue", post(runs::continue_run))
+        .route("/api/runs/:id/cancel", post(runs::cancel_run))
+        .route("/api/runs/:id/messages", post(runs::queue_message))
+        .route("/api/runs/:id/permission", post(runs::permission_decision))
+        .route("/api/runs/:id/answer", post(runs::answer_question))
+        .route("/api/runs/:id/messages", get(runs::list_messages))
+        .route("/api/runs/:id/usage", get(runs::run_usage))
+        .route("/api/runs/:id/plan", get(runs::run_plan))
+        .route("/api/runs/:id/pending", get(runs::run_pending))
+        .route("/api/runs/:id/events", get(runs::run_events))
+        // Usage logs
+        .route("/api/usage-logs", get(runs::usage_logs))
 }
 
 pub async fn ping() -> axum::response::Response {

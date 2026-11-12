@@ -7,6 +7,7 @@
 
 mod auth;
 mod db;
+mod orchestrator;
 mod paths;
 mod pi_providers;
 mod routes;
@@ -25,8 +26,9 @@ pub const DEFAULT_PORT: u16 = 4321;
 
 /// Shared application state passed to every handler.
 pub struct AppState {
-    pub db: db::Db,
+    pub db: Arc<db::Db>,
     pub pi: Arc<pi_providers::PiProviderManager>,
+    pub orchestrator: Arc<orchestrator::Orchestrator>,
     pub settings_path: PathBuf,
     pub default_project_path: PathBuf,
     pub processes: Arc<ProcessManager>,
@@ -74,8 +76,9 @@ async fn main() {
 
     let default_project_path = workspace_root.clone();
     let state = Arc::new(AppState {
-        db: database,
+        db: Arc::new(database),
         pi: Arc::new(pi_providers::PiProviderManager::new()),
+        orchestrator: Arc::new(orchestrator::Orchestrator::new()),
         settings_path,
         default_project_path,
         processes: Arc::new(ProcessManager::new()),

@@ -82,15 +82,42 @@ Update this file continuously as phases complete.
     (ping/projects/providers/config/agent-presets/pi/auth all 200 with real
     `models-store.json` data).
 
-- [ ] **Phase 3: `pi --mode rpc` Agent Orchestrator & Run/SSE Engine (`/api/runs/*`, `/api/runs/:id/events`)**
-  - Implement Rust `pi --mode rpc` process supervisor & JSONL protocol driver
-    (`prompt`, `steer`, `follow_up`, `clear_queue`, `abort`,
-    `extension_ui_request`/`extension_ui_response`).
-  - Map `pi` streaming events (`message_start`, `message_update`, `tool_execution_*`,
-    `agent_settled`) to the file-based store (`sessions/<id>/run.json`, `messages.jsonl`,
-    `plan.json`, `usage_logs.jsonl`) and SSE broadcast (`GET /api/runs/:id/events`).
-  - Wire permission gating (`PermissionCoordinator` via `pi` extension hook / RPC UI)
-    and multi-agent delegation (`coder`, `utility`, `explorer`).
+- [x] **Phase 3: Pure Rust Agent Loop, Streaming LLM Adapter, Workspace Tools & Run/SSE Orchestrator**
+  (`apps/backend/src/orchestrator/` + `apps/backend/src/routes/runs.rs` — 100% Rust, no `pi` CLI RPC)
+  - **`orchestrator/llm.rs`**: pure Rust streaming client via `reqwest` — OpenAI-compatible
+    (`{baseUrl}/chat/completions`, `stream: true`: `delta.content`, `reasoning_content`/`reasoning`,
+    `tool_calls`, final usage chunk after `finish_reason`, `stream_options.include_usage` with
+    automatic retry when rejected, `x-opencode-session` routing header) and Anthropic Messages
+    (`content_block_start/delta`, `text_delta`/`thinking_delta`/`input_json_delta`, `message_delta`),
+    non-streaming JSON fallback, `reasoning_effort` mapping (OpenAI) / `thinking.budget_tokens`
+    (Anthropic), per-model `baseUrl`/`api` overrides from `models-store.json`.
+  - **`orchestrator/tools.rs`**: workspace tools with strict canonicalized containment
+    (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `create_directory`,
+    `move_file`, `search_files`) + permission-gated dangerous tools (`run_command` — 120s timeout,
+    secret-stripped env, deny-by-default network; `fetch_url` — SSRF private-IP block),
+    `PermissionPreview` diff payloads, tool-def subsets for read-only sub-agents.
+  - **`orchestrator/mod.rs`**: per-run `RunHandle` (cancellation token, `broadcast` SSE channel,
+    mid-run message inbox, pending permission/question oneshot coordinators, run-level
+    `allow_run`) + `AgentLoop` driving model↔tool rounds (max 40) for the main agent and
+    delegated sub-agents (`coder`/`utility`/`explorer`/`worker`, depth cap 1, messages persisted
+    & streamed with `agentRole`/`agentName`), mode-aware system prompts with memory injection,
+    permission gating matrix (auto/accept_edits/ask_permissions/plan/chat + standing grants in
+    `permissions.json`), usage logs with cost (provider-reported cost → pi per-million pricing),
+    interactive tools (`set_chat_title`, `update_plan`, `remember`, `load_skill`,
+    `ask_user_question`).
+  - **`routes/runs.rs`**: `POST /api/runs`, `/continue`, `/cancel`, `/messages`, `/permission`,
+    `/answer`; `GET /api/runs` (lastActiveAt DESC), `/:id`, `/:id/messages`, `/:id/usage`
+    (`RunUsageSummary` with `byRole`), `/:id/plan`, `/:id/pending`, `/:id/events` (SSE: connected,
+    pending replay, broadcast stream, terminal close, idle heartbeat), `GET /api/usage-logs`
+    (paginated + search/filter).
+  - `db.rs`: `patch_run` + `update_message_full` (rawResponse updates); `pi_providers.rs`:
+    public `resolve_endpoint`/`model_info`, `ModelInfo: Default`.
+  - Verified live end-to-end against `opencode-go`/`glm-5.3-flash`: plain completion, tool
+    round-trip (list_directory → 13 files), ask_permissions pause → pending preview →
+    allow_once → executed → done, ask_user_question pause → answer → done, spawn_agents
+    explorer sub-agent (agentRole/agentName streamed), continue-run, mid-run message 409,
+    cancel, usage logs (tokens + cost), SSE terminal replay.
+  - `cargo test` 27/27 passed, `cargo check` clean (w64devkit + stable-x86_64-pc-windows-gnu).
 
 - [ ] **Phase 4: Frontend (`apps/web`), Desktop (`apps/desktop`) Integration & Legacy Node.js Removal**
   - Update `apps/desktop/src/backend.ts` & `paths.ts` to spawn the Rust `locagens-backend` binary.

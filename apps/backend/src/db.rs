@@ -465,6 +465,22 @@ impl Db {
         }
     }
 
+    /// Applies an arbitrary metadata patch to a run (title, model fields,
+    /// preset fields, status, …) and persists it atomically.
+    pub fn patch_run(&self, id: &str, patch: impl FnOnce(&mut Run)) -> Option<Run> {
+        let mut state = self.write();
+        let updated = state.runs.get_mut(id).map(|run| {
+            patch(run);
+            run.updated_at = now_iso();
+            run.last_active_at = Some(now_iso());
+            run.clone()
+        });
+        if let Some(run) = updated.as_ref() {
+            persist_run(&self.root, run);
+        }
+        updated
+    }
+
     pub fn touch_run(&self, id: &str) {
         let mut state = self.write();
         if let Some(run) = state.runs.get_mut(id) {
@@ -536,6 +552,19 @@ impl Db {
         content: &str,
         reasoning_content: Option<&str>,
     ) -> Option<RunMessage> {
+        self.update_message_full(run_id, message_id, content, reasoning_content, None)
+    }
+
+    /// Like `update_message`, but can also replace the serialized
+    /// `rawResponse` blob (used for tool-call payloads on assistant messages).
+    pub fn update_message_full(
+        &self,
+        run_id: &str,
+        message_id: &str,
+        content: &str,
+        reasoning_content: Option<&str>,
+        raw_response: Option<&str>,
+    ) -> Option<RunMessage> {
         let mut state = self.write();
         let messages = state.messages.get_mut(run_id)?;
         let updated = messages
@@ -545,6 +574,9 @@ impl Db {
                 message.content = content.to_string();
                 if let Some(reasoning) = reasoning_content {
                     message.reasoning_content = Some(reasoning.to_string());
+                }
+                if let Some(raw) = raw_response {
+                    message.raw_response = Some(raw.to_string());
                 }
                 message.clone()
             });

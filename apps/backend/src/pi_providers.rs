@@ -63,7 +63,7 @@ impl AuthCredential {
 }
 
 /// A model entry merged from built-ins, `models-store.json` and `models.json`.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
@@ -486,6 +486,19 @@ impl PiProviderManager {
 
     pub fn has_api_key(&self, provider_id: &str) -> bool {
         self.read_auth_map().contains_key(provider_id)
+    }
+
+    /// Resolved `(base_url, api)` pair for a provider — used by the
+    /// orchestrator's streaming LLM client.
+    pub fn resolve_endpoint(&self, provider_id: &str) -> (String, String) {
+        (self.resolve_base_url(provider_id), self.resolve_api(provider_id))
+    }
+
+    /// A single merged model entry by id, if known.
+    pub fn model_info(&self, provider_id: &str, model_id: &str) -> Option<ModelInfo> {
+        self.merged_models(provider_id)
+            .into_iter()
+            .find(|model| model.id == model_id)
     }
 
     // ------------------------------------------------------------------
