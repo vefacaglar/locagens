@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/backend", "apps/desktop-rs"]
+members = ["crates/protocol", "crates/apply-patch", "apps/backend", "apps/desktop-rs"]
 resolver = "2"
 
 [profile.release]

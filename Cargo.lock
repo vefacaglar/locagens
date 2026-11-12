@@ -2977,6 +2977,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "locagens-apply-patch"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "locagens-backend"
 version = "0.1.0"
 dependencies = [
@@ -2986,6 +2995,8 @@ dependencies = [
  "dirs 5.0.1",
  "fs2",
  "futures",
+ "locagens-apply-patch",
+ "locagens-protocol",
  "regex",
  "reqwest",
  "rpassword",
@@ -3015,6 +3026,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "locagens-protocol"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
