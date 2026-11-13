@@ -1,48 +1,70 @@
-//! Pure file-based storage layer (Codex/Claude/Pi-style JSON + JSONL) — zero
-//! SQLite, zero C library dependency. Replaces the former `rusqlite`
-//! (`locagens.db`) implementation while keeping the same public method
-//! signatures so route modules compile unchanged.
+//! Codex-style local storage: one append-only JSONL "rollout" per session,
+//! date-sharded, plus small append-only index files and Markdown memories.
+//! No SQLite, no C library dependency.
 //!
-//! Layout under the data root (`LOCAGENS_DATA_DIR`, the `LOCAGENS_DB_PATH`
-//! parent/stem, or `<app_support_dir>/data`):
+//! Layout under the Locagens home (`~/.locagens`, `$LOCAGENS_HOME`; the
+//! `LOCAGENS_DATA_DIR` env var overrides the whole root, mainly for tests):
 //!
 //! ```txt
-//! projects.json              — list of Project
-//! permissions.json           — list of PermissionRule (auto-increment ids)
-//! memory.json                — list of Memory (auto-increment ids)
-//! usage_logs.jsonl           — append-only JSONL of UsageLogEntry
-//! sessions/<run_id>/run.json       — Run metadata
-//! sessions/<run_id>/messages.jsonl — append-only JSONL of RunMessage
-//! sessions/<run_id>/plan.json      — active Plan for the run
+//! sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<run_id>.jsonl   one file per run
+//! session_index.jsonl   append-only {id, title, updated_at}; last line per id wins
+//! history.jsonl         append-only {session_id, ts, text}; one line per user prompt
+//! memories/<slug>.md    global memories (YAML frontmatter + body)
+//! projects/<sanitized-project-path>/memories/<slug>.md   project memories
+//! projects.json, permissions.json   JSON, written atomically (tmp + rename)
 //! ```
 //!
-//! All state is kept in an in-memory `RwLock<StorageState>` (O(1) reads) and
-//! every mutation is durably persisted: JSON files are written to a `.tmp`
-//! sibling then renamed atomically; JSONL files are appended + flushed, or
-//! rewritten atomically when a line is updated in place.
+//! A rollout line is `{"timestamp", "type", "payload"}` with `type` one of
+//! `session_meta`, `run_update`, `message`, `message_update`, `plan`, `usage`.
+//! Rollouts are strictly append-only: an update is a newly appended line and
+//! loading replays the file (last write wins). A truncated or corrupt line is
+//! skipped. Everything is mirrored in an in-memory `RwLock<StorageState>` so
+//! reads stay O(1).
+//!
+//! A legacy `<app_support>/Locagens/data/` directory (run.json / messages.jsonl
+//! / memory.json layout) is imported once, read-only, on first open.
 
 use crate::util::now_iso;
+use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+const MIGRATION_MARKER: &str = ".migrated-from-data-v1";
+const SESSION_INDEX_FILE: &str = "session_index.jsonl";
+const HISTORY_FILE: &str = "history.jsonl";
+const USAGE_SEQ_FILE: &str = ".usage_seq";
+
 /// Held for the duration of one cross-process mutation of a shared file.
-/// Backed by an advisory exclusive lock on `<data_root>/.lock` so the
-/// backend server and `lcgn` can run concurrently on the same data dir
-/// without overwriting each other's `projects.json` / `permissions.json` /
-/// `memory.json` / `usage_logs.jsonl`. Per-run files under `sessions/` are
-/// not locked (they are private to the run that owns them).
+/// Backed by an advisory exclusive lock on `<root>/.lock` so the desktop app
+/// and `lcgn` can run concurrently on the same root without overwriting each
+/// other's `projects.json` / `permissions.json` / memory files / usage ids.
+/// Rollouts are not locked (they are private to the run that owns them and
+/// only ever appended to).
 struct CrossProcessLock(std::fs::File);
 
 impl Drop for CrossProcessLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+fn lock_root(root: &Path) -> CrossProcessLock {
+    let path = root.join(".lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|err| panic!("Failed to open lock file {}: {err}", path.display()));
+    if let Err(err) = file.lock_exclusive() {
+        tracing::warn!("[Database] Advisory lock not taken on {}: {err}", path.display());
+    }
+    CrossProcessLock(file)
 }
 
 /// A durable fact remembered via the `remember` tool / Settings → Memory.
@@ -92,7 +114,7 @@ pub struct RunRow {
     pub model: String,
 }
 
-/// Full run metadata, persisted as `sessions/<run_id>/run.json`.
+/// Full run metadata, persisted as the `session_meta` / `run_update` lines of its rollout.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Run {
@@ -119,8 +141,8 @@ pub struct Run {
     pub last_active_at: Option<String>,
 }
 
-/// One chat message of a run, persisted as a line of
-/// `sessions/<run_id>/messages.jsonl`.
+/// One chat message of a run, persisted as a `message` / `message_update` rollout line
+///
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunMessage {
@@ -138,7 +160,7 @@ pub struct RunMessage {
     pub created_at: String,
 }
 
-/// The active plan of a run, persisted as `sessions/<run_id>/plan.json`.
+/// The active plan of a run, persisted as `plan` rollout lines.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Plan {
@@ -153,7 +175,7 @@ pub struct Plan {
     pub updated_at: String,
 }
 
-/// One usage entry, persisted as a line of `usage_logs.jsonl`.
+/// One usage entry, persisted as a `usage` rollout line.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UsageLogEntry {
@@ -172,16 +194,29 @@ pub struct UsageLogEntry {
     pub duration_ms: Option<i64>,
 }
 
-/// Everything the backend stores, mirrored in memory for O(1) reads.
+/// One line of a rollout file: `{"timestamp", "type", "payload"}`.
+#[derive(Deserialize)]
+struct RolloutLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    payload: Value,
+}
+
+/// Everything the store holds, mirrored in memory for O(1) reads.
 #[derive(Default)]
 struct StorageState {
     projects: Vec<Project>,
     permissions: Vec<PermissionRule>,
     memories: Vec<Memory>,
+    /// Markdown file of each memory, by memory id.
+    memory_files: HashMap<i64, PathBuf>,
     runs: BTreeMap<String, Run>,
     messages: HashMap<String, Vec<RunMessage>>,
     plans: HashMap<String, Plan>,
     usage: Vec<UsageLogEntry>,
+    /// Rollout file of each run (known once the run has any line on disk).
+    rollouts: HashMap<String, PathBuf>,
     next_permission_id: i64,
     next_memory_id: i64,
     next_usage_id: i64,
@@ -196,9 +231,21 @@ const ACTIVE_RUN_STATUSES: [&str; 4] =
     ["created", "generating", "awaiting_permission", "awaiting_input"];
 
 impl Db {
-    /// Opens (creating if needed) the file-based store rooted at `data_root`.
+    /// Opens (creating if needed) the store rooted at `data_root`. When the
+    /// root is the default Locagens home, the legacy `<app_support>/data`
+    /// directory is imported once (see `migrate_legacy_data`).
     pub fn open(data_root: &Path) -> anyhow::Result<Self> {
+        let legacy = default_legacy_dir_for(data_root);
+        Self::open_with_legacy(data_root, legacy.as_deref())
+    }
+
+    fn open_with_legacy(data_root: &Path, legacy: Option<&Path>) -> anyhow::Result<Self> {
         std::fs::create_dir_all(data_root)?;
+        if let Some(legacy) = legacy {
+            if let Err(err) = migrate_legacy_data(legacy, data_root) {
+                tracing::warn!("[Database] Legacy import from {} failed: {err}", legacy.display());
+            }
+        }
         let state = load_state(data_root)?;
         Ok(Self {
             root: data_root.to_path_buf(),
@@ -206,23 +253,14 @@ impl Db {
         })
     }
 
-    /// The data root directory (JSON/JSONL files live here).
+    /// The store root directory (rollouts, indexes and memories live here).
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Takes the advisory cross-process lock (`<root>/.lock`, blocking).
     fn cross_process_lock(&self) -> CrossProcessLock {
-        let path = self.root.join(".lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&path)
-            .unwrap_or_else(|err| panic!("Failed to open lock file {}: {err}", path.display()));
-        if let Err(err) = file.lock_exclusive() {
-            tracing::warn!("[Database] Advisory lock not taken on {}: {err}", path.display());
-        }
-        CrossProcessLock(file)
+        lock_root(&self.root)
     }
 
     /// Runs `mutate` under the cross-process lock after re-reading the
@@ -239,47 +277,59 @@ impl Db {
     /// Seeds the default project and fails any run left active by a restart.
     pub fn run_startup_tasks(&self, ws_root: &Path, default_project_name: &str) {
         self.with_shared_mutation(|state| {
-        let root = self.root.clone();
+            let root = self.root.clone();
 
-        // Seed default project if projects.json is empty.
-        if state.projects.is_empty() {
-            let project = Project {
-                path: ws_root.to_string_lossy().to_string(),
-                name: default_project_name.to_string(),
-                created_at: now_iso(),
-            };
-            state.projects.push(project);
-            persist_projects(&self.root, &state.projects);
-        }
-
-        // Reset any runs left in active states by the previous session.
-        let stuck: Vec<String> = state
-            .runs
-            .values()
-            .filter(|run| ACTIVE_RUN_STATUSES.contains(&run.status.as_str()))
-            .map(|run| run.id.clone())
-            .collect();
-
-        for run_id in stuck {
-            let now = now_iso();
-            if let Some(run) = state.runs.get_mut(&run_id) {
-                run.status = "failed".to_string();
-                run.error_message = Some("Session interrupted due to server restart.".to_string());
-                run.updated_at = now.clone();
-                persist_run(&root, run);
+            // Seed default project if projects.json is empty.
+            if state.projects.is_empty() {
+                let project = Project {
+                    path: ws_root.to_string_lossy().to_string(),
+                    name: default_project_name.to_string(),
+                    created_at: now_iso(),
+                };
+                state.projects.push(project);
+                persist_projects(&self.root, &state.projects);
             }
-            let message = RunMessage {
-                id: format!("msg-err-restart-{}-{}", run_id, chrono::Utc::now().timestamp_millis()),
-                run_id: run_id.clone(),
-                role: "system".to_string(),
-                content: "Session interrupted due to server restart.".to_string(),
-                created_at: now,
-                ..Default::default()
-            };
-            let messages = state.messages.entry(run_id.clone()).or_default();
-            messages.push(message.clone());
-            append_jsonl(&root.join("sessions").join(&run_id).join("messages.jsonl"), &message);
-        }
+
+            // Reset any runs left in active states by the previous session.
+            let stuck: Vec<String> = state
+                .runs
+                .values()
+                .filter(|run| ACTIVE_RUN_STATUSES.contains(&run.status.as_str()))
+                .map(|run| run.id.clone())
+                .collect();
+
+            for run_id in stuck {
+                let now = now_iso();
+                let snapshot = state.runs.get_mut(&run_id).map(|run| {
+                    run.status = "failed".to_string();
+                    run.error_message =
+                        Some("Session interrupted due to server restart.".to_string());
+                    run.updated_at = now.clone();
+                    run.clone()
+                });
+                if let Some(run) = snapshot {
+                    append_event(&root, state, &run_id, &now, "run_update", run_payload(&run));
+                    append_session_index(&root, &run);
+                }
+                let message = RunMessage {
+                    id: format!(
+                        "msg-err-restart-{}-{}",
+                        run_id,
+                        chrono::Utc::now().timestamp_millis()
+                    ),
+                    run_id: run_id.clone(),
+                    role: "system".to_string(),
+                    content: "Session interrupted due to server restart.".to_string(),
+                    created_at: now.clone(),
+                    ..Default::default()
+                };
+                state
+                    .messages
+                    .entry(run_id.clone())
+                    .or_default()
+                    .push(message.clone());
+                append_event(&root, state, &run_id, &now, "message", message_payload(&message));
+            }
         })
     }
 
@@ -336,7 +386,7 @@ impl Db {
     }
 
     // ------------------------------------------------------------------
-    // Memories
+    // Memories (one Markdown file per fact)
     // ------------------------------------------------------------------
 
     pub fn list_memories(&self) -> Vec<Memory> {
@@ -363,28 +413,30 @@ impl Db {
                 created_at: now.clone(),
                 updated_at: now,
             };
+            let path = memory_file_path(&self.root, &memory);
+            write_text_atomic(&path, &render_memory(&memory))?;
             state.next_memory_id += 1;
+            state.memory_files.insert(memory.id, path);
             state.memories.push(memory.clone());
-            persist_memories(&self.root, &state.memories);
             Ok(memory)
         })
     }
 
     pub fn update_memory(&self, id: i64, content: &str) -> Option<Memory> {
         self.with_shared_mutation(|state| {
-            let updated = state
-                .memories
-                .iter_mut()
-                .find(|memory| memory.id == id)
-                .map(|memory| {
-                    memory.content = content.to_string();
-                    memory.updated_at = now_iso();
-                    memory.clone()
-                });
-            if updated.is_some() {
-                persist_memories(&self.root, &state.memories);
+            let memory = state.memories.iter_mut().find(|memory| memory.id == id)?;
+            memory.content = content.to_string();
+            memory.updated_at = now_iso();
+            let updated = memory.clone();
+            let path = state
+                .memory_files
+                .entry(id)
+                .or_insert_with(|| memory_file_path(&self.root, &updated))
+                .clone();
+            if let Err(err) = write_text_atomic(&path, &render_memory(&updated)) {
+                tracing::error!("[Database] Failed to write {}: {err}", path.display());
             }
-            updated
+            Some(updated)
         })
     }
 
@@ -392,21 +444,19 @@ impl Db {
         self.with_shared_mutation(|state| {
             let before = state.memories.len();
             state.memories.retain(|memory| memory.id != id);
-            if state.memories.len() != before {
-                persist_memories(&self.root, &state.memories);
-                true
-            } else {
-                false
+            if let Some(path) = state.memory_files.remove(&id) {
+                let _ = std::fs::remove_file(path);
             }
+            state.memories.len() != before
         })
     }
 
     pub fn clear_memories(&self) {
         self.with_shared_mutation(|state| {
-            if !state.memories.is_empty() {
-                state.memories.clear();
-                persist_memories(&self.root, &state.memories);
+            for (_, path) in state.memory_files.drain() {
+                let _ = std::fs::remove_file(path);
             }
+            state.memories.clear();
         })
     }
 
@@ -495,46 +545,68 @@ impl Db {
     // Runs
     // ------------------------------------------------------------------
 
+    /// Starts the run's rollout with a `session_meta` line (or appends a
+    /// `run_update` when the run id is already known).
     pub fn create_run(&self, run: Run) -> Run {
-        let mut state = self.write();
+        let mut guard = self.write();
+        let state = &mut *guard;
+        let kind = if state.runs.contains_key(&run.id) {
+            "run_update"
+        } else {
+            "session_meta"
+        };
         state.runs.insert(run.id.clone(), run.clone());
-        persist_run(&self.root, &run);
+        append_event(&self.root, state, &run.id, &run.created_at, kind, run_payload(&run));
+        append_session_index(&self.root, &run);
         run
     }
 
     pub fn update_run_status(&self, id: &str, status: &str, error_message: Option<&str>) {
-        let mut state = self.write();
-        if let Some(run) = state.runs.get_mut(id) {
+        let mut guard = self.write();
+        let state = &mut *guard;
+        let snapshot = state.runs.get_mut(id).map(|run| {
             run.status = status.to_string();
             run.error_message = error_message.map(str::to_string);
             run.updated_at = now_iso();
             run.last_active_at = Some(now_iso());
-            persist_run(&self.root, run);
+            run.clone()
+        });
+        if let Some(run) = snapshot {
+            append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
+            append_session_index(&self.root, &run);
         }
     }
 
     /// Applies an arbitrary metadata patch to a run (title, model fields,
-    /// status, …) and persists it atomically.
+    /// status, …) and appends the new snapshot as a `run_update` line.
     pub fn patch_run(&self, id: &str, patch: impl FnOnce(&mut Run)) -> Option<Run> {
-        let mut state = self.write();
+        let mut guard = self.write();
+        let state = &mut *guard;
         let updated = state.runs.get_mut(id).map(|run| {
+            let old_title = run.title.clone();
             patch(run);
+            run.updated_at = now_iso();
+            run.last_active_at = Some(now_iso());
+            (run.clone(), old_title != run.title)
+        });
+        let (run, title_changed) = updated?;
+        append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
+        if title_changed {
+            append_session_index(&self.root, &run);
+        }
+        Some(run)
+    }
+
+    pub fn touch_run(&self, id: &str) {
+        let mut guard = self.write();
+        let state = &mut *guard;
+        let snapshot = state.runs.get_mut(id).map(|run| {
             run.updated_at = now_iso();
             run.last_active_at = Some(now_iso());
             run.clone()
         });
-        if let Some(run) = updated.as_ref() {
-            persist_run(&self.root, run);
-        }
-        updated
-    }
-
-    pub fn touch_run(&self, id: &str) {
-        let mut state = self.write();
-        if let Some(run) = state.runs.get_mut(id) {
-            run.updated_at = now_iso();
-            run.last_active_at = Some(now_iso());
-            persist_run(&self.root, run);
+        if let Some(run) = snapshot {
+            append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
         }
     }
 
@@ -559,10 +631,11 @@ impl Db {
         })
     }
 
-    /// Forks a run: clones its metadata, messages (up to and including
-    /// `up_to_message_id`; all of them when `None`) and plan into a brand-new
-    /// independent run titled `<title> (fork)` with fresh ids. Returns `None`
-    /// when the source run or the fork-point message does not exist.
+    /// Forks a run: writes a new rollout holding the source's metadata
+    /// (`session_meta` with `forked_from`), messages (up to and including
+    /// `up_to_message_id`; all of them when `None`) and plan under fresh ids,
+    /// titled `<title> (fork)`. Returns `None` when the source run or the
+    /// fork-point message does not exist.
     pub fn fork_run(&self, source_run_id: &str, up_to_message_id: Option<&str>) -> Option<Run> {
         let source = self.get_run_full(source_run_id)?;
         let messages = self.list_messages(source_run_id);
@@ -594,28 +667,52 @@ impl Db {
         fork.error_message = None;
         fork.created_at = now.clone();
         fork.updated_at = now.clone();
-        fork.last_active_at = Some(now);
-        self.create_run(fork.clone());
+        fork.last_active_at = Some(now.clone());
 
-        for mut message in copied {
+        let mut meta = run_payload(&fork);
+        meta["forked_from"] = json!(source_run_id);
+        if let Some(mid) = up_to_message_id {
+            meta["forked_up_to_message_id"] = json!(mid);
+        }
+        let mut buffer = rollout_line(&now, "session_meta", &meta);
+        for message in copied.iter_mut() {
             message.id = format!("msg-{}", uuid::Uuid::new_v4());
             message.run_id = new_id.clone();
-            self.append_message(message);
+            buffer.push_str(&rollout_line(&now, "message", &message_payload(message)));
         }
-        if let Some(mut plan) = self.get_plan(source_run_id) {
+        let plan = self.get_plan(source_run_id).map(|mut plan| {
             plan.run_id = new_id.clone();
-            self.set_plan(plan);
+            plan
+        });
+        if let Some(plan) = plan.as_ref() {
+            buffer.push_str(&rollout_line(&now, "plan", &plan_payload(plan)));
         }
+
+        let path = new_rollout_path(&self.root, &new_id, &fork.created_at);
+        append_text(&path, &buffer);
+        let mut guard = self.write();
+        let state = &mut *guard;
+        state.rollouts.insert(new_id.clone(), path);
+        state.runs.insert(new_id.clone(), fork.clone());
+        state.messages.insert(new_id.clone(), copied);
+        if let Some(plan) = plan {
+            state.plans.insert(new_id, plan);
+        }
+        append_session_index(&self.root, &fork);
         Some(fork)
     }
 
+    /// Deletes the run's rollout file (usage lines live in it and go too).
     pub fn delete_run(&self, id: &str) -> bool {
-        let mut state = self.write();
+        let mut guard = self.write();
+        let state = &mut *guard;
         let removed = state.runs.remove(id).is_some();
         state.messages.remove(id);
         state.plans.remove(id);
-        if removed {
-            let _ = std::fs::remove_dir_all(self.root.join("sessions").join(id));
+        state.usage.retain(|entry| entry.run_id != id);
+        if let Some(path) = state.rollouts.remove(id) {
+            let _ = std::fs::remove_file(&path);
+            prune_empty_dirs(&path, &self.root.join("sessions"));
         }
         removed
     }
@@ -625,10 +722,24 @@ impl Db {
     // ------------------------------------------------------------------
 
     pub fn append_message(&self, message: RunMessage) {
-        let mut state = self.write();
-        let messages = state.messages.entry(message.run_id.clone()).or_default();
-        messages.push(message.clone());
-        append_jsonl(&self.messages_path(&message.run_id), &message);
+        let mut guard = self.write();
+        let state = &mut *guard;
+        state
+            .messages
+            .entry(message.run_id.clone())
+            .or_default()
+            .push(message.clone());
+        append_event(
+            &self.root,
+            state,
+            &message.run_id,
+            &message.created_at,
+            "message",
+            message_payload(&message),
+        );
+        if message.role == "user" && message.agent_role.is_none() {
+            append_history(&self.root, &message.run_id, &message.content, unix_secs(&message.created_at));
+        }
     }
 
     pub fn list_messages(&self, run_id: &str) -> Vec<RunMessage> {
@@ -639,8 +750,8 @@ impl Db {
             .unwrap_or_default()
     }
 
-    /// Updates a message in the in-memory index, then rewrites
-    /// `messages.jsonl` cleanly (tmp + rename).
+    /// Updates a message in the in-memory index and appends a
+    /// `message_update` line carrying the replacement message.
     pub fn update_message(
         &self,
         run_id: &str,
@@ -661,26 +772,30 @@ impl Db {
         reasoning_content: Option<&str>,
         raw_response: Option<&str>,
     ) -> Option<RunMessage> {
-        let mut state = self.write();
-        let messages = state.messages.get_mut(run_id)?;
-        let updated = messages
+        let mut guard = self.write();
+        let state = &mut *guard;
+        let message = state
+            .messages
+            .get_mut(run_id)?
             .iter_mut()
-            .find(|message| message.id == message_id)
-            .map(|message| {
-                message.content = content.to_string();
-                if let Some(reasoning) = reasoning_content {
-                    message.reasoning_content = Some(reasoning.to_string());
-                }
-                if let Some(raw) = raw_response {
-                    message.raw_response = Some(raw.to_string());
-                }
-                message.clone()
-            });
-        if let Some(updated) = updated.as_ref() {
-            rewrite_jsonl(&self.messages_path(run_id), messages);
-            let _ = updated;
+            .find(|message| message.id == message_id)?;
+        message.content = content.to_string();
+        if let Some(reasoning) = reasoning_content {
+            message.reasoning_content = Some(reasoning.to_string());
         }
-        updated
+        if let Some(raw) = raw_response {
+            message.raw_response = Some(raw.to_string());
+        }
+        let updated = message.clone();
+        append_event(
+            &self.root,
+            state,
+            run_id,
+            &updated.created_at,
+            "message_update",
+            message_payload(&updated),
+        );
+        Some(updated)
     }
 
     // ------------------------------------------------------------------
@@ -692,35 +807,39 @@ impl Db {
     }
 
     pub fn set_plan(&self, plan: Plan) {
-        let mut state = self.write();
+        let mut guard = self.write();
+        let state = &mut *guard;
         state.plans.insert(plan.run_id.clone(), plan.clone());
-        persist_plan(&self.root, &plan);
+        append_event(&self.root, state, &plan.run_id, &plan.created_at, "plan", plan_payload(&plan));
     }
 
     // ------------------------------------------------------------------
-    // Usage logs
+    // Usage logs (`usage` lines of the run's rollout)
     // ------------------------------------------------------------------
 
     pub fn append_usage(&self, mut entry: UsageLogEntry) -> UsageLogEntry {
         self.with_shared_mutation(|state| {
             if entry.id == 0 {
-                entry.id = state.next_usage_id;
-                state.next_usage_id += 1;
+                entry.id = allocate_usage_id(&self.root, state);
             }
             state.usage.push(entry.clone());
-            append_jsonl(&self.usage_logs_path(), &entry);
+            let payload = serde_json::to_value(&entry).unwrap_or(Value::Null);
+            append_event(&self.root, state, &entry.run_id, &entry.created_at, "usage", payload);
             entry
         })
     }
 
-    /// Re-reads `sessions/` from disk so runs created by another process
-    /// (the desktop backend or a second `lcgn`) become visible.
+    /// Re-reads every rollout from disk so runs created or changed by another
+    /// process (the desktop app or a second `lcgn`) become visible.
     pub fn refresh_runs(&self) {
         let mut state = self.write();
         state.runs.clear();
         state.messages.clear();
         state.plans.clear();
-        load_sessions_from_disk(&self.root, &mut state);
+        state.usage.clear();
+        state.rollouts.clear();
+        load_rollouts(&self.root, &mut state);
+        state.next_usage_id = next_usage_id_from(&self.root, &state.usage);
     }
 
     pub fn list_usage(&self, run_id: Option<&str>) -> Vec<UsageLogEntry> {
@@ -744,53 +863,103 @@ impl Db {
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, StorageState> {
         self.state.write().expect("storage lock poisoned")
     }
-
-    fn sessions_dir(&self) -> PathBuf {
-        self.root.join("sessions")
-    }
-
-    fn run_dir(&self, run_id: &str) -> PathBuf {
-        self.sessions_dir().join(run_id)
-    }
-
-    fn messages_path(&self, run_id: &str) -> PathBuf {
-        self.run_dir(run_id).join("messages.jsonl")
-    }
-
-    fn usage_logs_path(&self) -> PathBuf {
-        self.root.join("usage_logs.jsonl")
-    }
 }
 
 // ----------------------------------------------------------------------
-// Persistence primitives
+// Rollout files
 // ----------------------------------------------------------------------
 
-/// Atomic JSON write: serialize to a `.tmp` sibling, then rename over the
-/// destination so readers never observe a half-written file.
-fn write_json_atomic(path: &Path, value: &impl Serialize) {
-    if let Err(err) = (|| -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(value)
-            .map_err(std::io::Error::other)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })() {
-        tracing::error!("[Database] Failed to persist {}: {err}", path.display());
-    }
+fn run_payload(run: &Run) -> Value {
+    serde_json::to_value(run).unwrap_or(Value::Null)
 }
 
-/// Append one JSON line and flush immediately.
-fn append_jsonl(path: &Path, value: &impl Serialize) {
+fn message_payload(message: &RunMessage) -> Value {
+    serde_json::to_value(message).unwrap_or(Value::Null)
+}
+
+fn plan_payload(plan: &Plan) -> Value {
+    serde_json::to_value(plan).unwrap_or(Value::Null)
+}
+
+/// One serialized rollout line, newline-terminated.
+fn rollout_line(timestamp: &str, kind: &str, payload: &Value) -> String {
+    let mut line = json!({ "timestamp": timestamp, "type": kind, "payload": payload }).to_string();
+    line.push('\n');
+    line
+}
+
+fn safe_file_part(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+fn parse_time(iso: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(iso)
+        .map(|time| time.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn unix_secs(iso: &str) -> u64 {
+    parse_time(iso).timestamp().max(0) as u64
+}
+
+/// `sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<run_id>.jsonl`.
+fn new_rollout_path(root: &Path, run_id: &str, created_at: &str) -> PathBuf {
+    let time = parse_time(created_at);
+    root.join("sessions")
+        .join(time.format("%Y").to_string())
+        .join(time.format("%m").to_string())
+        .join(time.format("%d").to_string())
+        .join(format!(
+            "rollout-{}-{}.jsonl",
+            time.format("%Y-%m-%dT%H-%M-%S"),
+            safe_file_part(run_id)
+        ))
+}
+
+/// Appends one event to the run's rollout, creating the file (date-sharded
+/// by `created_hint`) on first write.
+fn append_event(
+    root: &Path,
+    state: &mut StorageState,
+    run_id: &str,
+    created_hint: &str,
+    kind: &str,
+    payload: Value,
+) {
+    let path = state
+        .rollouts
+        .entry(run_id.to_string())
+        .or_insert_with(|| new_rollout_path(root, run_id, created_hint))
+        .clone();
+    append_text(&path, &rollout_line(&now_iso(), kind, &payload));
+}
+
+/// Appends text to a file (creating it and its directories) and flushes. If
+/// the file ends in a truncated line, a newline is written first so the new
+/// line is not glued onto the corrupt one.
+fn append_text(path: &Path, text: &str) {
     if let Err(err) = (|| -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
-        line.push('\n');
-        file.write_all(line.as_bytes())?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(path)?;
+        let mut buffer = String::new();
+        if file.metadata()?.len() > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0u8; 1];
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                buffer.push('\n');
+            }
+        }
+        buffer.push_str(text);
+        file.write_all(buffer.as_bytes())?;
         file.flush()?;
         Ok(())
     })() {
@@ -798,25 +967,318 @@ fn append_jsonl(path: &Path, value: &impl Serialize) {
     }
 }
 
-/// Rewrite a JSONL file atomically from the in-memory list (used when a line
-/// is updated in place).
-fn rewrite_jsonl<T: Serialize>(path: &Path, items: &[T]) {
+/// Removes now-empty date directories above a deleted rollout, stopping at
+/// (and keeping) `stop`.
+fn prune_empty_dirs(file: &Path, stop: &Path) {
+    let mut dir = file.parent();
+    while let Some(current) = dir {
+        if current == stop || !current.starts_with(stop) || std::fs::remove_dir(current).is_err() {
+            break;
+        }
+        dir = current.parent();
+    }
+}
+
+fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            collect_rollouts(&path, out);
+        } else {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                out.push(path);
+            }
+        }
+    }
+}
+
+/// Replaces `items[id]` or pushes when absent.
+fn upsert_message(messages: &mut Vec<RunMessage>, message: RunMessage) {
+    match messages.iter().rposition(|existing| existing.id == message.id) {
+        Some(index) => messages[index] = message,
+        None => messages.push(message),
+    }
+}
+
+/// Replays one rollout file into `state` (last write wins). Unparseable
+/// lines, including a truncated last line, are skipped.
+fn replay_rollout(path: &Path, state: &mut StorageState) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let raw = String::from_utf8_lossy(&bytes);
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(RolloutLine { kind, payload }) = serde_json::from_str::<RolloutLine>(line) else {
+            continue;
+        };
+        match kind.as_str() {
+            "session_meta" | "run_update" => {
+                if let Ok(run) = serde_json::from_value::<Run>(payload) {
+                    if !run.id.is_empty() {
+                        state.rollouts.insert(run.id.clone(), path.to_path_buf());
+                        state.runs.insert(run.id.clone(), run);
+                    }
+                }
+            }
+            "message" | "message_update" => {
+                if let Ok(message) = serde_json::from_value::<RunMessage>(payload) {
+                    state
+                        .rollouts
+                        .entry(message.run_id.clone())
+                        .or_insert_with(|| path.to_path_buf());
+                    upsert_message(state.messages.entry(message.run_id.clone()).or_default(), message);
+                }
+            }
+            "plan" => {
+                if let Ok(plan) = serde_json::from_value::<Plan>(payload) {
+                    state
+                        .rollouts
+                        .entry(plan.run_id.clone())
+                        .or_insert_with(|| path.to_path_buf());
+                    state.plans.insert(plan.run_id.clone(), plan);
+                }
+            }
+            "usage" => {
+                if let Ok(entry) = serde_json::from_value::<UsageLogEntry>(payload) {
+                    state
+                        .rollouts
+                        .entry(entry.run_id.clone())
+                        .or_insert_with(|| path.to_path_buf());
+                    state.usage.push(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Scans `sessions/` and replays every rollout into `state`.
+fn load_rollouts(root: &Path, state: &mut StorageState) {
+    let mut paths = Vec::new();
+    collect_rollouts(&root.join("sessions"), &mut paths);
+    paths.sort();
+    for path in paths {
+        replay_rollout(&path, state);
+    }
+    state.usage.sort_by_key(|entry| entry.id);
+}
+
+// ----------------------------------------------------------------------
+// Index files
+// ----------------------------------------------------------------------
+
+/// `session_index.jsonl`: append-only `{id, title, updated_at}`; the last
+/// line per id wins.
+fn append_session_index(root: &Path, run: &Run) {
+    let mut line = json!({
+        "id": run.id,
+        "title": run.title,
+        "updated_at": run.updated_at,
+    })
+    .to_string();
+    line.push('\n');
+    append_text(&root.join(SESSION_INDEX_FILE), &line);
+}
+
+/// `history.jsonl`: append-only `{session_id, ts, text}`, one per user prompt.
+fn append_history(root: &Path, session_id: &str, text: &str, ts: u64) {
+    let mut line = json!({ "session_id": session_id, "ts": ts, "text": text }).to_string();
+    line.push('\n');
+    append_text(&root.join(HISTORY_FILE), &line);
+}
+
+/// Next usage id: above everything in memory and in the cross-process
+/// counter file `.usage_seq` (usage lines live in separate rollouts, so the
+/// counter is what keeps ids unique between processes).
+fn allocate_usage_id(root: &Path, state: &mut StorageState) -> i64 {
+    let on_disk = std::fs::read_to_string(root.join(USAGE_SEQ_FILE))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    let id = on_disk.max(state.next_usage_id - 1).max(0) + 1;
+    if let Err(err) = std::fs::write(root.join(USAGE_SEQ_FILE), id.to_string()) {
+        tracing::error!("[Database] Failed to write {USAGE_SEQ_FILE}: {err}");
+    }
+    state.next_usage_id = id + 1;
+    id
+}
+
+fn next_usage_id_from(root: &Path, usage: &[UsageLogEntry]) -> i64 {
+    let on_disk = std::fs::read_to_string(root.join(USAGE_SEQ_FILE))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    usage.iter().map(|entry| entry.id).max().unwrap_or(0).max(on_disk) + 1
+}
+
+// ----------------------------------------------------------------------
+// Memories as Markdown
+// ----------------------------------------------------------------------
+
+/// Directory name for a project path: every non-alphanumeric char becomes `-`.
+fn sanitize_project_path(path: &str) -> String {
+    let name: String = path
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .take(120)
+        .collect();
+    if name.is_empty() { "project".to_string() } else { name }
+}
+
+fn memory_dir(root: &Path, memory: &Memory) -> PathBuf {
+    if memory.project_path.is_empty() {
+        root.join("memories")
+    } else {
+        root.join("projects")
+            .join(sanitize_project_path(&memory.project_path))
+            .join("memories")
+    }
+}
+
+/// `<first words of the fact>-<id>.md`.
+fn memory_file_path(root: &Path, memory: &Memory) -> PathBuf {
+    let words: Vec<String> = memory
+        .content
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(6)
+        .map(|word| word.to_lowercase())
+        .collect();
+    let mut slug: String = words.join("-").chars().take(40).collect();
+    if slug.is_empty() {
+        slug = "memory".to_string();
+    }
+    memory_dir(root, memory).join(format!("{slug}-{}.md", memory.id))
+}
+
+/// YAML frontmatter (string values JSON-quoted, which is valid YAML and
+/// needs no further escaping) followed by the verbatim body.
+fn render_memory(memory: &Memory) -> String {
+    let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    let mut text = String::from("---\n");
+    text.push_str(&format!("id: {}\n", memory.id));
+    text.push_str(&format!("category: {}\n", quote(&memory.category)));
+    text.push_str(&format!("scope: {}\n", quote(&memory.scope)));
+    if !memory.project_path.is_empty() {
+        text.push_str(&format!("project_path: {}\n", quote(&memory.project_path)));
+    }
+    text.push_str(&format!("created_at: {}\n", quote(&memory.created_at)));
+    text.push_str(&format!("updated_at: {}\n", quote(&memory.updated_at)));
+    text.push_str("---\n");
+    text.push_str(&memory.content);
+    text
+}
+
+fn parse_frontmatter_value(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('"') {
+        if let Ok(value) = serde_json::from_str::<String>(raw) {
+            return value;
+        }
+    }
+    raw.trim_matches('\'').to_string()
+}
+
+fn parse_memory(raw: &str) -> Option<Memory> {
+    let rest = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))?;
+    let mut memory = Memory::default();
+    let mut has_id = false;
+    let mut offset = 0;
+    let mut body = None;
+    for line in rest.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim_end() == "---" {
+            body = Some(&rest[offset..]);
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = parse_frontmatter_value(value);
+        match key.trim() {
+            "id" => {
+                memory.id = value.parse().ok()?;
+                has_id = true;
+            }
+            "category" => memory.category = value,
+            "scope" => memory.scope = value,
+            "project_path" => memory.project_path = value,
+            "created_at" => memory.created_at = value,
+            "updated_at" => memory.updated_at = value,
+            _ => {}
+        }
+    }
+    if !has_id {
+        return None;
+    }
+    memory.content = body?.to_string();
+    if memory.scope.is_empty() {
+        memory.scope = if memory.project_path.is_empty() { "global" } else { "project" }.to_string();
+    }
+    Some(memory)
+}
+
+/// Reads every memory `.md` (global and per-project) with its file path.
+fn load_memories(root: &Path) -> Vec<(Memory, PathBuf)> {
+    let mut dirs = vec![root.join("memories")];
+    if let Ok(entries) = std::fs::read_dir(root.join("projects")) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                dirs.push(entry.path().join("memories"));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(memory) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| parse_memory(&raw))
+            {
+                found.push((memory, path));
+            }
+        }
+    }
+    found.sort_by_key(|(memory, _)| memory.id);
+    found
+}
+
+// ----------------------------------------------------------------------
+// JSON primitives
+// ----------------------------------------------------------------------
+
+/// Atomic text write: write a `.tmp` sibling, then rename over the target.
+fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Atomic JSON write so readers never observe a half-written file.
+fn write_json_atomic(path: &Path, value: &impl Serialize) {
     if let Err(err) = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("jsonl.tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        for item in items {
-            let mut line = serde_json::to_string(item).map_err(std::io::Error::other)?;
-            line.push('\n');
-            file.write_all(line.as_bytes())?;
-        }
-        file.flush()?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        let json = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+        write_text_atomic(path, &json)
     })() {
-        tracing::error!("[Database] Failed to rewrite {}: {err}", path.display());
+        tracing::error!("[Database] Failed to persist {}: {err}", path.display());
     }
 }
 
@@ -826,28 +1288,6 @@ fn persist_projects(root: &Path, projects: &[Project]) {
 
 fn persist_permissions(root: &Path, permissions: &[PermissionRule]) {
     write_json_atomic(&root.join("permissions.json"), &permissions);
-}
-
-fn persist_memories(root: &Path, memories: &[Memory]) {
-    write_json_atomic(&root.join("memory.json"), &memories);
-}
-
-fn persist_run(root: &Path, run: &Run) {
-    let dir = root.join("sessions").join(&run.id);
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        tracing::error!("[Database] Failed to create {}: {err}", dir.display());
-        return;
-    }
-    write_json_atomic(&dir.join("run.json"), run);
-}
-
-fn persist_plan(root: &Path, plan: &Plan) {
-    let dir = root.join("sessions").join(&plan.run_id);
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        tracing::error!("[Database] Failed to create {}: {err}", dir.display());
-        return;
-    }
-    write_json_atomic(&dir.join("plan.json"), plan);
 }
 
 // ----------------------------------------------------------------------
@@ -862,9 +1302,10 @@ fn read_json_or<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
 }
 
 fn read_jsonl_or<T: for<'de> Deserialize<'de>>(path: &Path) -> Vec<T> {
-    std::fs::read_to_string(path)
-        .map(|raw| {
-            raw.lines()
+    std::fs::read(path)
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
                 .filter(|line| !line.trim().is_empty())
                 .filter_map(|line| serde_json::from_str(line).ok())
                 .collect()
@@ -873,14 +1314,26 @@ fn read_jsonl_or<T: for<'de> Deserialize<'de>>(path: &Path) -> Vec<T> {
 }
 
 fn load_state(root: &Path) -> anyhow::Result<StorageState> {
-    let mut state = StorageState {
-        projects: read_json_or::<Vec<Project>>(&root.join("projects.json")),
-        permissions: read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json")),
-        memories: read_json_or::<Vec<Memory>>(&root.join("memory.json")),
-        usage: read_jsonl_or::<UsageLogEntry>(&root.join("usage_logs.jsonl")),
-        ..Default::default()
-    };
+    let mut state = StorageState::default();
+    reload_shared_files(root, &mut state);
+    load_rollouts(root, &mut state);
+    state.next_usage_id = next_usage_id_from(root, &state.usage);
+    Ok(state)
+}
 
+/// Re-reads the cross-process-shared files (`projects.json`,
+/// `permissions.json`, memory Markdown) into `state`. Used at startup and by
+/// `with_shared_mutation` under the advisory lock, so a mutation always
+/// applies on top of the latest on-disk state written by another process.
+fn reload_shared_files(root: &Path, state: &mut StorageState) {
+    state.projects = read_json_or::<Vec<Project>>(&root.join("projects.json"));
+    state.permissions = read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json"));
+    let memories = load_memories(root);
+    state.memory_files = memories
+        .iter()
+        .map(|(memory, path)| (memory.id, path.clone()))
+        .collect();
+    state.memories = memories.into_iter().map(|(memory, _)| memory).collect();
     state.next_permission_id = state
         .permissions
         .iter()
@@ -889,37 +1342,16 @@ fn load_state(root: &Path) -> anyhow::Result<StorageState> {
         .unwrap_or(0)
         + 1;
     state.next_memory_id = state.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
-    state.next_usage_id = state.usage.iter().map(|u| u.id).max().unwrap_or(0) + 1;
-
-    load_sessions_from_disk(root, &mut state);
-
-    Ok(state)
 }
 
-/// Scans `sessions/` into `state`, replacing whatever was loaded before
-/// (used at startup and by `refresh_runs`).
-fn load_sessions_from_disk(root: &Path, state: &mut StorageState) {
-    let sessions_dir = root.join("sessions");
-    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let run_id = entry.file_name().to_string_lossy().to_string();
-            let run: Run = read_json_or(&entry.path().join("run.json"));
-            if !run.id.is_empty() {
-                state.runs.insert(run.id.clone(), run);
-            }
-            // Messages and plans load even without run.json so orphaned
-            // session folders keep their content.
-            state
-                .messages
-                .insert(run_id.clone(), read_jsonl_or::<RunMessage>(&entry.path().join("messages.jsonl")));
-            if let Some(plan) = load_optional_plan(&entry.path().join("plan.json")) {
-                state.plans.insert(run_id.clone(), plan);
-            }
-        }
-    }
+// ----------------------------------------------------------------------
+// Legacy import
+// ----------------------------------------------------------------------
+
+/// The legacy data dir to import from, only when `root` is the default
+/// Locagens home (so custom roots and tests never read the real app data).
+fn default_legacy_dir_for(root: &Path) -> Option<PathBuf> {
+    (root == crate::paths::locagens_home()).then(|| crate::paths::app_support_dir().join("data"))
 }
 
 fn load_optional_plan(path: &Path) -> Option<Plan> {
@@ -927,28 +1359,125 @@ fn load_optional_plan(path: &Path) -> Option<Plan> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Re-reads the cross-process-shared files from disk into `state` (used by
-/// `with_shared_mutation`, under the advisory lock, so a mutation always
-/// applies on top of the latest on-disk state written by another process).
-fn reload_shared_files(root: &Path, state: &mut StorageState) {
-    state.projects = read_json_or::<Vec<Project>>(&root.join("projects.json"));
-    state.permissions = read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json"));
-    state.memories = read_json_or::<Vec<Memory>>(&root.join("memory.json"));
-    state.usage = read_jsonl_or::<UsageLogEntry>(&root.join("usage_logs.jsonl"));
-    state.next_permission_id = state
-        .permissions
-        .iter()
-        .map(|rule| rule.id)
-        .max()
-        .unwrap_or(0)
-        + 1;
-    state.next_memory_id = state.memories.iter().map(|m| m.id).max().unwrap_or(0) + 1;
-    state.next_usage_id = state.usage.iter().map(|u| u.id).max().unwrap_or(0) + 1;
+/// One-time import of the legacy layout (`projects.json`, `permissions.json`,
+/// `memory.json`, `usage_logs.jsonl`, `sessions/<id>/{run.json,messages.jsonl,
+/// plan.json}`) into rollouts, Markdown memories and the index files. The
+/// legacy directory is only read. `<root>/.migrated-from-data-v1` is written
+/// last, so an interrupted import is retried (existing files are not
+/// overwritten). Usage lines of runs that no longer exist are dropped.
+fn migrate_legacy_data(legacy: &Path, root: &Path) -> anyhow::Result<()> {
+    let marker = root.join(MIGRATION_MARKER);
+    if marker.exists() || !legacy.is_dir() {
+        return Ok(());
+    }
+    let _lock = lock_root(root);
+    if marker.exists() {
+        return Ok(());
+    }
+
+    for name in ["projects.json", "permissions.json"] {
+        let (from, to) = (legacy.join(name), root.join(name));
+        if from.is_file() && !to.exists() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+
+    let mut usage_by_run: HashMap<String, Vec<UsageLogEntry>> = HashMap::new();
+    let mut max_usage_id = 0;
+    for entry in read_jsonl_or::<UsageLogEntry>(&legacy.join("usage_logs.jsonl")) {
+        max_usage_id = max_usage_id.max(entry.id);
+        usage_by_run.entry(entry.run_id.clone()).or_default().push(entry);
+    }
+
+    let mut history: Vec<(u64, String, String)> = Vec::new();
+    let mut index_lines = String::new();
+    if let Ok(entries) = std::fs::read_dir(legacy.join("sessions")) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir = entry.path();
+            let dir_id = entry.file_name().to_string_lossy().to_string();
+            let mut run: Run = read_json_or(&dir.join("run.json"));
+            let messages = read_jsonl_or::<RunMessage>(&dir.join("messages.jsonl"));
+            let plan = load_optional_plan(&dir.join("plan.json"));
+            let has_run = !run.id.is_empty();
+            if !has_run && messages.is_empty() && plan.is_none() {
+                continue;
+            }
+            if !has_run {
+                run.id = dir_id;
+            }
+            let created = if !run.created_at.is_empty() {
+                run.created_at.clone()
+            } else {
+                messages.first().map(|m| m.created_at.clone()).unwrap_or_else(now_iso)
+            };
+            let path = new_rollout_path(root, &run.id, &created);
+            if path.exists() {
+                continue;
+            }
+
+            let mut buffer = String::new();
+            if has_run {
+                buffer.push_str(&rollout_line(&created, "session_meta", &run_payload(&run)));
+            }
+            for message in &messages {
+                buffer.push_str(&rollout_line(&message.created_at, "message", &message_payload(message)));
+                if message.role == "user" && message.agent_role.is_none() {
+                    history.push((unix_secs(&message.created_at), run.id.clone(), message.content.clone()));
+                }
+            }
+            if let Some(plan) = plan.as_ref() {
+                buffer.push_str(&rollout_line(&plan.updated_at, "plan", &plan_payload(plan)));
+            }
+            for usage in usage_by_run.remove(&run.id).unwrap_or_default() {
+                let payload = serde_json::to_value(&usage).unwrap_or(Value::Null);
+                buffer.push_str(&rollout_line(&usage.created_at, "usage", &payload));
+            }
+            write_text_atomic(&path, &buffer)?;
+            if has_run {
+                index_lines.push_str(
+                    &json!({ "id": run.id, "title": run.title, "updated_at": run.updated_at }).to_string(),
+                );
+                index_lines.push('\n');
+            }
+        }
+    }
+    if !index_lines.is_empty() {
+        append_text(&root.join(SESSION_INDEX_FILE), &index_lines);
+    }
+    if !history.is_empty() && !root.join(HISTORY_FILE).exists() {
+        history.sort_by_key(|(ts, _, _)| *ts);
+        let mut buffer = String::new();
+        for (ts, session_id, text) in history {
+            buffer.push_str(&json!({ "session_id": session_id, "ts": ts, "text": text }).to_string());
+            buffer.push('\n');
+        }
+        append_text(&root.join(HISTORY_FILE), &buffer);
+    }
+
+    let mut taken: HashSet<i64> = HashSet::new();
+    for memory in read_json_or::<Vec<Memory>>(&legacy.join("memory.json")) {
+        if !taken.insert(memory.id) {
+            continue;
+        }
+        let path = memory_file_path(root, &memory);
+        if !path.exists() {
+            write_text_atomic(&path, &render_memory(&memory))?;
+        }
+    }
+
+    if max_usage_id > 0 {
+        std::fs::write(root.join(USAGE_SEQ_FILE), max_usage_id.to_string())?;
+    }
+    std::fs::write(&marker, format!("{}\nimported from {}\n", now_iso(), legacy.display()))?;
+    Ok(())
 }
 
-/// Resolve the storage data root: `LOCAGENS_DATA_DIR`, else the
-/// `LOCAGENS_DB_PATH` parent joined with its file stem, else
-/// `<app_support_dir>/data`.
+/// Resolve the store root: `LOCAGENS_DATA_DIR`, else the `LOCAGENS_DB_PATH`
+/// parent joined with its file stem, else the Locagens home
+/// (`$LOCAGENS_HOME` or `~/.locagens`).
 pub fn resolve_data_root() -> PathBuf {
     if let Ok(dir) = std::env::var("LOCAGENS_DATA_DIR") {
         if !dir.is_empty() {
@@ -966,7 +1495,7 @@ pub fn resolve_data_root() -> PathBuf {
             return parent.join(stem);
         }
     }
-    crate::paths::app_support_dir().join("data")
+    crate::paths::locagens_home()
 }
 
 #[cfg(test)]
@@ -981,6 +1510,53 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn rollouts_in(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        collect_rollouts(&root.join("sessions"), &mut out);
+        out.sort();
+        out
+    }
+
+    fn lines_of(path: &Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn kinds_of(path: &Path) -> Vec<String> {
+        lines_of(path)
+            .iter()
+            .map(|line| line["type"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn sample_run(id: &str) -> Run {
+        Run {
+            id: id.into(),
+            title: "Test".into(),
+            task: "do things".into(),
+            status: "done".into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            created_at: "2026-03-07T10:20:30.000Z".into(),
+            updated_at: "2026-03-07T10:20:30.000Z".into(),
+            ..Default::default()
+        }
+    }
+
+    fn msg(run: &str, id: &str, role: &str, content: &str) -> RunMessage {
+        RunMessage {
+            id: id.into(),
+            run_id: run.into(),
+            role: role.into(),
+            content: content.into(),
+            created_at: now_iso(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1035,15 +1611,8 @@ mod tests {
         let root = temp_root("stuck");
         let db = Db::open(&root).unwrap();
         db.create_run(Run {
-            id: "run-1".into(),
-            title: "Test".into(),
             status: "generating".into(),
-            provider_id: "opencode-go".into(),
-            provider_display_name: "OpenCode".into(),
-            model: "glm-5.3-flash".into(),
-            created_at: now_iso(),
-            updated_at: now_iso(),
-            ..Default::default()
+            ..sample_run("run-1")
         });
         drop(db);
 
@@ -1058,39 +1627,106 @@ mod tests {
         let messages = db2.list_messages("run-1");
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "system");
+
+        // The failure is appended, not rewritten, and survives a reopen.
+        let files = rollouts_in(&root);
+        assert_eq!(kinds_of(&files[0]), ["session_meta", "run_update", "message"]);
+        drop(db2);
+        let db3 = Db::open(&root).unwrap();
+        assert_eq!(db3.get_run_full("run-1").unwrap().status, "failed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn messages_append_update_and_usage() {
-        let root = temp_root("messages");
+    fn rollout_round_trip_layout_and_history() {
+        let root = temp_root("roundtrip");
         let db = Db::open(&root).unwrap();
-        let message = RunMessage {
-            id: "m1".into(),
-            run_id: "run-x".into(),
-            role: "assistant".into(),
-            content: "first".into(),
-            created_at: now_iso(),
-            ..Default::default()
-        };
-        db.append_message(message.clone());
+        db.create_run(sample_run("run-a"));
+        db.append_message(msg("run-a", "m1", "user", "hello there"));
         db.append_message(RunMessage {
-            id: "m2".into(),
-            run_id: "run-x".into(),
-            role: "user".into(),
-            content: "second".into(),
-            created_at: now_iso(),
+            agent_role: Some("explorer".into()),
+            ..msg("run-a", "m2", "user", "sub-agent prompt")
+        });
+        db.append_message(msg("run-a", "m3", "assistant", "hi"));
+        db.set_plan(Plan {
+            id: "plan-1".into(),
+            run_id: "run-a".into(),
+            title: "Plan".into(),
+            tasks: json!([{"text": "step"}]),
+            version: 1,
             ..Default::default()
         });
+        db.append_usage(UsageLogEntry {
+            run_id: "run-a".into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            input_tokens: 10,
+            cost: 0.5,
+            ..Default::default()
+        });
+        drop(db);
+
+        // One date-sharded rollout named after the run's creation time.
+        let files = rollouts_in(&root);
+        assert_eq!(files.len(), 1);
+        let rel = files[0].strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        assert_eq!(rel, "sessions/2026/03/07/rollout-2026-03-07T10-20-30-run-a.jsonl");
+        assert_eq!(
+            kinds_of(&files[0]),
+            ["session_meta", "message", "message", "message", "plan", "usage"]
+        );
+        let first = &lines_of(&files[0])[0];
+        assert!(first["timestamp"].is_string());
+        assert_eq!(first["payload"]["id"], "run-a");
+
+        let db2 = Db::open(&root).unwrap();
+        assert_eq!(db2.get_run_full("run-a").unwrap(), sample_run("run-a"));
+        assert_eq!(db2.list_messages("run-a").len(), 3);
+        assert_eq!(db2.get_plan("run-a").unwrap().title, "Plan");
+        assert_eq!(db2.list_usage(Some("run-a")).len(), 1);
+        assert_eq!(db2.list_usage(None)[0].cost, 0.5);
+        assert!(!root.join("usage_logs.jsonl").exists());
+
+        // Index: last line per id wins; history: only the main-agent prompt.
+        let history: Vec<Value> = read_jsonl_or(&root.join(HISTORY_FILE));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["session_id"], "run-a");
+        assert_eq!(history[0]["text"], "hello there");
+        assert!(history[0]["ts"].is_u64());
+        db2.patch_run("run-a", |run| run.title = "Renamed".into());
+        let index: Vec<Value> = read_jsonl_or(&root.join(SESSION_INDEX_FILE));
+        assert_eq!(index.first().unwrap()["title"], "Test");
+        assert_eq!(index.last().unwrap()["id"], "run-a");
+        assert_eq!(index.last().unwrap()["title"], "Renamed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn updates_are_appended_and_replayed_last_write_wins() {
+        let root = temp_root("messages");
+        let db = Db::open(&root).unwrap();
+        db.append_message(msg("run-x", "m1", "assistant", "first"));
+        db.append_message(msg("run-x", "m2", "user", "second"));
         let updated = db.update_message("run-x", "m1", "rewritten", Some("thinking"));
         assert_eq!(updated.unwrap().content, "rewritten");
+        db.update_message_full("run-x", "m1", "rewritten again", None, Some("[]"));
+
+        let files = rollouts_in(&root);
+        assert_eq!(
+            kinds_of(&files[0]),
+            ["message", "message", "message_update", "message_update"],
+            "updates append lines instead of rewriting"
+        );
+        let original = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(original.lines().next().unwrap().contains("\"first\""));
 
         drop(db);
         let db2 = Db::open(&root).unwrap();
         let messages = db2.list_messages("run-x");
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, "rewritten");
+        assert_eq!(messages[0].content, "rewritten again");
         assert_eq!(messages[0].reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(messages[0].raw_response.as_deref(), Some("[]"));
 
         let entry = db2.append_usage(UsageLogEntry {
             run_id: "run-x".into(),
@@ -1107,42 +1743,46 @@ mod tests {
     }
 
     #[test]
-    fn fork_run_clones_messages_and_plan_independently() {
+    fn run_updates_replay_to_latest_snapshot() {
+        let root = temp_root("runupdates");
+        let db = Db::open(&root).unwrap();
+        db.create_run(sample_run("run-u"));
+        db.update_run_status("run-u", "failed", Some("boom"));
+        db.patch_run("run-u", |run| run.title = "New title".into());
+        drop(db);
+
+        let files = rollouts_in(&root);
+        assert_eq!(kinds_of(&files[0]), ["session_meta", "run_update", "run_update"]);
+        let db2 = Db::open(&root).unwrap();
+        let run = db2.get_run_full("run-u").unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(run.error_message.as_deref(), Some("boom"));
+        assert_eq!(run.title, "New title");
+        assert_eq!(db2.list_runs().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fork_run_writes_new_rollout_with_copied_lines() {
         let root = temp_root("fork");
         let db = Db::open(&root).unwrap();
         let source = db.create_run(Run {
-            id: "run-src".into(),
             title: "Original".into(),
-            task: "do things".into(),
-            status: "done".into(),
-            provider_id: "p".into(),
-            model: "m".into(),
-            created_at: now_iso(),
-            updated_at: now_iso(),
-            ..Default::default()
+            ..sample_run("run-src")
         });
         for (id, role, content) in [
             ("m1", "user", "first"),
             ("m2", "assistant", "answer"),
             ("m3", "user", "second"),
         ] {
-            db.append_message(RunMessage {
-                id: id.into(),
-                run_id: "run-src".into(),
-                role: role.into(),
-                content: content.into(),
-                created_at: now_iso(),
-                ..Default::default()
-            });
+            db.append_message(msg("run-src", id, role, content));
         }
         db.set_plan(Plan {
             id: "plan-1".into(),
             run_id: "run-src".into(),
             title: "Plan".into(),
-            tasks: serde_json::json!([{"text": "step"}]),
+            tasks: json!([{"text": "step"}]),
             version: 1,
-            created_at: now_iso(),
-            updated_at: now_iso(),
             ..Default::default()
         });
 
@@ -1162,23 +1802,18 @@ mod tests {
         assert_eq!(fork_plan.title, "Plan");
         assert_eq!(fork_plan.run_id, fork.id);
 
+        // It is its own rollout file, marked as forked.
+        assert_eq!(rollouts_in(&root).len(), 2);
+        let fork_file = rollouts_in(&root)
+            .into_iter()
+            .find(|path| path.to_string_lossy().contains(&fork.id))
+            .unwrap();
+        assert_eq!(kinds_of(&fork_file), ["session_meta", "message", "message", "plan"]);
+        assert_eq!(lines_of(&fork_file)[0]["payload"]["forked_from"], "run-src");
+
         // Fork is fully independent: mutations on either side don't leak.
-        db.append_message(RunMessage {
-            id: "m4".into(),
-            run_id: "run-src".into(),
-            role: "user".into(),
-            content: "later".into(),
-            created_at: now_iso(),
-            ..Default::default()
-        });
-        db.append_message(RunMessage {
-            id: "mf".into(),
-            run_id: fork.id.clone(),
-            role: "user".into(),
-            content: "fork-only".into(),
-            created_at: now_iso(),
-            ..Default::default()
-        });
+        db.append_message(msg("run-src", "m4", "user", "later"));
+        db.append_message(msg(&fork.id, "mf", "user", "fork-only"));
         assert_eq!(db.list_messages("run-src").len(), 4);
         assert_eq!(db.list_messages(&fork.id).len(), 3);
         assert_eq!(db.get_plan("run-src").unwrap().run_id, "run-src");
@@ -1191,12 +1826,260 @@ mod tests {
         let full = db.fork_run("run-src", None).unwrap();
         assert_eq!(db.list_messages(&full.id).len(), 4);
 
+        // And it all survives a reopen.
+        drop(db);
+        let db2 = Db::open(&root).unwrap();
+        assert_eq!(db2.list_runs().len(), 3);
+        assert_eq!(db2.list_messages(&fork.id).len(), 3);
+        assert_eq!(db2.get_plan(&fork.id).unwrap().run_id, fork.id);
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Two `Db` instances on one data dir (backend server + `lcgn`) must not
-    /// overwrite each other's shared files: mutations re-read the files from
-    /// disk under the advisory lock before applying the change.
+    #[test]
+    fn delete_run_removes_rollout_and_empty_date_dirs() {
+        let root = temp_root("delete");
+        let db = Db::open(&root).unwrap();
+        db.create_run(sample_run("run-d"));
+        db.create_run(sample_run("run-keep"));
+        db.append_message(msg("run-d", "m1", "user", "bye"));
+        db.append_usage(UsageLogEntry {
+            run_id: "run-d".into(),
+            ..Default::default()
+        });
+        db.append_usage(UsageLogEntry {
+            run_id: "run-keep".into(),
+            ..Default::default()
+        });
+        assert_eq!(rollouts_in(&root).len(), 2);
+
+        assert!(db.delete_run("run-d"));
+        assert!(!db.delete_run("run-d"));
+        assert_eq!(rollouts_in(&root).len(), 1);
+        assert!(db.get_run_full("run-d").is_none());
+        assert!(db.list_messages("run-d").is_empty());
+        assert_eq!(db.list_usage(None).len(), 1);
+
+        assert!(db.delete_run("run-keep"));
+        assert!(!root.join("sessions").join("2026").exists(), "empty date dirs pruned");
+        drop(db);
+        let db2 = Db::open(&root).unwrap();
+        assert!(db2.list_runs().is_empty());
+        assert!(db2.list_usage(None).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_or_truncated_last_line_is_skipped_and_appends_recover() {
+        let root = temp_root("corrupt");
+        let db = Db::open(&root).unwrap();
+        db.create_run(sample_run("run-c"));
+        db.append_message(msg("run-c", "m1", "user", "kept"));
+        db.append_message(msg("run-c", "m2", "assistant", "will be cut"));
+        drop(db);
+
+        // Cut the file in the middle of the last line.
+        let file = rollouts_in(&root).remove(0);
+        let raw = std::fs::read(&file).unwrap();
+        std::fs::write(&file, &raw[..raw.len() - 20]).unwrap();
+
+        let db2 = Db::open(&root).unwrap();
+        let messages = db2.list_messages("run-c");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "kept");
+        assert!(db2.get_run_full("run-c").is_some());
+
+        // A new append must not be glued onto the truncated line.
+        db2.append_message(msg("run-c", "m3", "assistant", "after"));
+        drop(db2);
+        let db3 = Db::open(&root).unwrap();
+        let contents: Vec<String> = db3.list_messages("run-c").into_iter().map(|m| m.content).collect();
+        assert_eq!(contents, ["kept", "after"]);
+
+        // Garbage in the middle is skipped too.
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.insert_str(text.find('\n').unwrap() + 1, "not json at all\n");
+        std::fs::write(&file, text).unwrap();
+        let db4 = Db::open(&root).unwrap();
+        assert_eq!(db4.list_messages("run-c").len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memories_are_markdown_files_with_escaped_frontmatter() {
+        let root = temp_root("memmd");
+        let db = Db::open(&root).unwrap();
+        let nasty = "line one\n---\nid: 99\n\"quoted\" # not a comment: yes\r\nünïcode ✓\n\ntrailing  ";
+        let global = db.create_memory("global", "", "we\"ird: cat\negory", nasty).unwrap();
+        let project = db
+            .create_memory("project", "C:\\Users\\me\\proj: x", "reference", "Use cargo nextest")
+            .unwrap();
+
+        let global_files: Vec<_> = std::fs::read_dir(root.join("memories")).unwrap().flatten().collect();
+        assert_eq!(global_files.len(), 1);
+        let text = std::fs::read_to_string(global_files[0].path()).unwrap();
+        assert!(text.starts_with("---\nid: 1\n"));
+        assert!(text.ends_with(nasty), "body is stored verbatim");
+        let project_dir = root.join("projects").join("C--Users-me-proj--x").join("memories");
+        let project_files: Vec<_> = std::fs::read_dir(&project_dir).unwrap().flatten().collect();
+        assert_eq!(project_files.len(), 1);
+        assert!(project_files[0].file_name().to_string_lossy().starts_with("use-cargo-nextest-"));
+        assert!(!root.join("memory.json").exists());
+
+        drop(db);
+        let db2 = Db::open(&root).unwrap();
+        let memories = db2.list_memories();
+        assert_eq!(memories.len(), 2);
+        let g = memories.iter().find(|m| m.id == global.id).unwrap();
+        assert_eq!(g, &global);
+        let p = memories.iter().find(|m| m.id == project.id).unwrap();
+        assert_eq!(p, &project);
+
+        // Updates rewrite the same file; deletes remove it.
+        let edited = db2.update_memory(global.id, "short").unwrap();
+        assert_eq!(edited.category, global.category);
+        assert_eq!(std::fs::read_dir(root.join("memories")).unwrap().count(), 1);
+        assert!(db2.delete_memory(project.id));
+        assert_eq!(std::fs::read_dir(&project_dir).unwrap().count(), 0);
+        drop(db2);
+        let db3 = Db::open(&root).unwrap();
+        assert_eq!(db3.list_memories().len(), 1);
+        assert_eq!(db3.list_memories()[0].content, "short");
+        assert_eq!(db3.create_memory("global", "", "c", "next").unwrap().id, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_data_is_imported_once_and_left_untouched() {
+        let legacy = temp_root("legacy-src");
+        let root = temp_root("legacy-dst");
+
+        // Build a legacy `data/` tree by hand.
+        let run = sample_run("run-old");
+        let dir = legacy.join("sessions").join("run-old");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.json"), serde_json::to_string_pretty(&run).unwrap()).unwrap();
+        let m1 = RunMessage {
+            created_at: "2026-03-07T10:21:00.000Z".into(),
+            ..msg("run-old", "m1", "user", "old prompt")
+        };
+        let m2 = RunMessage {
+            created_at: "2026-03-07T10:22:00.000Z".into(),
+            ..msg("run-old", "m2", "assistant", "old answer")
+        };
+        let jsonl = [&m1, &m2]
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("messages.jsonl"), format!("{jsonl}\n")).unwrap();
+        let plan = Plan {
+            id: "plan-old".into(),
+            run_id: "run-old".into(),
+            title: "Old plan".into(),
+            tasks: json!([]),
+            version: 1,
+            ..Default::default()
+        };
+        std::fs::write(dir.join("plan.json"), serde_json::to_string(&plan).unwrap()).unwrap();
+        let usage = |id: i64, run_id: &str| UsageLogEntry {
+            id,
+            run_id: run_id.into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            input_tokens: 7,
+            ..Default::default()
+        };
+        std::fs::write(
+            legacy.join("usage_logs.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::to_string(&usage(1, "run-old")).unwrap(),
+                serde_json::to_string(&usage(2, "run-gone")).unwrap(),
+                serde_json::to_string(&usage(3, "run-old")).unwrap(),
+            ),
+        )
+        .unwrap();
+        let memory = Memory {
+            id: 5,
+            scope: "project".into(),
+            project_path: "C:/ws".into(),
+            category: "reference".into(),
+            content: "legacy fact: with colon".into(),
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-02T00:00:00.000Z".into(),
+        };
+        std::fs::write(legacy.join("memory.json"), serde_json::to_string(&vec![memory.clone()]).unwrap()).unwrap();
+        std::fs::write(
+            legacy.join("projects.json"),
+            serde_json::to_string(&vec![Project {
+                path: "C:/ws".into(),
+                name: "WS".into(),
+                created_at: now_iso(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(legacy.join("permissions.json"), "[]").unwrap();
+
+        let snapshot = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+            let mut out = Vec::new();
+            fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+                for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, out);
+                    } else {
+                        out.push((path.clone(), std::fs::read(&path).unwrap()));
+                    }
+                }
+            }
+            walk(dir, &mut out);
+            out.sort();
+            out
+        };
+        let before = snapshot(&legacy);
+
+        let db = Db::open_with_legacy(&root, Some(&legacy)).unwrap();
+        assert_eq!(snapshot(&legacy), before, "legacy dir is never modified");
+        assert!(root.join(MIGRATION_MARKER).exists());
+        assert_eq!(db.get_run_full("run-old").unwrap(), run);
+        let messages = db.list_messages("run-old");
+        assert_eq!(messages, vec![m1.clone(), m2.clone()]);
+        assert_eq!(db.get_plan("run-old").unwrap().title, "Old plan");
+        let usage_ids: Vec<i64> = db.list_usage(None).iter().map(|u| u.id).collect();
+        assert_eq!(usage_ids, [1, 3], "usage of vanished runs is dropped");
+        assert_eq!(db.list_memories(), vec![memory.clone()]);
+        assert_eq!(db.list_projects()[0].name, "WS");
+        let history: Vec<Value> = read_jsonl_or(&root.join(HISTORY_FILE));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["text"], "old prompt");
+        assert_eq!(history[0]["ts"], unix_secs("2026-03-07T10:21:00.000Z"));
+        let index: Vec<Value> = read_jsonl_or(&root.join(SESSION_INDEX_FILE));
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0]["id"], "run-old");
+        // Fresh ids continue after the imported ones.
+        assert_eq!(db.append_usage(usage(0, "run-old")).id, 4);
+        assert_eq!(db.create_memory("global", "", "c", "new").unwrap().id, 6);
+        drop(db);
+
+        // Second open does not import again (even after changing the legacy dir).
+        std::fs::write(legacy.join("memory.json"), "[]").unwrap();
+        let db2 = Db::open_with_legacy(&root, Some(&legacy)).unwrap();
+        assert_eq!(db2.list_memories().len(), 2);
+        assert_eq!(db2.list_runs().len(), 1);
+        assert_eq!(rollouts_in(&root).len(), 1);
+        let history: Vec<Value> = read_jsonl_or(&root.join(HISTORY_FILE));
+        assert_eq!(history.len(), 1);
+
+        // A plain `open` on a custom root never looks at the real app data.
+        assert!(default_legacy_dir_for(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    /// Two `Db` instances on one root (desktop + `lcgn`) must not overwrite
+    /// each other's shared files: mutations re-read them from disk under the
+    /// advisory lock before applying the change.
     #[test]
     fn two_instances_interleave_without_losing_writes() {
         let root = temp_root("cross");
@@ -1234,6 +2117,12 @@ mod tests {
         assert_ne!(p1.id, p2.id, "ids must not collide across processes");
         assert_eq!(db3.list_usage(None).len(), 2);
         assert_ne!(u1.id, u2.id, "usage ids must not collide across processes");
+
+        // refresh_runs picks up another instance's runs.
+        db1.create_run(sample_run("run-from-1"));
+        assert!(db2.get_run_full("run-from-1").is_none());
+        db2.refresh_runs();
+        assert!(db2.get_run_full("run-from-1").is_some());
 
         let _ = std::fs::remove_dir_all(&root);
     }

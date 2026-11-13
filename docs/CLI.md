@@ -134,11 +134,11 @@ lcgn [options] [@files...] [messages...]
 
 ## Concurrency with the desktop app
 
-`lcgn` and the backend server share the same data dir. Mutations of shared
-files (`projects.json`, `permissions.json`, `memory.json`,
-`usage_logs.jsonl`) are serialized with an advisory lock on `<data>/.lock`
-and re-read from disk under the lock, so interleaved writes lose nothing.
-Per-run files under `sessions/<run_id>/` are private and need no locking.
+`lcgn` and the desktop app share the same store (`~/.locagens`). Mutations of
+shared files (`projects.json`, `permissions.json`, memory `.md` files, usage id
+counter) are serialized with an advisory lock on `<root>/.lock` and re-read from
+disk under the lock, so interleaved writes lose nothing. Session rollouts under
+`sessions/` are private to the run that owns them and append-only.
 
 ## Auth & providers (Codex / Locagens compatible)
 

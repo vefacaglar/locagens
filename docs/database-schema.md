@@ -1,38 +1,95 @@
-# Database Schema — Locagens
+# Storage — Locagens
 
-**Storage engine:** File-Based Storage (Codex/Claude/Pi-style `JSON` + `JSONL`) — zero SQLite, zero C library dependency.
-**Implementation:** `apps/backend/src/db.rs` (pure Rust, in-memory `RwLock<StorageState>` + durable file persistence).
-**Replaces:** the former SQLite engine (`node:sqlite` / `rusqlite`), `locagens.db`, and the `@locagens/db-writer` sidecar writer process.
-
-**Default data root:** `<app_support_dir>/data`, overridable via `LOCAGENS_DATA_DIR` (or derived from the legacy `LOCAGENS_DB_PATH` parent/stem). Path resolution lives in `apps/backend/src/paths.rs`.
+**Storage engine:** Codex-style local files — one append-only JSONL *rollout* per session (date-sharded), small append-only index files, Markdown memories. No SQLite, no C library dependency.
+**Implementation:** `crates/core/src/db.rs` (in-memory `RwLock<StorageState>` mirror + durable file persistence). The layout mirrors `codex-rs/rollout` (`sessions/YYYY/MM/DD/rollout-…jsonl`, `session_index.jsonl`) and `codex-rs/message-history` (`history.jsonl`).
+**Root:** the Locagens home, `~/.locagens` (`$LOCAGENS_HOME`; helper `locagens_home()` in `crates/config/src/paths.rs`). `LOCAGENS_DATA_DIR` (or the legacy `LOCAGENS_DB_PATH` parent/stem) overrides the whole root — used by tests. Resolved by `db::resolve_data_root()`.
 
 ---
 
 ## File layout
 
 ```txt
-<data-root>/
-  projects.json               — list of Project
-  permissions.json            — list of PermissionRule (auto-increment ids)
-  memory.json                 — list of Memory (auto-increment ids)
-  usage_logs.jsonl            — append-only JSONL of UsageLogEntry
-  sessions/<run_id>/run.json       — Run metadata
-  sessions/<run_id>/messages.jsonl — append-only JSONL of RunMessage
-  sessions/<run_id>/plan.json      — active Plan for the run
+~/.locagens/
+  sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<run_id>.jsonl   one file per run
+  session_index.jsonl     append-only {id, title, updated_at}; last line per id wins
+  history.jsonl           append-only {session_id, ts, text}; one line per user prompt
+  memories/<slug>.md      global memories, one fact per file
+  projects/<sanitized-project-path>/memories/<slug>.md   project-scoped memories
+  projects.json           list of Project            (atomic tmp + rename)
+  permissions.json        list of PermissionRule     (atomic tmp + rename)
+  .usage_seq              last allocated usage id (cross-process counter)
+  .lock                   advisory lock for the shared files above
+  .migrated-from-data-v1  marker: legacy data already imported
 ```
 
-All state is kept in an in-memory `RwLock<StorageState>` so reads are O(1); every
-mutation is durably persisted:
+Provider credentials (`auth.json`, `models.json`) live in the same home but are
+owned by `locagens-config`; no secret ever enters the files above.
 
-- **JSON files** (`projects.json`, `permissions.json`, `memory.json`,
-  `sessions/<run_id>/run.json`, `sessions/<run_id>/plan.json`) are serialized
-  and written to a `.tmp` sibling, then renamed atomically.
-- **JSONL files** (`usage_logs.jsonl`, `sessions/<run_id>/messages.jsonl`) are
-  appended and flushed; when a line is updated in place, the file is rewritten
-  atomically.
-- Deleting a run removes the whole `sessions/<run_id>/` directory. Startup
-  cleanup walks `sessions/` and resets runs stuck in `created`, `generating`, or
-  `awaiting_permission` to `failed` (session folders keep their content).
+### Rollout files
+
+The file-name timestamp is the run's `createdAt` (UTC) and `<run_id>` is the run id
+(characters other than `[A-Za-z0-9_-]` become `_`). Every line is
+
+```json
+{"timestamp": "2026-03-07T10:20:30.123Z", "type": "<kind>", "payload": { }}
+```
+
+| `type` | payload |
+|---|---|
+| `session_meta` | first line: the `Run` (plus `forked_from`, `forked_up_to_message_id` when forked) |
+| `run_update` | full `Run` snapshot (status, title, error, any patch) |
+| `message` | a `RunMessage` |
+| `message_update` | replacement `RunMessage` for an existing `id` |
+| `plan` | full `Plan` snapshot |
+| `usage` | a `UsageLogEntry` |
+
+Rollouts are strictly **append-only**: an in-place update is an appended line, and
+loading replays the file so the last write wins. A truncated or corrupt line
+(e.g. a crash mid-write) is skipped; the next append first terminates it with a
+newline so it never corrupts a good line. Deleting a run removes its rollout file
+(and now-empty date directories); `session_index.jsonl` and `history.jsonl` are never
+rewritten. `fork_run` writes a new rollout holding a fresh `session_meta`
+(`forked_from`), the copied messages (new ids) and the plan; usage is not copied.
+
+All state is mirrored in memory (O(1) reads). `refresh_runs()` re-reads the
+rollouts so runs written by another process become visible. Startup cleanup
+appends a `run_update` (status `failed`) and a system `message` to every run
+left in `created`, `generating`, `awaiting_permission` or `awaiting_input`.
+
+### Memories
+
+One Markdown file per fact: a YAML frontmatter block, then the fact verbatim.
+String values are written JSON-quoted (valid YAML), so quotes, colons, newlines
+and `---` inside a value need no further escaping; the body is everything after
+the closing `---` line.
+
+```md
+---
+id: 3
+category: "reference"
+scope: "project"
+project_path: "C:/ws"
+created_at: "2026-03-07T10:20:30.123Z"
+updated_at: "2026-03-07T10:20:30.123Z"
+---
+Use cargo nextest for the workspace tests.
+```
+
+File name: `<first words of the fact>-<id>.md`; it is kept when the memory is
+edited. `project_path` is only written for project memories (the directory name
+is the path with non-alphanumeric characters replaced by `-`).
+
+### Legacy import (one-time)
+
+When the root is the default Locagens home and `<app_support_dir>/data/` exists
+(the previous `projects.json` / `permissions.json` / `memory.json` /
+`usage_logs.jsonl` / `sessions/<id>/{run.json,messages.jsonl,plan.json}` layout)
+and `.migrated-from-data-v1` is absent, `Db::open` imports it: sessions become
+rollouts (with their plan and matching usage lines), user prompts feed
+`history.jsonl`, `session_index.jsonl` is seeded, `memory.json` becomes `.md`
+files (ids kept), and `projects.json` / `permissions.json` are copied when not
+already present. The marker is written last; the legacy directory is only read,
+never modified or deleted. Usage lines whose run no longer exists are dropped.
 
 ---
 
@@ -62,32 +119,32 @@ Per-tool and per-command grant records for security approval.
 | `networkDomains` | `string[]` | Sorted list of exact network domains approved with the command |
 | `status` | `string` | e.g. `'approved'`, `'denied'` |
 
-Duplicate exact command/domain grants are prevented on write (the old SQLite
-`UNIQUE(scope, project_path, tool, command, network_domains)` constraint).
+Duplicate exact command/domain grants are prevented on write.
 
-### `memory.json` — `Memory`
+### `memories/<slug>.md` — `Memory`
 
 Durable facts the assistant remembers across sessions (set via the `remember`
-tool / Settings → Memory).
+tool / Settings → Memory). Frontmatter keys are the snake_case names below.
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | `integer` | Auto-increment surrogate key |
+| `id` | `integer` | Auto-increment surrogate key (frontmatter `id`) |
 | `scope` | `string` | `'global'` or `'project'` |
 | `projectPath` | `string` | Empty string = global scope; project path otherwise |
 | `category` | `string` | Category label (default `project`) |
-| `content` | `string` | The remembered fact |
+| `content` | `string` | The remembered fact (the Markdown body, stored verbatim) |
 | `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
 
-### `usage_logs.jsonl` — `UsageLogEntry`
+### `usage` lines — `UsageLogEntry`
 
-Append-only detailed records of all LLM completions, including token counts,
-cache hits, and calculated costs. One JSON object per line.
+Detailed records of all LLM completions (token counts, cache hits, cost),
+appended to the owning run's rollout. `id` is unique across processes (counter
+file `.usage_seq`); `list_usage` aggregates the `usage` lines of all rollouts.
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `integer` | Auto-increment surrogate key |
-| `runId` | `string` | Parent run (`sessions/<run_id>/`) |
+| `runId` | `string` | Parent run (the rollout the line lives in) |
 | `agentRole` | `string?` | Agent role (`main`, `explorer`, `worker`) |
 | `providerId` | `string` | Provider identifier |
 | `model` | `string` | Model name used for completion |
@@ -97,59 +154,62 @@ cache hits, and calculated costs. One JSON object per line.
 | `cost` | `number` | Estimated cost of this call in USD |
 | `createdAt` | `string` | ISO-8601 timestamp |
 
-### `sessions/<run_id>/run.json` — `Run`
+### `session_meta` / `run_update` — `Run`
 
-One file per assistant run (conversation session).
+The run snapshot: first line of a rollout (`session_meta`); every later change
+appends a full-snapshot `run_update`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | `string` | UUID (folder name of the session) |
+| `id` | `string` | Run id (also embedded in the rollout file name) |
 | `title` | `string` | Human-readable run title |
 | `task` | `string` | The user's task description |
 | `projectPath` / `projectName` | `string` | Active workspace project (path defaults to the workspace root) |
-| `status` | `string` | `created`, `generating`, `awaiting_permission`, `running`, `failed`, `completed`, … |
-| `providerId` / `providerDisplayName` | `string` | Selected provider (resolved from `~/.pi/agent/auth.json` / `models.json`) |
+| `status` | `string` | `created`, `generating`, `awaiting_permission`, `awaiting_input`, `done`, `failed`, `cancelled` |
+| `providerId` / `providerDisplayName` | `string` | Selected provider (resolved from the agent config dir chain) |
 | `model` | `string` | Model name |
 | `mode` | `string` | Run mode (`accept_edits`, `plan`, `auto`, `chat`, `ask_permissions`) |
 | `errorMessage` | `string?` | Error text if the run failed |
 | `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
-| `lastActiveAt` | `string?` | Populated on startup if null |
+| `lastActiveAt` | `string?` | Last activity |
 | `reasoningEffort` | `string?` | Per-model reasoning-effort selection |
-| `systemPrompt` / `appendSystemPrompt` | `string?` | Custom system prompt (`lcgn --system-prompt` / `--append-system-prompt`); omitted from JSON when unset |
+| `systemPrompt` / `appendSystemPrompt` | `string?` | Custom system prompt (`lcgn --system-prompt` / `--append-system-prompt`); omitted when unset |
+| `forked_from` | `string?` | `session_meta` only: source run id of a fork |
 
-Legacy `run.json` files may still contain `coder*`/`utility*`/`agentPreset`
-keys from before preset removal; they deserialize cleanly (unknown keys are
-ignored) but are no longer read or written.
+Legacy data may still contain `coder*`/`utility*`/`agentPreset` keys from before
+preset removal; they deserialize cleanly (unknown keys are ignored) but are no
+longer read or written.
 
 Derived view: `db::Db::get_run()` projects this into a `RunRow` with only the
 columns consumed by route modules.
 
-### `sessions/<run_id>/messages.jsonl` — `RunMessage`
+### `message` / `message_update` — `RunMessage`
 
-Append-only JSONL of individual chat messages within a run.
+Chat messages within a run. `message` appends a new one; `message_update`
+carries the replacement message for an existing `id` (last write wins).
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `string` | Unique message identifier |
-| `runId` | `string` | Parent run (matches the session folder) |
+| `runId` | `string` | Parent run |
 | `role` | `string` | `user`, `assistant`, `system`, `tool`, … |
 | `agentRole` | `string?` | Sub-role: `explorer`, `worker`, or `null` for the main agent |
 | `agentName` | `string?` | Sub-agent identity (display name) |
 | `providerId` / `providerDisplayName` / `model` | `string?` | Provider/model used for this message |
 | `content` | `string` | Message body text |
 | `reasoningContent` | `string?` | Model's chain-of-thought / reasoning text |
-| `rawResponse` | `string?` | Full raw API response JSON |
+| `rawResponse` | `string?` | Serialized tool-call payload / raw response |
 | `createdAt` | `string` | ISO-8601 timestamp |
 
-### `sessions/<run_id>/plan.json` — `Plan`
+### `plan` — `Plan`
 
-The active plan document for a run (drives the right-hand plan panel). A new
-plan supersedes the previous one in place.
+The active plan document for a run (drives the right-hand plan panel). Each
+`plan` line is a full snapshot; the last one wins.
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `string` | Unique plan identifier |
-| `runId` | `string` | Parent run (matches the session folder) |
+| `runId` | `string` | Parent run |
 | `title` | `string` | Plan title (default `Plan`) |
 | `body` | `string?` | Plan body / description (JSON or Markdown) |
 | `tasks` | `array` | JSON array of task objects (default `[]`) |
@@ -157,55 +217,57 @@ plan supersedes the previous one in place.
 | `version` | `integer` | Monotonically increasing version per run (default `1`) |
 | `createdAt` / `updatedAt` | `string` | ISO-8601 timestamps |
 
+### `session_index.jsonl` and `history.jsonl`
+
+```json
+{"id": "run-…", "title": "Fix the build", "updated_at": "2026-03-07T10:25:00.000Z"}
+{"session_id": "run-…", "ts": 1772879430, "text": "the user's prompt"}
+```
+
+The index gets a line when a run is created, its title changes, or its status
+changes (last line per `id` wins; deleted runs are not removed). `history.jsonl`
+gets one line per main-agent user prompt (`ts` = unix seconds).
+
 ---
 
 ## Relationship Summary
 
 ```
-sessions/<run_id>/run.json ──┬── messages.jsonl   (same folder, 1:N)
-                             ├── plan.json        (same folder, 1 active)
-                             └── usage_logs.jsonl (matched by runId)
+sessions/…/rollout-…-<run_id>.jsonl ── session_meta, run_update*, message*, message_update*, plan*, usage*
+session_index.jsonl / history.jsonl ── reference runs by id
 ```
 
 - **`projects.json`** is a standalone lookup file.
 - **`permissions.json`** uses `scope` + `projectPath` (not a foreign key) to
   associate grants with projects.
-- **`memory.json`** uses `scope` + `projectPath` (not a foreign key) to
-  associate facts with projects.
+- **Memories** use `scope` + `projectPath` (not a foreign key) to associate facts
+  with projects.
 
 ---
 
 ## Provider & auth configuration (not app data)
 
-Provider credentials and model catalogs live in `pi`'s agent directory
-(`~/.pi/agent`, overridable via `PI_CODING_AGENT_DIR`) and are managed by
-`apps/backend/src/pi_providers.rs`:
+Provider credentials and model catalogs live in the agent config dir chain
+(`~/.locagens` → `~/.codex` → `~/.pi/agent`, see `agent_dir_chain()` in
+`crates/config/src/paths.rs`) and are managed by `crates/config/src/providers.rs`:
 
 ```txt
-~/.pi/agent/auth.json          — provider id → credential
-                                 ({ "type": "api_key", "key": "..." },
-                                  "!command", "$ENV_VAR", or OAuth)
-~/.pi/agent/models.json        — custom provider configs & model overrides
-~/.pi/agent/models-store.json  — pi's cached dynamic model catalog
+auth.json          — provider id → credential
+                     ({ "type": "api_key", "key": "..." },
+                      "!command", "$ENV_VAR", or OAuth)
+models.json        — custom provider configs & model overrides
 ```
 
-Plus Locagens UI metadata under the app-support dir:
-
-```txt
-locagens-providers-meta.json   — display names / model settings (pricing, context limits)
-```
-
-Secrets never enter the app data files above.
+Secrets never enter the storage files above.
 
 ---
 
 ## Notes
 
-- All timestamp fields use ISO-8601 text format.
-- There is no SQLite, no WAL/journal mode, no `busy_timeout`, no `DbWriterClient`
-  background writer, and no `apps/db-writer` sidecar — writes are serialized by
-  the in-process `RwLock` and persisted synchronously.
-- Startup cleanup resets runs stuck in `'created'`, `'generating'`, or
-  `'awaiting_permission'` to `'failed'` with an interrupt error message.
-- Legacy `locagens.db` / `locagens.db-shm` / `locagens.db-wal` files are no
-  longer read or written and can be deleted.
+- All timestamp fields use ISO-8601 text (`history.jsonl` uses unix seconds, like Codex).
+- There is no SQLite and no background writer; every write is synchronous under
+  the in-process `RwLock` (plus the advisory `.lock` for the shared files).
+- Streaming assistant output is persisted as periodic `message_update`
+  snapshots, so a long reply leaves several superseded lines in its rollout.
+- Legacy `locagens.db` files and the old `<app_support_dir>/data/` directory are
+  no longer written and can be deleted once imported.
