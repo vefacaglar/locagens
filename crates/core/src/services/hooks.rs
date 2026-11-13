@@ -532,12 +532,14 @@ mod tests {
         let var = format!("LOCAGENS_TEST_API_KEY_{}", uuid::Uuid::new_v4().simple());
         let _env = crate::ENV_TEST_LOCK.lock().await;
         std::env::set_var(&var, "hook-secret-value");
-        let print = if cfg!(windows) { format!("echo [%{var}%]") } else { format!("echo \"[${var}]\"") };
+        // A plain-text prefix: a bare `[]` (the stripped variable on Unix) would
+        // parse as JSON hook output instead of additional context.
+        let print = if cfg!(windows) { format!("echo secret=[%{var}%]") } else { format!("echo \"secret=[${var}]\"") };
         write_hooks(&project, json!({ "SessionStart": print }));
         let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
         std::env::remove_var(&var);
         let context = outcome.context_joined().unwrap_or_default();
-        assert!(context.contains('['), "hook ran: {context}");
+        assert!(context.contains("secret=["), "hook ran: {context}");
         assert!(!context.contains("hook-secret-value"), "{context}");
         let _ = std::fs::remove_dir_all(&project);
     }
