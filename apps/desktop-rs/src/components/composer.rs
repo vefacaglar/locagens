@@ -838,6 +838,7 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
             bypass_permissions: mode == "auto",
             system_prompt: None,
             append_system_prompt: None,
+            ..Default::default()
         };
         match locagens_core::api::runs::create_run(&state, &payload).await {
             Ok(started) => {

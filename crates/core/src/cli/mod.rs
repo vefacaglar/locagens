@@ -3,8 +3,11 @@
 
 pub mod args;
 pub mod auth;
+pub mod commands;
+pub mod events;
 pub mod mcp;
 pub mod models;
+pub mod prompt;
 pub mod render;
 pub mod repl;
 pub mod review;
@@ -78,6 +81,10 @@ async fn run(mut cli: Cli) -> i32 {
             return 2;
         }
     };
+    // `lcgn config` only prints the file chain: no store, no legacy import.
+    if matches!(cli.command, Some(Command::Config { .. })) {
+        return config_command(&config);
+    }
     let core = match crate::build_core() {
         Ok(core) => core,
         Err(err) => {
@@ -254,8 +261,19 @@ async fn review_main(state: &Arc<crate::state::AppState>, cli: &Cli, args: &args
             return 2;
         }
     };
-    let model_flag = args.model.as_deref().or(cli.model.as_deref());
     let provider_flag = args.provider.as_deref().or(cli.provider.as_deref());
+    // The global `cli.model` may have been filled from config.toml for the
+    // configured provider: do not pair it with a different review provider.
+    let config_model = crate::config_runtime::current().model.clone();
+    let inherited_model = cli.model.is_some() && cli.model == config_model;
+    let model_flag = args.model.as_deref().or(if args.provider.is_some()
+        && inherited_model
+        && args.provider.as_deref() != cli.provider.as_deref()
+    {
+        None
+    } else {
+        cli.model.as_deref()
+    });
     let model = if model_flag.is_some() || provider_flag.is_some() {
         match models::resolve_model(&state.pi, model_flag, provider_flag).await {
             Ok(model) => Some(model),

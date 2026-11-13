@@ -1,6 +1,8 @@
 //! Executes one agent turn through the shared orchestrator and renders the
 //! live event stream (used by `-p` one-shot runs and the interactive REPL).
 
+use crate::cli::commands::{ensure_authenticated, usage_line};
+use crate::cli::events::{Pumped, RunEvents};
 use crate::cli::models::ResolvedModel;
 use crate::cli::render::{colors_enabled, TextRenderer};
 use crate::orchestrator::RunHandle;
@@ -11,7 +13,6 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
 
 /// Per-turn options derived from the CLI flags (or REPL state).
 #[derive(Clone, Debug)]
@@ -51,16 +52,13 @@ pub async fn run_turn(
 ) -> (i32, Option<String>) {
     // Configuration check: the provider must be authenticated.
     if let Some(model) = &opts.model {
-        if !state.pi.has_api_key(&model.provider_id) && model.provider_id != "ollama" {
-            eprintln!(
-                "lcgn: provider \"{}\" is not authenticated. Run `lcgn auth login {}` first.",
-                model.provider_id, model.provider_id
-            );
+        if let Err(message) = ensure_authenticated(state, model) {
+            eprintln!("lcgn: {message}");
             return (2, None);
         }
     }
 
-    let (run_id, mut rx, handle) = match target {
+    let (run_id, rx, handle) = match target {
         TurnTarget::New => {
             let Some(model) = opts.model.clone() else {
                 eprintln!(
@@ -79,6 +77,7 @@ pub async fn run_turn(
                 bypass_permissions: opts.bypass,
                 system_prompt: opts.system_prompt.clone(),
                 append_system_prompt: opts.append_system_prompt.clone(),
+                no_session: opts.no_session,
                 ..Default::default()
             };
             match runs_api::create_run(state, &payload).await {
@@ -123,13 +122,16 @@ pub async fn run_turn(
         opts.interactive,
     );
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    let mut events = RunEvents::new(state.clone(), run_id.clone(), rx);
 
     let code = loop {
         let event = tokio::select! {
-            ev = rx.recv() => match ev {
-                Ok(event) => event,
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break 1,
+            pumped = events.next() => match pumped {
+                Pumped::Event(event) => event,
+                // A lagged receiver was re-synced from the store; the replayed
+                // prompts and terminal event follow as ordinary events.
+                Pumped::Resynced(_) => continue,
+                Pumped::Closed => break 1,
             },
             _ = ctrl_c.as_mut() => {
                 eprintln!();
@@ -189,7 +191,8 @@ pub async fn run_turn(
         print_usage_line(state, &run_id);
     }
     if opts.no_session {
-        state.db.delete_run(&run_id);
+        // Cancels first when the run is still unwinding (Ctrl+C), then deletes.
+        let _ = runs_api::delete_run(state, &run_id).await;
     }
     (code, Some(run_id))
 }
@@ -208,17 +211,9 @@ pub(crate) fn ensure_project(state: &AppState, path: &Path) {
 
 /// Final one-line usage/cost summary on stderr.
 fn print_usage_line(state: &AppState, run_id: &str) {
-    let entries = state.db.list_usage(Some(run_id));
-    if entries.is_empty() {
-        return;
+    if let Some(line) = usage_line(&state.db.list_usage(Some(run_id))) {
+        eprintln!("{line}");
     }
-    let input: i64 = entries.iter().map(|e| e.input_tokens).sum();
-    let output: i64 = entries.iter().map(|e| e.output_tokens).sum();
-    let cache_read: i64 = entries.iter().map(|e| e.cache_read_tokens).sum();
-    let cost: f64 = entries.iter().map(|e| e.cost).sum();
-    eprintln!(
-        "tokens: {input} in / {output} out · cache read: {cache_read} · cost: ${cost:.4}"
-    );
 }
 
 async fn handle_permission(

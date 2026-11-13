@@ -4,6 +4,8 @@
 use crate::api::review::{self as review_api, StartReviewPayload};
 use crate::api::runs as runs_api;
 use crate::cli::args::ReviewArgs;
+use crate::cli::commands::ensure_authenticated;
+use crate::cli::events::{Pumped, RunEvents};
 use crate::cli::models::ResolvedModel;
 use crate::state::AppState;
 use locagens_protocol::review::{render_review_text, ReviewPayload, ReviewTarget};
@@ -11,7 +13,6 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::broadcast::error::RecvError;
 
 /// Picks the review target from `lcgn review` flags: `--base`, `--commit`,
 /// `--uncommitted` or a custom prompt; no flag and no prompt reviews the
@@ -60,11 +61,8 @@ pub async fn run_review(
     json_mode: bool,
     active: Option<crate::cli::repl::ActiveRun>,
 ) -> (i32, Option<String>) {
-    if !state.pi.has_api_key(&model.provider_id) && model.provider_id != "ollama" {
-        eprintln!(
-            "lcgn: provider \"{}\" is not authenticated. Run `lcgn auth login {}` first.",
-            model.provider_id, model.provider_id
-        );
+    if let Err(message) = ensure_authenticated(state, model) {
+        eprintln!("lcgn: {message}");
         return (2, None);
     }
     crate::cli::runner::ensure_project(state, project);
@@ -84,7 +82,7 @@ pub async fn run_review(
     };
     let run_id = started.run.id.clone();
     let handle = started.handle.clone();
-    let mut rx = started.events;
+    let mut events = RunEvents::new(state.clone(), run_id.clone(), started.events);
     if let Some(active) = &active {
         *active.lock().await = Some(run_id.clone());
     }
@@ -95,10 +93,11 @@ pub async fn run_review(
 
     let code = loop {
         let event = tokio::select! {
-            ev = rx.recv() => match ev {
-                Ok(event) => event,
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break 1,
+            pumped = events.next() => match pumped {
+                Pumped::Event(event) => event,
+                // Lagged: re-synced from the store, replayed events follow.
+                Pumped::Resynced(_) => continue,
+                Pumped::Closed => break 1,
             },
             _ = ctrl_c.as_mut() => {
                 eprintln!("\nlcgn: review cancelled (Ctrl+C)");

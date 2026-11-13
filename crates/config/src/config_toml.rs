@@ -5,7 +5,9 @@
 //! `~/.pi/agent`). Files are deep-merged table by table with the primary
 //! (earliest) directory winning on conflicts; arrays and scalars are replaced
 //! wholesale. Unknown keys are ignored. Malformed TOML (or a known key with
-//! the wrong type) is an error that names the offending file.
+//! the wrong type) in the primary file is an error that names the offending
+//! file; the read-only fallbacks (`~/.codex`, `~/.pi/agent`) are parsed
+//! leniently: a bad file or key is skipped with a warning.
 //!
 //! Profiles (`[profiles.<name>]` + top-level `profile`) overlay the supported
 //! top-level keys via [`Config::with_profile`].
@@ -20,8 +22,6 @@ use std::path::{Path, PathBuf};
 pub struct SandboxWorkspaceWrite {
     pub writable_roots: Vec<String>,
     pub network_access: bool,
-    pub exclude_tmpdir_env_var: bool,
-    pub exclude_slash_tmp: bool,
 }
 
 /// `[sandbox]` (Locagens: per-domain network proxy allowlist).
@@ -78,6 +78,15 @@ impl McpServerConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled.unwrap_or(true)
     }
+
+    /// Whether the model may see and call `tool`: `enabled_tools` (when set)
+    /// is an allowlist, `disabled_tools` always wins.
+    pub fn tool_allowed(&self, tool: &str) -> bool {
+        if self.disabled_tools.as_ref().is_some_and(|list| list.iter().any(|name| name == tool)) {
+            return false;
+        }
+        self.enabled_tools.as_ref().is_none_or(|list| list.iter().any(|name| name == tool))
+    }
 }
 
 /// `[history]`.
@@ -86,15 +95,6 @@ impl McpServerConfig {
 pub struct HistoryConfig {
     /// `save-all` (default) or `none`.
     pub persistence: Option<String>,
-    pub max_bytes: Option<u64>,
-}
-
-/// `[tui]` keys that map onto the lcgn TUI.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TuiConfig {
-    /// Not supported by lcgn yet; parsed and shown for completeness.
-    pub notifications: Option<toml::Value>,
 }
 
 /// `[profiles.<name>]`: per-profile overrides of the model / policy keys.
@@ -145,10 +145,7 @@ pub struct Config {
     /// the last argument.
     pub notify: Vec<String>,
     pub hide_agent_reasoning: Option<bool>,
-    pub show_raw_agent_reasoning: Option<bool>,
-    pub file_opener: Option<String>,
     pub history: Option<HistoryConfig>,
-    pub tui: Option<TuiConfig>,
 }
 
 /// Loads the merged `[mcp_servers.<name>]` tables from the agent-dir chain
@@ -185,6 +182,30 @@ fn merge_tables(low: &mut toml::Table, high: toml::Table) {
     }
 }
 
+/// Parses one read-only fallback file without ever failing: a file that is not
+/// TOML is skipped, and top-level keys that do not type-check are dropped, each
+/// with a warning, so a broken `~/.codex/config.toml` cannot take the valid
+/// `~/.locagens` settings down with it.
+fn parse_file_lenient(path: &Path, raw: &str) -> Option<toml::Table> {
+    let mut table: toml::Table = match toml::from_str(raw) {
+        Ok(table) => table,
+        Err(err) => {
+            tracing::warn!("Ignoring config file {}: {}", path.display(), err.message());
+            return None;
+        }
+    };
+    let keys: Vec<String> = table.keys().cloned().collect();
+    for key in keys {
+        let mut single = toml::Table::new();
+        single.insert(key.clone(), table[&key].clone());
+        if let Err(err) = toml::Value::Table(single).try_into::<Config>() {
+            tracing::warn!("Ignoring key `{key}` in {}: {}", path.display(), err.message());
+            table.remove(&key);
+        }
+    }
+    Some(table)
+}
+
 /// Parses and validates one `config.toml`, naming `path` on failure.
 fn parse_file(path: &Path, raw: &str) -> Result<toml::Table, ConfigError> {
     let table: toml::Table = toml::from_str(raw).map_err(|err| ConfigError {
@@ -213,13 +234,19 @@ impl Config {
     }
 
     /// Loads and merges the given files, `files[0]` winning. Missing files
-    /// are skipped.
+    /// are skipped. `files[0]` (the primary file) must be valid; the
+    /// fallbacks after it are parsed leniently (see [`parse_file_lenient`]).
     pub fn load_from_files(files: &[PathBuf]) -> Result<Config, ConfigError> {
         let mut merged = toml::Table::new();
         // Lowest priority first so higher priority files overwrite.
-        for path in files.iter().rev() {
+        for (index, path) in files.iter().enumerate().rev() {
             let Ok(raw) = std::fs::read_to_string(path) else { continue };
-            let table = parse_file(path, &raw)?;
+            let table = if index == 0 {
+                parse_file(path, &raw)?
+            } else {
+                let Some(table) = parse_file_lenient(path, &raw) else { continue };
+                table
+            };
             merge_tables(&mut merged, table);
         }
         Self::from_table(merged)
@@ -337,24 +364,13 @@ impl Config {
         !self.hide_agent_reasoning.unwrap_or(false)
     }
 
-    /// Enabled `[mcp_servers]` entries.
-    pub fn enabled_mcp_servers(&self) -> Vec<(&String, &McpServerConfig)> {
-        self.mcp_servers.iter().filter(|(_, server)| server.is_enabled()).collect()
-    }
-
-    /// `file_opener` URI for a file location (`vscode`, `cursor`, `windsurf`,
-    /// `vscode-insiders`); `None` for `none` or when unset.
-    pub fn file_opener_uri(&self, path: &Path, line: Option<u32>) -> Option<String> {
-        let scheme = match self.file_opener.as_deref()?.trim() {
-            "vscode" => "vscode",
-            "vscode-insiders" => "vscode-insiders",
-            "cursor" => "cursor",
-            "windsurf" => "windsurf",
-            _ => return None,
-        };
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        let trimmed = normalized.trim_start_matches('/');
-        Some(format!("{scheme}://file/{trimmed}:{}", line.unwrap_or(1)))
+    /// The `[mcp_servers]` entry for `name` (trimmed, case-insensitive).
+    pub fn mcp_server(&self, name: &str) -> Option<&McpServerConfig> {
+        let wanted = name.trim().to_lowercase();
+        self.mcp_servers
+            .iter()
+            .find(|(key, _)| key.trim().to_lowercase() == wanted)
+            .map(|(_, server)| server)
     }
 
     // ------------------------------------------------------------------
@@ -410,12 +426,75 @@ fn mask_secrets(value: &mut toml::Value, inside_secret_table: bool) {
             }
         }
         toml::Value::Array(items) => {
+            mask_argument_list(items);
             for item in items {
                 mask_secrets(item, false);
             }
         }
+        toml::Value::String(text) => *text = mask_url_credentials(text),
         _ => {}
     }
+}
+
+/// Masks secrets inside a command-line style list (`args`, `notify`):
+/// `--token=abc`, `API_KEY=abc`, and the value after a bare `--api-key` flag.
+fn mask_argument_list(items: &mut [toml::Value]) {
+    let mut mask_next = false;
+    for item in items.iter_mut() {
+        let Some(text) = item.as_str().map(str::to_string) else {
+            mask_next = false;
+            continue;
+        };
+        if mask_next {
+            *item = toml::Value::String("***".to_string());
+            mask_next = false;
+            continue;
+        }
+        let flag = text.trim_start_matches('-');
+        match flag.split_once('=') {
+            Some((name, _)) if key_is_secret(name) && !text.contains("://") => {
+                *item = toml::Value::String(format!("{}=***", &text[..text.len() - flag.len() + name.len()]));
+            }
+            None if text.starts_with('-') && key_is_secret(flag) => mask_next = true,
+            _ => {}
+        }
+    }
+}
+
+/// Masks `user:password@` in URLs and the values of secret-looking query
+/// parameters (`?token=...&api_key=...`).
+fn mask_url_credentials(text: &str) -> String {
+    let Some(scheme_end) = text.find("://") else { return text.to_string() };
+    let (scheme, rest) = text.split_at(scheme_end + 3);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let authority = match authority.rfind('@') {
+        Some(at) => format!("***{}", &authority[at..]),
+        None => authority.to_string(),
+    };
+    let tail = match tail.split_once('?') {
+        Some((path, query)) => {
+            let (query, fragment) = match query.split_once('#') {
+                Some((query, fragment)) => (query, Some(fragment)),
+                None => (query, None),
+            };
+            let masked: Vec<String> = query
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((name, _)) if key_is_secret(name) => format!("{name}=***"),
+                    _ => pair.to_string(),
+                })
+                .collect();
+            let mut out = format!("{path}?{}", masked.join("&"));
+            if let Some(fragment) = fragment {
+                out.push('#');
+                out.push_str(fragment);
+            }
+            out
+        }
+        None => tail.to_string(),
+    };
+    format!("{scheme}{authority}{tail}")
 }
 
 #[cfg(test)]
@@ -520,7 +599,7 @@ a = 1
         )
         .unwrap();
         assert_eq!(config.mcp_servers["fs"].args, vec!["-y", "srv"]);
-        assert_eq!(config.enabled_mcp_servers().len(), 1);
+        assert_eq!(config.mcp_server("FS").unwrap().args, vec!["-y", "srv"]);
         let shown = config.to_masked_toml();
         for leaked in ["hunter2", "abc123", "sk-live", "bar-secret"] {
             assert!(!shown.contains(leaked), "leaked {leaked}:\n{shown}");
@@ -531,12 +610,58 @@ a = 1
     }
 
     #[test]
-    fn file_opener_uri_formats_known_editors() {
-        let config = Config::from_toml_str("file_opener = \"cursor\"").unwrap();
-        assert_eq!(
-            config.file_opener_uri(Path::new("C:\\a\\b.rs"), Some(7)).as_deref(),
-            Some("cursor://file/C:/a/b.rs:7")
+    fn bad_fallback_files_are_skipped_but_a_bad_primary_still_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = write(&tmp.path().join("a"), "config.toml", "model = \"mine\"\nmodel_provider = \"p\"\n");
+        let broken_toml = write(&tmp.path().join("b"), "config.toml", "model = = oops");
+        let bad_key = write(
+            &tmp.path().join("c"),
+            "config.toml",
+            "model_context_window = \"big\"\nproject_doc_max_bytes = 5\nsandbox_mode = \"read-only\"\n",
         );
-        assert!(Config::default().file_opener_uri(Path::new("/a"), None).is_none());
+        let config = Config::load_from_files(&[primary.clone(), broken_toml, bad_key]).unwrap();
+        assert_eq!(config.model.as_deref(), Some("mine"));
+        assert_eq!(config.model_provider.as_deref(), Some("p"));
+        // Valid keys of a partly bad fallback survive; the bad key is dropped.
+        assert_eq!(config.project_doc_max_bytes, Some(5));
+        assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+        assert_eq!(config.model_context_window, None);
+
+        // A broken primary file is still a hard error naming the file.
+        let broken_primary = write(&tmp.path().join("d"), "config.toml", "model = = oops");
+        let err = Config::load_from_files(&[broken_primary.clone(), primary]).unwrap_err();
+        assert!(err.message.contains(&broken_primary.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn mcp_tool_filters_apply_allow_then_deny() {
+        let config = Config::from_toml_str(
+            "[mcp_servers.a]\ncommand = \"x\"\nenabled_tools = [\"read\", \"write\"]\ndisabled_tools = [\"write\"]\n\
+             [mcp_servers.b]\ncommand = \"y\"\ndisabled_tools = [\"rm\"]\n",
+        )
+        .unwrap();
+        let a = config.mcp_server("a").unwrap();
+        assert!(a.tool_allowed("read"));
+        assert!(!a.tool_allowed("write"), "deny wins over allow");
+        assert!(!a.tool_allowed("other"), "not in the allowlist");
+        let b = config.mcp_server("b").unwrap();
+        assert!(b.tool_allowed("anything") && !b.tool_allowed("rm"));
+    }
+
+    #[test]
+    fn masking_covers_array_items_and_url_credentials() {
+        let config = Config::from_toml_str(
+            "notify = [\"notifier\", \"--api-key\", \"sk-secret-1\", \"--token=sk-secret-2\", \"PASSWORD=sk-secret-3\"]\n\
+             [mcp_servers.s]\ncommand = \"npx\"\nargs = [\"-y\", \"srv\", \"--secret\", \"sk-secret-4\", \"--verbose\"]\n\
+             [mcp_servers.r]\nurl = \"https://user:sk-secret-5@host.test/mcp?token=sk-secret-6&mode=fast\"\n",
+        )
+        .unwrap();
+        let shown = config.to_masked_toml();
+        for leaked in ["sk-secret-1", "sk-secret-2", "sk-secret-3", "sk-secret-4", "sk-secret-5", "sk-secret-6"] {
+            assert!(!shown.contains(leaked), "leaked {leaked}:\n{shown}");
+        }
+        for kept in ["notifier", "--verbose", "host.test/mcp", "mode=fast", "--token=***"] {
+            assert!(shown.contains(kept), "lost {kept}:\n{shown}");
+        }
     }
 }

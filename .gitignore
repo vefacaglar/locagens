@@ -252,3 +252,9 @@ PLAN.local.md
 !README.md
 !DEVELOPMENT_PLAN.md
 usage.log
+
+# locagens runtime state that may still appear in a project (legacy snapshot store;
+# snapshots now live under ~/.locagens/projects/)
+.locagens/snapshots.json
+.locagens/snapshots/
+.locagens/worktrees/

@@ -1,8 +1,8 @@
 //! Interactive `lcgn` REPL: line editor, slash commands, Ctrl+C cancel.
 
-use super::models::{list_models_table, resolve_model, ResolvedModel};
+use super::commands::{self, CommandSession, Output, SlashCommand};
+use super::models::ResolvedModel;
 use super::runner::{run_turn, TurnOptions, TurnTarget};
-use crate::cli::auth;
 use crate::state::AppState;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -85,30 +85,33 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
                 if trimmed.is_empty() {
                     continue;
                 }
-                if trimmed.starts_with('/') {
-                    match handle_slash(
-                        &state,
-                        trimmed,
-                        &config,
-                        &mut model,
-                        &mut thinking,
-                        &mut mode,
-                        &mut session,
-                        &active_run,
-                    )
-                    .await
-                    {
-                        SlashResult::Continue => continue,
-                        SlashResult::Exit => break,
+                if let Some(command) = SlashCommand::parse(trimmed) {
+                    let mut current = CommandSession {
+                        model: model.clone(),
+                        thinking: thinking.clone(),
+                        mode: mode.clone(),
+                        bypass: config.bypass,
+                        session: session.clone(),
+                        busy: false,
+                    };
+                    let result = commands::execute(&state, &config.project, command, &mut current).await;
+                    model = current.model;
+                    thinking = current.thinking;
+                    mode = current.mode;
+                    session = current.session;
+                    print_outputs(&result.outputs);
+                    if let Some(target) = result.review.as_deref() {
+                        run_review_command(&state, &config, model.as_ref(), thinking.clone(), target, &active_run).await;
                     }
+                    if result.exit {
+                        break;
+                    }
+                    continue;
                 }
 
-                let (attachment_tokens, rest): (Vec<&str>, Vec<&str>) = trimmed
-                    .split_whitespace()
-                    .partition(|token| token.starts_with('@'));
-                let mut tokens: Vec<String> = attachment_tokens.iter().map(|t| t.to_string()).collect();
-                tokens.extend(rest.iter().map(|token| token.to_string()));
-                let task = match super::args::assemble_prompt(&tokens, &config.project, None) {
+                // Same prompt rules as the TUI: `@file` mentions of existing
+                // project files are attached, the text stays verbatim.
+                let task = match super::prompt::build_prompt(trimmed, &config.project) {
                     Ok(task) => task,
                     Err(message) => {
                         eprintln!("lcgn: {message}");
@@ -158,232 +161,44 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
     0
 }
 
-enum SlashResult {
-    Continue,
-    Exit,
+/// Prints command outputs the REPL way: notices and errors on stderr, tables
+/// and diffs on stdout.
+fn print_outputs(outputs: &[Output]) {
+    for output in outputs {
+        match output {
+            Output::Notice(text) => eprintln!("lcgn: {text}"),
+            Output::Error(text) => eprintln!("lcgn: {text}"),
+            Output::Table(text) => {
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            Output::Diff(text) => {
+                println!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_slash(
+/// `/review [target]`: streams a read-only review of the working tree.
+async fn run_review_command(
     state: &Arc<AppState>,
-    command: &str,
     config: &ReplConfig,
-    model: &mut Option<ResolvedModel>,
-    thinking: &mut Option<String>,
-    mode: &mut String,
-    session: &mut Option<String>,
+    model: Option<&ResolvedModel>,
+    thinking: Option<String>,
+    argument: &str,
     active_run: &ActiveRun,
-) -> SlashResult {
-    let mut parts = command.split_whitespace();
-    let head = parts.next().unwrap_or("").to_lowercase();
-    let rest: Vec<&str> = parts.collect();
-    match (head.as_str(), rest.as_slice()) {
-        ("/exit", _) | ("/quit", _) => SlashResult::Exit,
-        ("/help", _) => {
-            eprintln!(
-                "Commands:\n\
-                 /model [provider/id]  show or switch models\n\
-                 /thinking <level>     reasoning effort (off|minimal|low|medium|high|xhigh|max)\n\
-                 /plan                 switch to plan mode\n\
-                 /build                switch to build mode (edits applied directly)\n\
-                 /new                  start a fresh session on the next message\n\
-                 /fork                 fork the current session into an independent copy\n\
-                 /undo                 undo the last turn (git snapshot restore)\n\
-                 /diff                 show the current working-tree diff\n\
-                 /mcp                  list configured MCP servers and their status\n\
-                 /skills               list discovered $skills for this project\n\
-                 /sessions             list sessions for this directory\n\
-                 /usage                usage/cost of the current session\n\
-                 /help                 this help\n\
-                 /exit                 leave lcgn (Ctrl+D also exits)"
-            );
-            SlashResult::Continue
+) {
+    let target = match super::review::target_from_slash(argument) {
+        Ok(target) => target,
+        Err(message) => return eprintln!("lcgn: {message}"),
+    };
+    match model {
+        Some(model) => {
+            super::review::run_review(state, &config.project, model, thinking, target, false, Some(active_run.clone()))
+                .await;
+            eprintln!();
         }
-        ("/fork", _) => {
-            match session.as_deref() {
-                Some(run_id) => match crate::api::runs::fork_run(state, run_id, None).await {
-                    Ok(forked) => {
-                        eprintln!("lcgn: forked run {run_id} -> {}", forked.id);
-                        *session = Some(forked.id);
-                    }
-                    Err(err) => eprintln!("lcgn: fork failed: {err}"),
-                },
-                None => {
-                    eprintln!("lcgn: no active session yet — send a message first.");
-                }
-            }
-            SlashResult::Continue
-        }
-        ("/undo", _) => {
-            let project = config.project.to_string_lossy().to_string();
-            match crate::api::projects::undo_last_turn(state, &project, session.as_deref()).await {
-                Ok(snapshot) => {
-                    eprintln!(
-                        "lcgn: restored snapshot {} (HEAD {}).",
-                        snapshot.id, snapshot.head_sha
-                    );
-                }
-                Err(err) => eprintln!("lcgn: undo failed: {err}"),
-            }
-            SlashResult::Continue
-        }
-        ("/diff", _) => {
-            let project = config.project.to_string_lossy().to_string();
-            match crate::api::projects::git_diff(state, &project, false).await {
-                Ok(diff) if diff.trim().is_empty() => {
-                    eprintln!("lcgn: working tree clean.");
-                }
-                Ok(diff) => {
-                    println!("{diff}");
-                    let _ = std::io::stdout().flush();
-                }
-                Err(err) => eprintln!("lcgn: diff failed: {err}"),
-            }
-            SlashResult::Continue
-        }
-        ("/review", _) => {
-            let argument = command.trim_start_matches("/review").trim();
-            let target = match super::review::target_from_slash(argument) {
-                Ok(target) => target,
-                Err(message) => {
-                    eprintln!("lcgn: {message}");
-                    return SlashResult::Continue;
-                }
-            };
-            match model.as_ref() {
-                Some(model) => {
-                    let thinking = thinking.clone();
-                    super::review::run_review(
-                        state, &config.project, model, thinking, target, false, Some(active_run.clone()),
-                    )
-                    .await;
-                    eprintln!();
-                }
-                None => eprintln!("lcgn: no model selected. Use /model provider/id first."),
-            }
-            SlashResult::Continue
-        }
-        ("/mcp", _) => {
-            let project = config.project.to_string_lossy().to_string();
-            match crate::api::mcp::list_mcp_servers(state, Some(&project)).await {
-                Ok(response) if response.servers.is_empty() => {
-                    eprintln!("lcgn: no MCP servers configured.");
-                }
-                Ok(response) => {
-                    for server in response.servers {
-                        eprintln!(
-                            "lcgn: {} — {} ({})",
-                            server.config.name, server.config.transport, server.status
-                        );
-                    }
-                }
-                Err(err) => eprintln!("lcgn: mcp list failed: {err}"),
-            }
-            SlashResult::Continue
-        }
-        ("/skills", _) => {
-            let project = config.project.to_string_lossy().to_string();
-            match crate::api::skills::list_skills(state, Some(&project)).await {
-                Ok(response) if response.skills.is_empty() => {
-                    eprintln!("lcgn: no skills discovered.");
-                }
-                Ok(response) => {
-                    for skill in response.skills {
-                        eprintln!(
-                            "lcgn: ${} — {} [{}]",
-                            skill.name, skill.description, skill.source
-                        );
-                    }
-                }
-                Err(err) => eprintln!("lcgn: skills list failed: {err}"),
-            }
-            SlashResult::Continue
-        }
-        ("/model", []) => {
-            let table = list_models_table(&state.pi, "").await;
-            print!("{table}");
-            let _ = std::io::stdout().flush();
-            SlashResult::Continue
-        }
-        ("/model", [target]) => {
-            match resolve_model(&state.pi, Some(target), None).await {
-                Ok(resolved) => {
-                    if state.pi.has_api_key(&resolved.provider_id)
-                        || resolved.provider_id == "ollama"
-                    {
-                        *model = Some(resolved.clone());
-                        eprintln!("lcgn: model set to {}.", resolved.label());
-                    } else {
-                        eprintln!(
-                            "lcgn: provider \"{}\" is not authenticated. Run `lcgn auth login {}`.",
-                            resolved.provider_id, resolved.provider_id
-                        );
-                    }
-                }
-                Err(message) => eprintln!("lcgn: {message}"),
-            }
-            SlashResult::Continue
-        }
-        ("/thinking", [level]) => {
-            match level.trim().to_lowercase().as_str() {
-                "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => {
-                    let level = level.trim().to_lowercase();
-                    let shown = level.clone();
-                    *thinking = if level == "off" { None } else { Some(level) };
-                    eprintln!("lcgn: thinking set to {shown}.");
-                }
-                _ => eprintln!("lcgn: unknown thinking level \"{level}\"."),
-            }
-            SlashResult::Continue
-        }
-        ("/thinking", []) => {
-            eprintln!(
-                "lcgn: thinking is currently {}.",
-                thinking.as_deref().unwrap_or("off")
-            );
-            SlashResult::Continue
-        }
-        ("/plan", _) => {
-            *mode = "plan".to_string();
-            eprintln!("lcgn: mode set to plan.");
-            SlashResult::Continue
-        }
-        ("/build", _) => {
-            *mode = "accept_edits".to_string();
-            eprintln!("lcgn: mode set to build.");
-            SlashResult::Continue
-        }
-        ("/new", _) => {
-            *session = None;
-            eprintln!("lcgn: next message starts a new session.");
-            SlashResult::Continue
-        }
-        ("/sessions", _) => {
-            auth::sessions_command(state, &config.project, false);
-            SlashResult::Continue
-        }
-        ("/usage", _) => match session.as_deref() {
-            Some(run_id) => {
-                let entries = state.db.list_usage(Some(run_id));
-                if entries.is_empty() {
-                    eprintln!("lcgn: no usage recorded for this session yet.");
-                } else {
-                    let input: i64 = entries.iter().map(|e| e.input_tokens).sum();
-                    let output: i64 = entries.iter().map(|e| e.output_tokens).sum();
-                    let cost: f64 = entries.iter().map(|e| e.cost).sum();
-                    let calls = entries.len();
-                    eprintln!("lcgn: {calls} call(s) · {input} in / {output} out · ${cost:.4}");
-                }
-                SlashResult::Continue
-            }
-            None => {
-                eprintln!("lcgn: no active session yet.");
-                SlashResult::Continue
-            }
-        },
-        (other, _) => {
-            eprintln!("lcgn: unknown command \"{other}\". Type /help.");
-            SlashResult::Continue
-        }
+        None => eprintln!("lcgn: no model selected. Use /model provider/id first."),
     }
 }

@@ -6,15 +6,15 @@ use super::popup::PopupItem;
 use super::transcript::CellKind;
 use crate::api::runs as runs_api;
 use crate::api::runs::{ContinueRunPayload, CreateRunPayload};
-use crate::cli::args::assemble_prompt;
-use crate::cli::auth;
-use crate::cli::models::{list_models_table, resolve_model};
+use crate::cli::commands::{self, ensure_authenticated, CommandSession, Output, SlashCommand};
+use crate::cli::events::{Pumped, RunEvents};
+use crate::cli::prompt::build_prompt;
 use crate::orchestrator::RunHandle;
 use crate::state::AppState;
 use serde_json::Value;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::broadcast::{error::RecvError, Receiver};
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Session options that never change while the TUI runs.
@@ -30,36 +30,10 @@ pub type FileResults = (String, Vec<String>);
 pub struct Driver {
     pub state: Arc<AppState>,
     pub app: App,
-    rx: Option<Receiver<Value>>,
+    rx: Option<RunEvents>,
     handle: Option<Arc<RunHandle>>,
     config: DriverConfig,
     files_tx: UnboundedSender<FileResults>,
-}
-
-/// Turns composer text into the run prompt: `@path` mentions of existing
-/// project files are attached (like the REPL), the text is kept verbatim.
-pub fn build_prompt(text: &str, project: &Path) -> Result<String, String> {
-    let mut messages: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        let Some(relative) = word.strip_prefix('@') else {
-            continue;
-        };
-        let relative = relative.trim_end_matches([',', '.', ';', ':', '!', '?', ')']);
-        let inside_project = Path::new(relative)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)));
-        let mention = format!("@{relative}");
-        if !relative.is_empty()
-            && inside_project
-            && project.join(relative).is_file()
-            && !messages.contains(&mention)
-        {
-            messages.push(mention);
-        }
-    }
-    // The leading space keeps `@file ...` text from being read as an attachment.
-    messages.push(format!(" {text}"));
-    assemble_prompt(&messages, project, None)
 }
 
 /// The `/review ` popup entries for `project`: uncommitted changes, every
@@ -119,24 +93,31 @@ impl Driver {
     }
 
     /// Next event of the active run; pending forever when idle.
-    pub async fn recv_run(&mut self) -> Option<Result<Value, RecvError>> {
+    pub async fn recv_run(&mut self) -> Option<Pumped> {
         match self.rx.as_mut() {
-            Some(rx) => Some(rx.recv().await),
+            Some(events) => Some(events.next().await),
             None => std::future::pending().await,
         }
     }
 
-    pub async fn on_run_recv(&mut self, received: Result<Value, RecvError>) {
+    pub async fn on_run_recv(&mut self, received: Pumped) {
         match received {
-            Ok(event) => {
+            Pumped::Event(event) => {
                 self.app.on_run_event(&event);
                 let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
                 if matches!(kind, "round_started" | "run_completed" | "run_failed") {
                     self.refresh_usage();
                 }
             }
-            Err(RecvError::Lagged(_)) => {}
-            Err(RecvError::Closed) => {
+            // The receiver lagged: re-apply the persisted messages so the
+            // transcript catches up; pending prompts and a terminal event
+            // follow as ordinary events (QA-046).
+            Pumped::Resynced(resync) => {
+                let values: Vec<Value> = resync.messages.iter().filter_map(|m| serde_json::to_value(m).ok()).collect();
+                self.app.load_history(&values);
+                self.refresh_usage();
+            }
+            Pumped::Closed => {
                 self.app.on_run_closed();
                 self.rx = None;
             }
@@ -155,7 +136,7 @@ impl Driver {
         self.handle = None;
         if self.config.no_session {
             if let Some(id) = self.app.session.take() {
-                self.state.db.delete_run(&id);
+                let _ = runs_api::delete_run(&self.state, &id).await;
             }
         }
         self.refresh_usage();
@@ -237,11 +218,7 @@ impl Driver {
 
     async fn start_turn(&mut self, prompt: String) {
         if let Some(model) = &self.app.model {
-            if !self.state.pi.has_api_key(&model.provider_id) && model.provider_id != "ollama" {
-                let message = format!(
-                    "Provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
-                    model.provider_id
-                );
+            if let Err(message) = ensure_authenticated(&self.state, model) {
                 return self.app.push_error(message);
             }
         }
@@ -251,8 +228,8 @@ impl Driver {
         };
         match started {
             Ok((run_id, rx, handle)) => {
+                self.rx = Some(RunEvents::new(self.state.clone(), run_id.clone(), rx));
                 self.app.session = Some(run_id);
-                self.rx = Some(rx);
                 self.handle = Some(handle);
                 self.app.begin_turn();
             }
@@ -278,6 +255,7 @@ impl Driver {
             bypass_permissions: self.app.bypass,
             system_prompt: self.config.system_prompt.clone(),
             append_system_prompt: self.config.append_system_prompt.clone(),
+            no_session: self.config.no_session,
             ..Default::default()
         };
         match runs_api::create_run(&self.state, &payload).await {
@@ -362,91 +340,51 @@ impl Driver {
 
     // ---- slash commands ----------------------------------------------------------
 
-    async fn slash(&mut self, command: &str) {
-        let mut parts = command.split_whitespace();
-        let head = parts.next().unwrap_or("").to_lowercase();
-        let rest: Vec<&str> = parts.collect();
-        let project = self.app.project.display().to_string();
-        match (head.as_str(), rest.as_slice()) {
-            ("/exit" | "/quit", _) => self.quit().await,
-            ("/help", _) => self.app.push_notice(App::help_text()),
-            ("/plan", _) => {
-                self.app.set_build_mode(true);
-                self.app.push_notice("Mode set to plan (read-only).");
-            }
-            ("/build", _) => {
-                self.app.set_build_mode(false);
-                self.app.push_notice(format!("Mode set to {}.", self.app.mode_label().to_lowercase()));
-            }
-            ("/thinking", []) => {
-                let level = self.app.thinking.clone().unwrap_or_else(|| "off".into());
-                self.app.push_notice(format!("Thinking is {level}."));
-            }
-            ("/thinking", [level]) => self.set_thinking(level),
-            ("/model", []) => {
-                let table = list_models_table(&self.state.pi, "").await;
-                self.app.push_notice(table.trim_end().to_string());
-            }
-            ("/model", [target]) => self.set_model(target).await,
-            ("/diff", _) => self.show_diff(&project).await,
-            ("/review", _) if self.app.busy => {
-                self.app.push_notice("Wait for the current run to finish (or press Esc to interrupt).");
-            }
-            ("/review", _) => self.start_review(command.trim_start_matches("/review").trim()).await,
-            ("/mcp", _) => self.show_mcp(&project).await,
-            ("/skills", _) => self.show_skills(&project).await,
-            ("/sessions", _) => self.show_sessions(&project),
-            ("/usage", _) => self.show_usage(),
-            ("/new" | "/fork" | "/undo", _) if self.app.busy => {
-                self.app.push_notice("Wait for the current run to finish (or press Esc to interrupt).");
-            }
-            ("/new", _) => self.new_session(),
-            ("/fork", _) => self.fork_session().await,
-            ("/undo", _) => self.undo(&project).await,
-            (other, _) => self.app.push_error(format!("Unknown command \"{other}\". Type /help.")),
+    /// Runs a slash command through the shared executor and applies the
+    /// result to the UI; only help text, review streaming and quitting are
+    /// TUI specific.
+    async fn slash(&mut self, line: &str) {
+        let Some(command) = SlashCommand::parse(line) else { return };
+        if command == SlashCommand::Help {
+            return self.app.push_notice(App::help_text());
         }
-    }
+        let mut session = CommandSession {
+            model: self.app.model.clone(),
+            thinking: self.app.thinking.clone(),
+            mode: self.app.mode.clone(),
+            bypass: self.app.bypass,
+            session: self.app.session.clone(),
+            busy: self.app.busy,
+        };
+        let project = self.app.project.clone();
+        let result = commands::execute(&self.state, &project, command, &mut session).await;
 
-    fn set_thinking(&mut self, level: &str) {
-        let level = level.to_lowercase();
-        if !["off", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&level.as_str()) {
-            return self.app.push_error(format!("Unknown thinking level \"{level}\"."));
+        self.app.model = session.model;
+        self.app.thinking = session.thinking;
+        if self.app.mode != session.mode {
+            self.app.mode = session.mode;
+            self.app.dirty = true;
         }
-        self.app.thinking = (level != "off").then(|| level.clone());
-        self.app.push_notice(format!("Thinking set to {level}."));
-    }
-
-    async fn set_model(&mut self, target: &str) {
-        match resolve_model(&self.state.pi, Some(target), None).await {
-            Ok(resolved) => {
-                if self.state.pi.has_api_key(&resolved.provider_id) || resolved.provider_id == "ollama" {
-                    self.app.push_notice(format!("Model set to {}.", resolved.label()));
-                    self.app.model = Some(resolved);
-                } else {
-                    self.app.push_error(format!(
-                        "Provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
-                        resolved.provider_id
-                    ));
-                }
-            }
-            Err(message) => {
-                let table = list_models_table(&self.state.pi, target).await;
-                self.app.push_error(message);
-                if !table.trim().is_empty() {
-                    self.app.push_notice(table.trim_end().to_string());
-                }
+        self.app.session = session.session;
+        if result.reset_view {
+            self.app.title = None;
+            self.app.cells.clear();
+            self.app.set_usage(UsageInfo::default());
+            self.app.viewport.follow = true;
+        }
+        for output in result.outputs {
+            match output {
+                Output::Notice(text) => self.app.push_notice(text),
+                Output::Error(text) => self.app.push_error(text),
+                Output::Table(text) => self.app.push_notice(text.trim_end().to_string()),
+                Output::Diff(diff) => self.app.push(CellKind::Diff { title: "Working tree diff".into(), diff }),
             }
         }
-    }
-
-    async fn show_diff(&mut self, project: &str) {
-        match crate::api::projects::git_diff(&self.state, project, false).await {
-            Ok(diff) if diff.trim().is_empty() => self.app.push_notice("Working tree clean."),
-            Ok(diff) => self.app.push(CellKind::Diff {
-                title: "Working tree diff".into(),
-                diff,
-            }),
-            Err(err) => self.app.push_error(format!("diff failed: {err}")),
+        if let Some(target) = result.review {
+            self.start_review(&target).await;
+        }
+        if result.exit {
+            self.quit().await;
         }
     }
 
@@ -461,11 +399,8 @@ impl Driver {
         let Some(model) = self.app.model.clone() else {
             return self.app.push_error("No model selected. Use /model provider/id (type /model to list models).");
         };
-        if !self.state.pi.has_api_key(&model.provider_id) && model.provider_id != "ollama" {
-            return self.app.push_error(format!(
-                "Provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
-                model.provider_id
-            ));
+        if let Err(message) = ensure_authenticated(&self.state, &model) {
+            return self.app.push_error(message);
         }
         crate::cli::runner::ensure_project(&self.state, &self.app.project);
         let payload = crate::api::review::StartReviewPayload {
@@ -482,148 +417,12 @@ impl Driver {
                 self.app.set_usage(UsageInfo::default());
                 self.app.viewport.follow = true;
                 self.app.push_notice(format!("Reviewing {} (read-only).", target.hint()));
+                self.rx = Some(RunEvents::new(self.state.clone(), started.run.id.clone(), started.events));
                 self.app.session = Some(started.run.id);
-                self.rx = Some(started.events);
                 self.handle = Some(started.handle);
                 self.app.begin_turn();
             }
             Err(err) => self.app.push_error(err.message),
         }
-    }
-
-    async fn show_mcp(&mut self, project: &str) {
-        match crate::api::mcp::list_mcp_servers(&self.state, Some(project)).await {
-            Ok(response) if response.servers.is_empty() => self.app.push_notice("No MCP servers configured."),
-            Ok(response) => {
-                let lines: Vec<String> = response
-                    .servers
-                    .iter()
-                    .map(|s| format!("{} — {} ({})", s.config.name, s.config.transport, s.status))
-                    .collect();
-                self.app.push_notice(lines.join("\n"));
-            }
-            Err(err) => self.app.push_error(format!("mcp list failed: {err}")),
-        }
-    }
-
-    async fn show_skills(&mut self, project: &str) {
-        match crate::api::skills::list_skills(&self.state, Some(project)).await {
-            Ok(response) if response.skills.is_empty() => self.app.push_notice("No skills discovered."),
-            Ok(response) => {
-                let lines: Vec<String> = response
-                    .skills
-                    .iter()
-                    .map(|s| format!("${} — {} [{}]", s.name, s.description, s.source))
-                    .collect();
-                self.app.push_notice(lines.join("\n"));
-            }
-            Err(err) => self.app.push_error(format!("skills list failed: {err}")),
-        }
-    }
-
-    fn show_sessions(&mut self, project: &str) {
-        let runs = auth::sessions_for(&self.state, Some(project));
-        if runs.is_empty() {
-            return self.app.push_notice("No sessions for this directory yet.");
-        }
-        let lines: Vec<String> = runs
-            .iter()
-            .take(15)
-            .map(|run| {
-                let id: String = run.id.chars().take(20).collect();
-                let title = run.title.lines().next().unwrap_or("").trim();
-                format!("{id}  {:<10} {title}", run.status)
-            })
-            .collect();
-        self.app.push_notice(lines.join("\n"));
-    }
-
-    fn show_usage(&mut self) {
-        let Some(run_id) = self.app.session.clone() else {
-            return self.app.push_notice("No active session yet.");
-        };
-        let entries = self.state.db.list_usage(Some(&run_id));
-        if entries.is_empty() {
-            return self.app.push_notice("No usage recorded for this session yet.");
-        }
-        let input: i64 = entries.iter().map(|e| e.input_tokens).sum();
-        let output: i64 = entries.iter().map(|e| e.output_tokens).sum();
-        let cost: f64 = entries.iter().map(|e| e.cost).sum();
-        self.app.push_notice(format!(
-            "{} call(s) · {input} in / {output} out · ${cost:.4}",
-            entries.len()
-        ));
-    }
-
-    fn new_session(&mut self) {
-        self.app.session = None;
-        self.app.title = None;
-        self.app.cells.clear();
-        self.app.set_usage(UsageInfo::default());
-        self.app.viewport.follow = true;
-        self.app.push_notice("Next message starts a new session.");
-    }
-
-    async fn fork_session(&mut self) {
-        let Some(run_id) = self.app.session.clone() else {
-            return self.app.push_notice("No active session yet - send a message first.");
-        };
-        match runs_api::fork_run(&self.state, &run_id, None).await {
-            Ok(forked) => {
-                self.app.push_notice(format!("Forked {run_id} -> {}", forked.id));
-                self.app.session = Some(forked.id);
-            }
-            Err(err) => self.app.push_error(format!("fork failed: {err}")),
-        }
-    }
-
-    async fn undo(&mut self, project: &str) {
-        let session = self.app.session.clone();
-        match crate::api::projects::undo_last_turn(&self.state, project, session.as_deref()).await {
-            Ok(snapshot) => self.app.push_notice(format!(
-                "Restored snapshot {} (HEAD {}).",
-                snapshot.id, snapshot.head_sha
-            )),
-            Err(err) => self.app.push_error(format!("undo failed: {err}")),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn project() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lcgn-tui-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/a.rs"), "fn a() {}").unwrap();
-        dir
-    }
-
-    #[test]
-    fn mentions_of_existing_files_are_attached_once() {
-        let dir = project();
-        let prompt = build_prompt("explain @src/a.rs, then @src/a.rs again\nplease", &dir).unwrap();
-        assert!(prompt.starts_with("## Attached file: src/a.rs"));
-        assert_eq!(prompt.matches("## Attached file:").count(), 1);
-        assert!(prompt.contains("explain @src/a.rs, then @src/a.rs again\nplease"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn unknown_or_escaping_mentions_stay_plain_text() {
-        let dir = project();
-        let prompt = build_prompt("ping @alice and read @../secret.txt", &dir).unwrap();
-        assert_eq!(prompt, "ping @alice and read @../secret.txt");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn text_starting_with_a_mention_is_not_an_attachment_path() {
-        let dir = project();
-        let prompt = build_prompt("@src/a.rs explain", &dir).unwrap();
-        assert!(prompt.contains("fn a() {}"));
-        assert!(prompt.trim_end().ends_with("@src/a.rs explain"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -19,6 +19,8 @@
   permissions.json        list of PermissionRule     (atomic tmp + rename)
   .usage_seq              last allocated usage id (cross-process counter)
   .lock                   advisory lock for the shared files above
+  run_locks/<run_id>.lock owner lock of an active run, held by the process driving it
+  projects/<sanitized-project-path>/snapshots/   git-snapshot store (snapshots.json + <id>.index copies)
   .migrated-from-data-v1  marker: legacy data already imported
 ```
 
@@ -39,22 +41,45 @@ The file-name timestamp is the run's `createdAt` (UTC) and `<run_id>` is the run
 | `session_meta` | first line: the `Run` (plus `forked_from`, `forked_up_to_message_id` when forked) |
 | `run_update` | full `Run` snapshot (status, title, error, any patch) |
 | `message` | a `RunMessage` |
-| `message_update` | replacement `RunMessage` for an existing `id` |
+| `message_update` | replacement `RunMessage` for an existing `id` (a streaming message gets one checkpoint every 5 s plus the final one) |
 | `plan` | full `Plan` snapshot |
-| `usage` | a `UsageLogEntry` |
+| `usage` | a `UsageLogEntry` (the id comes from `.usage_seq`, under the lock only while it is allocated) |
 
 Rollouts are strictly **append-only**: an in-place update is an appended line, and
 loading replays the file so the last write wins. A truncated or corrupt line
 (e.g. a crash mid-write) is skipped; the next append first terminates it with a
 newline so it never corrupts a good line. Deleting a run removes its rollout file
-(and now-empty date directories); `session_index.jsonl` and `history.jsonl` are never
-rewritten. `fork_run` writes a new rollout holding a fresh `session_meta`
+(and now-empty date directories) and tombstones the id for the life of the process, so
+a drive task that is still unwinding cannot write a headless rollout back;
+`api::runs::delete_run` cancels an active run first. `session_index.jsonl` and
+`history.jsonl` are never rewritten, and are not written at all for ephemeral
+runs (`lcgn --no-session`, `Run.ephemeral`), which are also removed at startup if
+a crash left them behind. `fork_run` writes a new rollout holding a fresh `session_meta`
 (`forked_from`), the copied messages (new ids) and the plan; usage is not copied.
 
-All state is mirrored in memory (O(1) reads). `refresh_runs()` re-reads the
-rollouts so runs written by another process become visible. Startup cleanup
-appends a `run_update` (status `failed`) and a system `message` to every run
-left in `created`, `generating`, `awaiting_permission` or `awaiting_input`.
+All state is mirrored in memory (O(1) reads). While a message streams, the
+in-memory copy is updated on every chunk but the rollout only receives a
+`message_update` checkpoint every 5 s and the final text, so a long answer costs
+a handful of lines instead of one per 250 ms; a crash loses at most the last
+seconds of text of a run that is failed on restart anyway.
+
+`refresh_runs()` re-reads the rollouts whose mtime/size changed (and drops runs
+whose file is gone) so runs written by another process become visible; runs
+this process is driving are never overwritten. `api::runs::list_runs` calls it
+at most every 2 s. `permissions.json`, `projects.json` and the memory files are
+re-read when their mtime changes, so a grant revoked in one process stops
+applying in the other.
+
+An active run (`created`, `generating`, `awaiting_permission`, `awaiting_input`)
+is *owned* by the process driving it: it holds an exclusive lock on
+`run_locks/<run_id>.lock` until the run reaches a terminal status (the OS frees
+it if the process dies). Startup cleanup appends a `run_update` (status
+`failed`) and a system `message` only to active runs whose lock is not held, so
+starting `lcgn` while the desktop drives a run, or the reverse, leaves that run alone.
+
+Storage errors do not panic the app: if `.lock` cannot be opened or taken within
+10 s the mutation proceeds without the cross-process lock (with a warning), and
+a poisoned in-memory lock is recovered rather than propagated.
 
 ### Memories
 
