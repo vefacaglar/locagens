@@ -1018,10 +1018,11 @@ impl PiProviderManager {
 
     /// The `auth.json` holding the winning pi-style credential for a
     /// provider, in the same precedence as `read_auth_map`: primary first,
-    /// then fallbacks last-to-first (a later fallback wins the merge).
+    /// then fallbacks in listed order (the first listed fallback wins the
+    /// merge). OpenCode only holds api keys, so it is never an oauth source.
     fn oauth_source_path(&self, provider_id: &str) -> Option<PathBuf> {
         std::iter::once(self.auth_path())
-            .chain(self.fallback_dirs.iter().rev().map(|dir| dir.join("auth.json")))
+            .chain(self.fallback_dirs.iter().map(|dir| dir.join("auth.json")))
             .find(|path| {
                 Self::read_json(path)
                     .get(provider_id)
@@ -2171,6 +2172,35 @@ mod tests {
         assert!(!manager.has_api_key("acme"));
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[test]
+    fn oauth_source_matches_auth_merge_precedence() {
+        let (primary, support) = temp_dirs("oauth-src");
+        let (first, second) = temp_dirs("oauth-src-fallbacks");
+        for (dir, access) in [(&first, "from-first"), (&second, "from-second")] {
+            let entry = json!({ "acme": { "type": "oauth", "access": access, "refresh": "r", "expires": 0 } });
+            std::fs::write(dir.join("auth.json"), entry.to_string()).unwrap();
+        }
+        let manager = PiProviderManager::with_chain(
+            primary.clone(),
+            support.clone(),
+            vec![first.clone(), second.clone()],
+        );
+
+        // The merged credential and the file a refresh would rewrite must be the same one.
+        assert_eq!(manager.read_auth_map()["acme"]["access"], "from-first");
+        assert_eq!(manager.oauth_source_path("acme"), Some(first.join("auth.json")));
+
+        // The primary file still wins over every fallback.
+        let primary_entry = json!({ "acme": { "type": "oauth", "access": "from-primary", "refresh": "r", "expires": 0 } });
+        std::fs::write(primary.join("auth.json"), primary_entry.to_string()).unwrap();
+        assert_eq!(manager.read_auth_map()["acme"]["access"], "from-primary");
+        assert_eq!(manager.oauth_source_path("acme"), Some(primary.join("auth.json")));
+
+        for dir in [primary, support, first, second] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
