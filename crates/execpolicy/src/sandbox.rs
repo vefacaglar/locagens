@@ -1,15 +1,23 @@
-//! Native OS sandboxing: macOS Seatbelt (`sandbox-exec`) and Linux
-//! Bubblewrap (`bwrap`), ported from Codex's sandbox policy model.
+//! Native OS sandboxing: macOS Seatbelt (`sandbox-exec`), Linux Bubblewrap
+//! (`bwrap`) and a Windows restricted-token backend, ported from Codex's
+//! sandbox policy model.
 //!
-//! Commands run through [`wrap_shell_command`] are wrapped into a sandbox
-//! process when the run's [`SandboxMode`] is not `danger-full-access` and a
-//! native backend is detected; otherwise the command runs unchanged (host
-//! with a secret-stripped environment only).
+//! On macOS/Linux, commands run through [`wrap_shell_command`] are wrapped
+//! into a sandbox process when the run's [`SandboxMode`] is not
+//! `danger-full-access` and a native backend is detected. Windows cannot be
+//! expressed as an argv wrapper: callers check [`uses_native_spawn`] and
+//! spawn through [`crate::windows_sandbox`] (see [`run_captured`] and the
+//! `ProcessManager`), which also routes network traffic through the
+//! per-domain [`NetworkProxy`].
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use locagens_protocol::SandboxMode;
+
+use crate::network_proxy::{NetworkPolicy, NetworkProxy};
 
 /// Available native sandbox backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +27,8 @@ pub enum SandboxBackend {
     MacosSeatbelt,
     /// Linux Bubblewrap via `bwrap`.
     LinuxBubblewrap,
+    /// Windows write-restricted token + capability-SID ACLs + Job Object.
+    WindowsRestrictedToken,
     /// No native backend: commands run on the host (secrets stripped).
     HostEnvOnly,
 }
@@ -28,7 +38,12 @@ pub enum SandboxBackend {
 pub struct SandboxSpec {
     pub mode: SandboxMode,
     pub project_path: PathBuf,
+    /// macOS/Linux: allow all outbound network. Ignored by the Windows
+    /// backend, which always routes sandboxed commands through the proxy.
     pub allow_network: bool,
+    /// Windows: the per-domain allowlist (+ approval hook) enforced by the
+    /// command's network proxy. `None` means deny every host.
+    pub network: Option<NetworkPolicy>,
 }
 
 /// Detects the best available sandbox backend on this platform.
@@ -41,8 +56,215 @@ pub fn detect_backend() -> SandboxBackend {
     if Path::new("/usr/bin/bwrap").is_file() || Path::new("/bin/bwrap").is_file() {
         return SandboxBackend::LinuxBubblewrap;
     }
+    #[cfg(windows)]
+    return SandboxBackend::WindowsRestrictedToken;
     #[allow(unreachable_code)]
     SandboxBackend::HostEnvOnly
+}
+
+/// Whether `spec` must be spawned in-process through the Windows backend
+/// (restricted token) instead of an argv wrapper.
+pub fn uses_native_spawn(spec: Option<&SandboxSpec>) -> bool {
+    cfg!(windows) && spec.is_some_and(|spec| spec.mode != SandboxMode::DangerFullAccess)
+}
+
+/// Keeps a natively sandboxed child's Job Object and network proxy alive.
+/// Dropping it while the command still runs kills the process tree.
+pub struct SandboxSession {
+    #[cfg(windows)]
+    job: std::sync::Arc<crate::windows_sandbox::JobObject>,
+    proxy: Option<NetworkProxy>,
+}
+
+impl SandboxSession {
+    /// Kills the whole sandboxed process tree.
+    pub fn terminate(&self) {
+        #[cfg(windows)]
+        let _ = self.job.terminate();
+    }
+
+    /// The root exited on its own: let background descendants keep running
+    /// after the session is dropped (Codex `preserve_descendants`).
+    pub fn release_descendants(&self) {
+        #[cfg(windows)]
+        let _ = self.job.preserve_descendants();
+    }
+
+    /// Hosts the network proxy refused so far.
+    pub fn blocked_hosts(&self) -> Vec<String> {
+        self.proxy.as_ref().map(NetworkProxy::blocked_hosts).unwrap_or_default()
+    }
+}
+
+/// Starts the per-command network proxy for a natively sandboxed spec and
+/// returns it with the environment variables pointing at it.
+pub fn start_network_proxy(spec: &SandboxSpec) -> std::io::Result<(NetworkProxy, Vec<(String, String)>)> {
+    let proxy = NetworkProxy::start(spec.network.clone().unwrap_or_default())?;
+    let vars = proxy.env_vars();
+    Ok((proxy, vars))
+}
+
+/// A natively spawned sandboxed child plus the session that owns it.
+#[cfg(windows)]
+pub struct NativeChild {
+    pub child: crate::windows_sandbox::SandboxedChild,
+    pub session: SandboxSession,
+}
+
+/// Spawns `program args` inside the Windows sandbox with its own network
+/// proxy. `env` is the complete child environment. Errors mean the command
+/// did not run (fail closed).
+#[cfg(windows)]
+pub fn spawn_native(
+    spec: &SandboxSpec,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    mut env: HashMap<String, String>,
+    stdin_pipe: bool,
+) -> Result<NativeChild, String> {
+    let (proxy, proxy_env) = start_network_proxy(spec)
+        .map_err(|err| format!("Windows sandbox: cannot start the network proxy: {err}"))?;
+    env.extend(proxy_env);
+    let request = crate::windows_sandbox::SpawnRequest {
+        program,
+        args,
+        cwd,
+        env: &env,
+        stdin_pipe,
+    };
+    let child = crate::windows_sandbox::spawn_sandboxed(spec, &request)?;
+    let session = SandboxSession {
+        job: std::sync::Arc::clone(&child.job),
+        proxy: Some(proxy),
+    };
+    Ok(NativeChild { child, session })
+}
+
+/// Output of [`run_captured`].
+#[derive(Clone, Debug, Default)]
+pub struct CapturedOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Hosts the network proxy refused (Windows sandbox only).
+    pub blocked_hosts: Vec<String>,
+}
+
+impl CapturedOutput {
+    pub fn success(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+}
+
+/// Runs `program args` to completion with exactly `env` as its environment,
+/// sandboxed per `spec`, killing the process tree after `timeout`
+/// (`ErrorKind::TimedOut`). On Windows a sandbox that cannot be set up is an
+/// error — the command never runs unsandboxed outside full-access mode.
+pub async fn run_captured(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: HashMap<String, String>,
+    spec: Option<&SandboxSpec>,
+    timeout: Duration,
+) -> std::io::Result<CapturedOutput> {
+    #[cfg(windows)]
+    if let Some(spec) = spec.filter(|spec| uses_native_spawn(Some(spec))) {
+        return run_captured_native(spec, program, args, cwd, env, timeout).await;
+    }
+    let (program, prog_args) = wrap_shell_command(program, args, spec);
+    let mut cmd = tokio::process::Command::new(&program);
+    set_command_args(&mut cmd, &program, &prog_args);
+    cmd.current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .env_clear()
+        .envs(env);
+    let output = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))??;
+    Ok(CapturedOutput {
+        exit_code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        blocked_hosts: Vec::new(),
+    })
+}
+
+/// Sets `args` on `cmd`. On Windows a `cmd /C <script>` pair is passed
+/// verbatim as `/s /c "<script>"` (Codex `cmd_script_command_line`): MSVC
+/// argument quoting would turn the script's own quotes into `\"`, which
+/// `cmd.exe` does not understand.
+pub fn set_command_args(cmd: &mut tokio::process::Command, program: &str, args: &[String]) {
+    #[cfg(windows)]
+    if let Some(script) = cmd_script(program, args) {
+        cmd.raw_arg(format!("/s /c \"{script}\""));
+        return;
+    }
+    let _ = program;
+    cmd.args(args);
+}
+
+/// The script of a `cmd /C <script>` invocation, if `program args` is one.
+pub fn cmd_script<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    let is_cmd = name == "cmd" || name == "cmd.exe";
+    match args {
+        [switch, script] if is_cmd && switch.eq_ignore_ascii_case("/c") => Some(script.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+async fn run_captured_native(
+    spec: &SandboxSpec,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: HashMap<String, String>,
+    timeout: Duration,
+) -> std::io::Result<CapturedOutput> {
+    use std::io::Read;
+
+    let NativeChild { child, session } =
+        spawn_native(spec, program, args, cwd, env, false).map_err(std::io::Error::other)?;
+    let waiter = child.waiter()?;
+    let crate::windows_sandbox::SandboxedChild { mut stdout, mut stderr, .. } = child;
+    let read_stdout = tokio::task::spawn_blocking(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout.read_to_end(&mut buffer);
+        buffer
+    });
+    let read_stderr = tokio::task::spawn_blocking(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+    let wait = tokio::task::spawn_blocking(move || waiter.wait());
+    let finished = tokio::time::timeout(timeout, async {
+        let code = wait.await.map_err(std::io::Error::other)??;
+        let stdout = read_stdout.await.unwrap_or_default();
+        let stderr = read_stderr.await.unwrap_or_default();
+        Ok::<_, std::io::Error>((code, stdout, stderr))
+    })
+    .await;
+    match finished {
+        Ok(result) => {
+            let (code, stdout, stderr) = result?;
+            session.release_descendants();
+            Ok(CapturedOutput {
+                exit_code: Some(code),
+                stdout,
+                stderr,
+                blocked_hosts: session.blocked_hosts(),
+            })
+        }
+        Err(_) => {
+            session.terminate();
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))
+        }
+    }
 }
 
 fn canonical_or(path: &Path) -> String {
@@ -191,8 +413,22 @@ pub fn wrap_shell_command(
             ("/usr/bin/sandbox-exec".to_string(), out)
         }
         SandboxBackend::LinuxBubblewrap => build_linux_bwrap_args(spec, program, args),
+        SandboxBackend::WindowsRestrictedToken => refuse_unsandboxed_windows_command(),
         SandboxBackend::HostEnvOnly => (program.to_string(), args.to_vec()),
     }
+}
+
+/// Fail-closed stand-in for callers that try to argv-wrap a sandboxed
+/// Windows command instead of using [`uses_native_spawn`]: the replacement
+/// command only prints an error and exits non-zero.
+fn refuse_unsandboxed_windows_command() -> (String, Vec<String>) {
+    (
+        "cmd".to_string(),
+        vec![
+            "/C".to_string(),
+            "echo Locagens: sandboxed Windows commands must be spawned through the Windows sandbox backend; refusing to run unsandboxed. 1>&2 & exit /b 126".to_string(),
+        ],
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -214,8 +450,63 @@ mod tests {
             mode: SandboxMode::WorkspaceWrite,
             project_path: canonical.clone(),
             allow_network: false,
+            network: None,
         };
         (canonical, spec)
+    }
+
+    #[test]
+    fn native_spawn_is_windows_only_and_skips_full_access() {
+        let (root, mut spec) = temp_spec("native");
+        assert_eq!(uses_native_spawn(Some(&spec)), cfg!(windows));
+        assert!(!uses_native_spawn(None));
+        spec.mode = SandboxMode::ReadOnly;
+        assert_eq!(uses_native_spawn(Some(&spec)), cfg!(windows));
+        spec.mode = SandboxMode::DangerFullAccess;
+        assert!(!uses_native_spawn(Some(&spec)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A stray argv-wrapping caller on Windows gets a refusing command, never
+    /// the original one.
+    #[cfg(windows)]
+    #[test]
+    fn windows_argv_wrapping_fails_closed() {
+        let (root, spec) = temp_spec("wrap");
+        let original = vec!["/C".to_string(), "echo hi > x.txt".to_string()];
+        let (program, args) = wrap_shell_command("cmd", &original, Some(&spec));
+        assert_eq!(program, "cmd");
+        assert_ne!(args, original);
+        assert!(args[1].contains("refusing to run unsandboxed"));
+        assert!(args[1].contains("exit /b 126"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When the sandbox cannot be set up the command must not run at all.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_sandbox_setup_failure_fails_closed() {
+        let missing = std::env::temp_dir().join(format!("locagens-sbx-missing-{}", uuid::Uuid::new_v4()));
+        let marker = std::env::temp_dir().join(format!("locagens-sbx-marker-{}", uuid::Uuid::new_v4()));
+        let spec = SandboxSpec {
+            mode: SandboxMode::WorkspaceWrite,
+            project_path: missing.clone(),
+            allow_network: false,
+            network: None,
+        };
+        let script = format!("echo ran > \"{}\"", marker.display());
+        let result = run_captured(
+            "cmd",
+            &["/C".to_string(), script],
+            &std::env::temp_dir(),
+            HashMap::new(),
+            Some(&spec),
+            Duration::from_secs(30),
+        )
+        .await;
+        let err = result.expect_err("setup failure must be an error, not an unsandboxed run");
+        assert!(err.to_string().contains("Windows sandbox"), "{err}");
+        assert!(!marker.exists(), "the command must not have run");
     }
 
     #[test]
@@ -246,12 +537,16 @@ mod tests {
             &format!("{root_str}/.locagens")
         );
 
-        // The wrapped argv carries the profile and every parameter.
-        let (program, args) = wrap_shell_command("/bin/sh", &["-c".to_string(), "true".to_string()], Some(&spec));
-        assert_eq!(program, "/usr/bin/sandbox-exec");
-        assert!(args.contains(&profile));
-        assert!(args.iter().any(|arg| arg.starts_with("-DPROJECT_ROOT=")));
-        assert!(args.iter().any(|arg| arg.starts_with("-DGIT_CONFIG_FILE=")));
+        // The wrapped argv carries the profile and every parameter (only
+        // where Seatbelt is the active backend).
+        if detect_backend() == SandboxBackend::MacosSeatbelt {
+            let (program, args) =
+                wrap_shell_command("/bin/sh", &["-c".to_string(), "true".to_string()], Some(&spec));
+            assert_eq!(program, "/usr/bin/sandbox-exec");
+            assert!(args.contains(&profile));
+            assert!(args.iter().any(|arg| arg.starts_with("-DPROJECT_ROOT=")));
+            assert!(args.iter().any(|arg| arg.starts_with("-DGIT_CONFIG_FILE=")));
+        }
 
         // Full-access mode runs unchanged.
         let (program, args) = wrap_shell_command(
@@ -261,6 +556,7 @@ mod tests {
                 mode: SandboxMode::DangerFullAccess,
                 project_path: root.clone(),
                 allow_network: true,
+                network: None,
             }),
         );
         assert_eq!(program, "/bin/sh");

@@ -130,6 +130,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "shell": json!({ "type": "string", "description": "Optional shell program for the session (e.g. `bash`, `zsh`); defaults to the platform shell." }),
                 "login": json!({ "type": "boolean", "description": "Run the shell as a login shell (-lc) so profile/rc files load." }),
                 "tty": json!({ "type": "boolean", "description": "Allocate a pseudo-terminal for the session (enables TTY-aware programs like progress bars and editors)." }),
+                "network_domains": json!({ "type": "array", "items": { "type": "string" }, "description": "Outbound hosts the command needs (e.g. registry.npmjs.org); the user approves them with the command." }),
                 "justification": json!({ "type": "string", "description": "Short reason shown on the permission card." })
             }), &["cmd"]),
         def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll.",
@@ -380,7 +381,7 @@ pub fn exec_session_env() -> std::collections::HashMap<String, String> {
         if is_secret_env(&name) {
             continue;
         }
-        if SAFE.contains(&name.as_str()) || name.starts_with("SYSTEMROOT") {
+        if is_safe_env_name(&name, &SAFE) {
             env.insert(name, value);
         }
     }
@@ -730,47 +731,51 @@ fn is_secret_env(name: &str) -> bool {
         || upper.contains("PRIVATE_KEY")
 }
 
+/// Whether `name` is on the safe environment allowlist. Windows variable
+/// names are case-insensitive (`SystemRoot`, `Path`, `ComSpec`); without
+/// `SystemRoot` a child process cannot even initialize Winsock.
+fn is_safe_env_name(name: &str, safe: &[&str]) -> bool {
+    let name = if cfg!(windows) { name.to_uppercase() } else { name.to_string() };
+    safe.contains(&name.as_str()) || name.starts_with("SYSTEMROOT")
+}
+
 async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String, String> {
+    run_command_with_network(project, mode, args, None).await
+}
+
+/// `run_command` with an explicit network policy for the sandbox proxy
+/// (Windows). `None` allows exactly the call's `network_domains`.
+pub async fn run_command_with_network(
+    project: &Path,
+    mode: &str,
+    args: &Value,
+    network: Option<locagens_execpolicy::network_proxy::NetworkPolicy>,
+) -> Result<String, String> {
     let command = str_arg(args, "command").unwrap_or_default();
     if command.trim().is_empty() {
         return Err("run_command: command is empty.".to_string());
     }
 
-    let domains: Vec<String> = args
-        .get("network_domains")
-        .or_else(|| args.get("networkDomains"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let domains = crate::orchestrator::network_access::requested_domains(args);
+    let network = network.unwrap_or_else(|| {
+        locagens_execpolicy::network_proxy::NetworkPolicy::allowlist_only(
+            locagens_execpolicy::network_proxy::DomainAllowlist::new(&domains),
+        )
+    });
     let spec = locagens_execpolicy::sandbox::SandboxSpec {
         mode: locagens_protocol::from_run_mode(mode).1,
         project_path: project.to_path_buf(),
         allow_network: !domains.is_empty() || mode == "auto",
+        network: Some(network),
     };
     let (shell_prog, shell_args): (String, Vec<String>) = if cfg!(windows) {
         ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
     } else {
         ("sh".to_string(), vec!["-c".to_string(), command.to_string()])
     };
-    let (program, prog_args) = locagens_execpolicy::sandbox::wrap_shell_command(
-        &shell_prog,
-        &shell_args,
-        Some(&spec),
-    );
-    let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(&prog_args);
 
     // Deny-by-default network + secret-free environment.
-    cmd.current_dir(project)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    cmd.env_clear();
+    let mut env = std::collections::HashMap::new();
     for (name, value) in std::env::vars() {
         if is_secret_env(&name) {
             continue;
@@ -781,16 +786,24 @@ async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String,
             "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "NUMBER_OF_PROCESSORS", "OS", "PROCESSOR_ARCHITECTURE",
             "LANG", "TERM", "SHELL",
         ];
-        if SAFE.contains(&name.as_str()) || name.starts_with("SYSTEMROOT") {
-            cmd.env(&name, &value);
+        if is_safe_env_name(&name, &SAFE) {
+            env.insert(name, value);
         }
     }
 
-    let future = cmd.output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), future)
-        .await
-        .map_err(|_| "run_command: timed out after 120 seconds.".to_string())?
-        .map_err(|err| format!("run_command: {err}"))?;
+    let output = locagens_execpolicy::sandbox::run_captured(
+        &shell_prog,
+        &shell_args,
+        project,
+        env,
+        Some(&spec),
+        std::time::Duration::from_secs(120),
+    )
+    .await
+    .map_err(|err| match err.kind() {
+        std::io::ErrorKind::TimedOut => "run_command: timed out after 120 seconds.".to_string(),
+        _ => format!("run_command: {err}"),
+    })?;
 
     let mut result = String::new();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -807,8 +820,12 @@ async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String,
     if result.trim().is_empty() {
         result.push_str("(no output)");
     }
-    if !output.status.success() {
-        result.push_str(&format!("\nExit code: {}", output.status.code().unwrap_or(-1)));
+    if !output.success() {
+        result.push_str(&format!("\nExit code: {}", output.exit_code.unwrap_or(-1)));
+    }
+    if !output.blocked_hosts.is_empty() {
+        result.push_str("\n\n");
+        result.push_str(&locagens_execpolicy::network_proxy::blocked_hosts_note(&output.blocked_hosts));
     }
     Ok(truncate_output(result))
 }
@@ -980,7 +997,7 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
             "oldContent": Value::Null,
             "newContent": Value::Null,
             "command": str_arg(args, "cmd").unwrap_or(""),
-            "networkDomains": json!([]),
+            "networkDomains": args.get("network_domains").or_else(|| args.get("networkDomains")).cloned().unwrap_or(json!([])),
             "justification": str_arg(args, "justification").unwrap_or(""),
         }),
         "apply_patch" => {

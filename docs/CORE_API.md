@@ -306,7 +306,7 @@ workspace tools:
 | Tool | Schema | Behaviour |
 | --- | --- | --- |
 | `apply_patch` | `{ input: string }` (`patch` alias accepted) | Applies a `*** Begin Patch` … `*** End Patch` patch inside the workspace (add / delete / update / move, fuzzy context matching) and returns Codex's summary + unified diff. All paths validated with `safe_path`. |
-| `exec_command` | `{ cmd, workdir?, yield_time_ms?, max_output_tokens?, shell?, login?, justification? }` | Runs via the ProcessManager with a secret-stripped env. Finishes → `{ exit_code, output, wall_time_ms }`; otherwise → `{ session_id, status: "running", output }`. |
+| `exec_command` | `{ cmd, workdir?, yield_time_ms?, max_output_tokens?, shell?, login?, network_domains?, justification? }` | Runs via the ProcessManager with a secret-stripped env. Finishes → `{ exit_code, output, wall_time_ms }`; otherwise → `{ session_id, status: "running", output }`. |
 | `write_stdin` | `{ session_id, chars?, yield_time_ms?, max_output_tokens? }` | Feeds a running exec session and polls its output (`running` / `exited`). |
 | `view_image` | `{ path }` | Returns `{ ok, path, mime_type, bytes, width, height }` for a workspace image. |
 | `update_plan` | Codex `{ explanation?, plan: [{step, status}] }` **or** Locagens `{ title, body?, tasks }` | Normalized into the same `db::Plan` + `plan_updated` event. |
@@ -336,6 +336,12 @@ accept_edits (Build)   → on-request + workspace-write
 ask_permissions        → untrusted + workspace-write (everything prompts)
 auto (Full Access)     → never + danger-full-access
 ```
+
+Commands requesting `network_domains` never use the known-safe bypass: the
+domains are granted only by a prompt or a matching standing grant. On
+Windows, sandboxed commands run under a restricted token with a per-domain
+network proxy; unknown hosts raise a `network_access` permission request
+while the command's tool call is running. See `docs/SANDBOX.md`.
 
 Events added: `turn_diff_updated` (`{ diff, filesChanged }`),
 `context_compacted`, `agent_spawned` (`{ agentId, name, taskName, role }`),

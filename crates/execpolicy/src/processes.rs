@@ -30,7 +30,8 @@ pub struct SpawnOptions {
     pub login: bool,
     /// Extra environment variables for the child.
     pub env: Option<HashMap<String, String>>,
-    /// Native sandbox to wrap the child in (Seatbelt / Bubblewrap).
+    /// Native sandbox to run the child in (Seatbelt / Bubblewrap / Windows
+    /// restricted token + network proxy).
     pub sandbox: Option<crate::sandbox::SandboxSpec>,
 }
 
@@ -38,8 +39,9 @@ pub struct SpawnOptions {
 enum StdinSink {
     /// A plain piped stdin (`ChildStdin`).
     Pipe(ChildStdin),
-    /// The PTY master, written by a dedicated writer task.
-    Pty(tokio::sync::mpsc::UnboundedSender<Vec<u8>>),
+    /// A PTY master or Windows sandbox pipe, written by a dedicated writer
+    /// thread.
+    Channel(tokio::sync::mpsc::UnboundedSender<Vec<u8>>),
 }
 
 /// Resolves the shell program and flag used to run `command`.
@@ -106,6 +108,8 @@ struct Managed {
     stdin: Option<StdinSink>,
     /// Read cursor into `logs` for incremental `poll_output` calls.
     read_cursor: usize,
+    /// Job Object + network proxy of a natively sandboxed (Windows) child.
+    sandbox: Option<crate::sandbox::SandboxSession>,
 }
 
 pub struct ProcessManager {
@@ -212,6 +216,7 @@ impl ProcessManager {
             options,
             stdin: None,
             read_cursor: 0,
+            sandbox: None,
         }));
         self.lock_processes().insert(id.clone(), managed);
         self.start_child(&id);
@@ -235,9 +240,9 @@ impl ProcessManager {
                 let ok = pipe.write_all(chars.as_bytes()).await.is_ok() && pipe.flush().await.is_ok();
                 (ok, StdinSink::Pipe(pipe))
             }
-            StdinSink::Pty(sender) => {
+            StdinSink::Channel(sender) => {
                 let ok = sender.send(chars.as_bytes().to_vec()).is_ok();
-                (ok, StdinSink::Pty(sender))
+                (ok, StdinSink::Channel(sender))
             }
         };
         // Only put the sink back when the write succeeded (broken pipes are
@@ -292,7 +297,124 @@ impl ProcessManager {
                 return self.start_pty_child(id, &command, project_path, &options);
             }
         }
+        #[cfg(windows)]
+        {
+            if crate::sandbox::uses_native_spawn(options.sandbox.as_ref()) {
+                return self.start_sandboxed_child(id, &command, project_path, &options);
+            }
+        }
         self.start_pipe_child(id, &command, project_path, &options);
+    }
+
+    /// Marks a spawn attempt as failed and logs why.
+    fn record_spawn_error(&self, id: &str, message: &str) {
+        if let Some(managed) = self.get_arc(id) {
+            let mut m = managed.lock().expect("managed process poisoned");
+            m.info.status = "error".to_string();
+            m.info.stopped_at = Some(now_iso());
+        }
+        self.append_log(id, "system", message);
+    }
+
+    /// Windows sandbox spawn: restricted token + Job Object + network proxy
+    /// (see [`crate::windows_sandbox`]). Stdio uses pipes served by blocking
+    /// threads; a sandbox that cannot be set up fails the spawn (closed).
+    #[cfg(windows)]
+    fn start_sandboxed_child(
+        self: &Arc<Self>,
+        id: &str,
+        command: &str,
+        project_path: PathBuf,
+        options: &SpawnOptions,
+    ) {
+        let Some(spec) = options.sandbox.as_ref() else {
+            return;
+        };
+        let (shell_prog, shell_args) = shell_for_options(options, command);
+        let env = sandboxed_child_env(options);
+        let native = match crate::sandbox::spawn_native(
+            spec,
+            &shell_prog,
+            &shell_args,
+            &project_path,
+            env,
+            options.stdin_pipe,
+        ) {
+            Ok(native) => native,
+            Err(err) => return self.record_spawn_error(id, &format!("[Failed to spawn process: {err}]")),
+        };
+        let crate::sandbox::NativeChild { child, session } = native;
+        let waiter = match child.waiter() {
+            Ok(waiter) => waiter,
+            Err(err) => {
+                session.terminate();
+                return self.record_spawn_error(id, &format!("[Failed to spawn process: {err}]"));
+            }
+        };
+        let pid = child.pid;
+        let crate::windows_sandbox::SandboxedChild { stdin, stdout, stderr, .. } = child;
+        let stdin = stdin.map(|file| StdinSink::Channel(spawn_stdin_writer(file)));
+        {
+            let managed_arc = self.get_arc(id).unwrap();
+            let mut m = managed_arc.lock().expect("managed process poisoned");
+            m.info.pid = Some(pid);
+            m.info.status = "running".to_string();
+            m.info.stopped_at = None;
+            m.info.exit_code = None;
+            m.stdin = stdin;
+            m.sandbox = Some(session);
+        }
+        self.append_log(id, "system", &format!("[Process started with PID {pid} (sandboxed)]"));
+        self.spawn_blocking_reader(id.to_string(), stdout, "stdout");
+        self.spawn_blocking_reader(id.to_string(), stderr, "stderr");
+        let this = Arc::clone(self);
+        let id_owned = id.to_string();
+        std::thread::spawn(move || {
+            let code = waiter.wait().ok();
+            this.finish_sandboxed_exit(&id_owned, code);
+        });
+    }
+
+    /// Natural exit of a sandboxed root: keep background descendants, tell
+    /// the model about refused hosts, then record the exit.
+    #[cfg(windows)]
+    fn finish_sandboxed_exit(self: &Arc<Self>, id: &str, code: Option<i32>) {
+        let blocked = self.get_arc(id).and_then(|managed| {
+            let m = managed.lock().expect("managed process poisoned");
+            let session = m.sandbox.as_ref()?;
+            if m.info.status == "running" {
+                session.release_descendants();
+            }
+            Some(session.blocked_hosts())
+        });
+        if let Some(hosts) = blocked.filter(|hosts| !hosts.is_empty()) {
+            self.append_log(id, "system", &blocked_hosts_note(&hosts));
+        }
+        self.finish_exit(id, code);
+    }
+
+    /// Streams a blocking reader (Windows sandbox pipe) into the log ring.
+    #[cfg(windows)]
+    fn spawn_blocking_reader(
+        self: &Arc<Self>,
+        id: String,
+        mut stream: std::fs::File,
+        stream_name: &'static str,
+    ) {
+        let this = Arc::clone(self);
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                        this.append_log(&id, stream_name, &text);
+                    }
+                }
+            }
+        });
     }
 
     /// Pipe-based spawn: shell → wrapped sandbox → separate stdin/stdout/
@@ -312,7 +434,7 @@ impl ProcessManager {
         );
 
         let mut cmd = tokio::process::Command::new(&program);
-        cmd.args(&prog_args);
+        crate::sandbox::set_command_args(&mut cmd, &program, &prog_args);
         #[cfg(unix)]
         {
             // The child leads its own process group so tree kills work.
@@ -510,7 +632,7 @@ impl ProcessManager {
                     m.info.status = "running".to_string();
                     m.info.stopped_at = None;
                     m.info.exit_code = None;
-                    m.stdin = Some(StdinSink::Pty(stdin_tx));
+                    m.stdin = Some(StdinSink::Channel(stdin_tx));
                 }
                 self.append_log(
                     id,
@@ -668,14 +790,18 @@ impl ProcessManager {
             return false;
         };
 
-        {
+        let killed_job = {
             let mut m = managed.lock().expect("managed process poisoned");
             m.info.status = "stopped".to_string();
             m.info.stopped_at = Some(now_iso());
             m.info.exit_code = None;
-        }
+            // Sandboxed children die with their Job Object.
+            m.sandbox.as_ref().map(crate::sandbox::SandboxSession::terminate).is_some()
+        };
 
-        kill_tree(pid).await;
+        if !killed_job {
+            kill_tree(pid).await;
+        }
         self.append_log(id, "system", "[Process terminated]");
         true
     }
@@ -709,6 +835,42 @@ impl Default for ProcessManager {
     }
 }
 
+/// The environment of a natively sandboxed child: exactly `options.env` for
+/// clean exec sessions, otherwise the parent environment plus overrides.
+#[cfg(windows)]
+fn sandboxed_child_env(options: &SpawnOptions) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = if options.env_clean {
+        HashMap::new()
+    } else {
+        let mut inherited: HashMap<String, String> = std::env::vars().collect();
+        inherited.insert("FORCE_COLOR".to_string(), "1".to_string());
+        inherited
+    };
+    env.extend(options.env.clone().unwrap_or_default());
+    env
+}
+
+/// Writer thread feeding a sandboxed child's stdin pipe from a channel.
+#[cfg(windows)]
+fn spawn_stdin_writer(mut file: std::fs::File) -> tokio::sync::mpsc::UnboundedSender<Vec<u8>> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        while let Some(bytes) = receiver.blocking_recv() {
+            if file.write_all(&bytes).is_err() || file.flush().is_err() {
+                break;
+            }
+        }
+    });
+    sender
+}
+
+/// Log line telling the model which hosts the sandbox proxy refused.
+#[cfg(windows)]
+fn blocked_hosts_note(hosts: &[String]) -> String {
+    format!("[{}]", crate::network_proxy::blocked_hosts_note(hosts))
+}
+
 async fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -731,6 +893,7 @@ async fn kill_tree(pid: u32) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     /// Spawns a TTY session whose script proves stdin is a terminal, feeds a

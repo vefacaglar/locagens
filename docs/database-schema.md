@@ -114,7 +114,7 @@ Per-tool and per-command grant records for security approval.
 | `id` | `integer` | Auto-increment surrogate key (monotonic counter in the store) |
 | `scope` | `string` | `'global'` or `'project'` |
 | `projectPath` | `string` | Project path (empty string = all projects) |
-| `tool` | `string` | Tool name (e.g. `run_command`, `write_file`, `search_files`) |
+| `tool` | `string` | Tool name (e.g. `run_command`, `write_file`, `search_files`; `network_access` for hosts approved at a sandbox network prompt, see `docs/SANDBOX.md`) |
 | `command` | `string` | Exact command string (for `run_command`); empty for other tools |
 | `networkDomains` | `string[]` | Sorted list of exact network domains approved with the command |
 | `status` | `string` | e.g. `'approved'`, `'denied'` |
