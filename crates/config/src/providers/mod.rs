@@ -355,3 +355,9 @@ impl PiProviderManager {
         self.app_support_dir.join("locagens-providers-meta.json")
     }
 }
+
+impl Default for PiProviderManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

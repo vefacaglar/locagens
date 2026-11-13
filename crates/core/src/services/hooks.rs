@@ -551,7 +551,7 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(agent_dir.join("hooks.json"), json!({ "SessionStart": "echo agent-dir-hook-ran" }).to_string()).unwrap();
         let payload = json!({ "hook_event_name": "SessionStart" });
-        let outcome = run_hook_event_in(&[agent_dir.clone()], "SessionStart", &project, &payload).await;
+        let outcome = run_hook_event_in(std::slice::from_ref(&agent_dir), "SessionStart", &project, &payload).await;
         assert!(outcome.context_joined().unwrap_or_default().contains("agent-dir-hook-ran"));
         let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &payload).await;
         assert!(outcome.context_joined().is_none(), "{:?}", outcome.additional_context);

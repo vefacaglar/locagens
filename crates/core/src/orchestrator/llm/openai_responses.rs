@@ -108,16 +108,16 @@ pub(super) fn build_responses_body(
     if !tools.is_empty() {
         let converted: Vec<Value> = tools
             .iter()
-            .filter_map(|tool| {
+            .map(|tool| {
                 // Accept both the chat-completions nested form and the
                 // already-flat Responses form.
                 let function = tool.get("function").unwrap_or(tool);
-                Some(json!({
+                json!({
                     "type": "function",
                     "name": function.get("name").cloned().unwrap_or(Value::Null),
                     "description": function.get("description").cloned().unwrap_or(Value::Null),
                     "parameters": function.get("parameters").cloned().unwrap_or(json!({ "type": "object", "properties": {} })),
-                }))
+                })
             })
             .collect();
         body.insert("tools".into(), json!(converted));

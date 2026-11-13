@@ -826,11 +826,9 @@ mod tests {
         assert!(contiguous > scattered_pair);
 
         // `list_files` ordering follows the score (exact basename first).
-        let files = vec![
-            "docs/domain/manual.md".to_string(),
+        let files = ["docs/domain/manual.md".to_string(),
             "src/main.rs".to_string(),
-            "src/domain/manager.ts".to_string(),
-        ];
+            "src/domain/manager.ts".to_string()];
         let mut scored: Vec<(i64, String)> = files
             .iter()
             .filter_map(|f| fuzzy_file_score(f, "main").map(|s| (s, f.clone())))

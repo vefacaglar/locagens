@@ -691,7 +691,7 @@ pub async fn list_runs(state: &AppState) -> ApiResult<Vec<Run>> {
     // Pick up runs created or changed by another process (QA-039).
     state.db.refresh_runs_throttled();
     let mut runs = state.db.list_runs();
-    runs.sort_by(|a, b| b.last_active_at.clone().unwrap_or_default().cmp(&a.last_active_at.clone().unwrap_or_default()));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.last_active_at.clone().unwrap_or_default()));
     Ok(runs)
 }
 

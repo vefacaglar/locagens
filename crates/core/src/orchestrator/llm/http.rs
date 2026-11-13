@@ -48,7 +48,7 @@ pub(super) fn quirk_headers(endpoint: &Endpoint, messages: &[LlmMessage]) -> Vec
     if endpoint.quirk != ProviderQuirk::GithubCopilot {
         return Vec::new();
     }
-    let last_is_user = messages.last().map_or(true, |message| message.role == "user");
+    let last_is_user = messages.last().is_none_or(|message| message.role == "user");
     let has_images = messages
         .iter()
         .any(|message| message.role == "tool" && extract_tool_image(&message.content).is_some());

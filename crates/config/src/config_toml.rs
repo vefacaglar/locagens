@@ -615,10 +615,10 @@ a = 1
 
         let tmp = tempfile::tempdir().unwrap();
         let bad = write(tmp.path(), "config.toml", "model = = oops");
-        let err = Config::load_from_files(&[bad.clone()]).unwrap_err();
+        let err = Config::load_from_files(std::slice::from_ref(&bad)).unwrap_err();
         assert!(err.message.contains(&bad.display().to_string()), "{err}");
         let bad_type = write(tmp.path(), "type.toml", "model_context_window = \"big\"");
-        let err = Config::load_from_files(&[bad_type.clone()]).unwrap_err();
+        let err = Config::load_from_files(std::slice::from_ref(&bad_type)).unwrap_err();
         assert!(err.message.contains("type.toml"), "{err}");
     }
 
@@ -711,7 +711,7 @@ a = 1
         assert_eq!(config.projects["/new/project"].trust_level.as_deref(), Some("trusted"));
 
         write_project_trust_level(&primary, "/new/project", None).unwrap();
-        let levels = project_trust_levels(&[primary.clone()]);
+        let levels = project_trust_levels(std::slice::from_ref(&primary));
         assert!(!levels.contains_key("/new/project"));
 
         let created = tmp.path().join("fresh").join("config.toml");

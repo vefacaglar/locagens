@@ -112,7 +112,7 @@ fn App() -> Element {
             components::sidebar::Sidebar {}
             div {
                 class: "main-column",
-                match store.page.read().clone() {
+                match *store.page.read() {
                     AppPage::Chat => {
                         rsx! {
                             components::chat_header::ChatHeader {}

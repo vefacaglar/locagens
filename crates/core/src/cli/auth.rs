@@ -115,7 +115,7 @@ fn providers_table(providers: &[LoginProvider], numbered: bool) -> String {
         .map(|i| rows.iter().map(|row| row[i].chars().count()).chain([header[i].len()]).max().unwrap_or(0))
         .collect();
     let mut out = table_line(&header, &widths);
-    out.extend(widths.iter().flat_map(|w| std::iter::repeat('-').take(w + 2)));
+    out.extend(widths.iter().flat_map(|w| std::iter::repeat_n('-', w + 2)));
     out.push('\n');
     for row in &rows {
         out.push_str(&table_line(row, &widths));

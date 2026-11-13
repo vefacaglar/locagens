@@ -158,13 +158,10 @@ impl PiProviderManager {
                 }
             }
         }
-        match Self::read_json(&self.auth_path()) {
-            Value::Object(map) => {
-                for (key, value) in map {
-                    merged.insert(key, value);
-                }
+        if let Value::Object(map) = Self::read_json(&self.auth_path()) {
+            for (key, value) in map {
+                merged.insert(key, value);
             }
-            _ => {}
         }
         merged
     }
@@ -465,7 +462,7 @@ impl PiProviderManager {
                     .oauth_credential("github-copilot")
                     .and_then(|credential| credential.get("availableModelIds").cloned())
                     .and_then(|ids| serde_json::from_value(ids).ok());
-                let models = catalog::COPILOT_MODELS.iter().filter(|model| allowed.as_ref().map_or(true, |ids| ids.iter().any(|id| id == model.id)));
+                let models = catalog::COPILOT_MODELS.iter().filter(|model| allowed.as_ref().is_none_or(|ids| ids.iter().any(|id| id == model.id)));
                 Some(models.copied().collect())
             }
             "kimi-coding" => Some(catalog::KIMI_MODELS.to_vec()),

@@ -241,10 +241,12 @@ mod tests {
     use locagens_core::protocol::review::parse_review_output;
 
     fn finding(title: &str, body: &str, priority: Option<i32>) -> ReviewFinding {
-        let mut finding = ReviewFinding::default();
-        finding.title = title.to_string();
-        finding.body = body.to_string();
-        finding.priority = priority;
+        let mut finding = ReviewFinding {
+            title: title.to_string(),
+            body: body.to_string(),
+            priority,
+            ..Default::default()
+        };
         finding.code_location.absolute_file_path = "src/a.rs".to_string();
         finding.code_location.line_range.start = 4;
         finding.code_location.line_range.end = 9;

@@ -122,7 +122,7 @@ mod tests {
         let masked = maskable(&[ssh.clone(), aws.clone(), aws.clone(), home.join("missing")], &[workspace]);
         assert_eq!(masked, vec![std::fs::canonicalize(&aws).unwrap()]);
         // A secret inside a writable root (e.g. `writable_roots = ["~"]`) is masked.
-        assert_eq!(maskable(&[aws.clone()], &[home.clone()]), vec![std::fs::canonicalize(&aws).unwrap()]);
+        assert_eq!(maskable(std::slice::from_ref(&aws), std::slice::from_ref(&home)), vec![std::fs::canonicalize(&aws).unwrap()]);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

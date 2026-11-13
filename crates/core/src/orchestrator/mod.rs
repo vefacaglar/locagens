@@ -133,6 +133,7 @@ pub struct PendingPermission {
     pub preview: Option<Value>,
 }
 
+#[derive(Default)]
 pub struct PermissionSlot {
     pub pending: Option<PendingPermission>,
     pub sender: Option<oneshot::Sender<String>>,
@@ -141,11 +142,6 @@ pub struct PermissionSlot {
     prompt_id: u64,
 }
 
-impl Default for PermissionSlot {
-    fn default() -> Self {
-        Self { pending: None, sender: None, prompt_id: 0 }
-    }
-}
 
 /// One interactive permission prompt for [`RunHandle::ask_permission`].
 pub(crate) struct PermissionPrompt {
@@ -205,6 +201,7 @@ impl Drop for PromptCleanup {
     }
 }
 
+#[derive(Default)]
 pub struct QuestionSlot {
     /// The `questions` array of the active `ask_user_question` request.
     pub pending: Option<Value>,
@@ -212,11 +209,6 @@ pub struct QuestionSlot {
     pub sender: Option<oneshot::Sender<Value>>,
 }
 
-impl Default for QuestionSlot {
-    fn default() -> Self {
-        Self { pending: None, sender: None }
-    }
-}
 
 /// Shared coordination state of ONE drive of a run (a turn), handed to the
 /// facade and the agent loop. Every drive gets a fresh handle: cancellation
