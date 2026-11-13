@@ -11,6 +11,7 @@
 //! round-tripping unchanged.
 
 pub mod review;
+pub mod text;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

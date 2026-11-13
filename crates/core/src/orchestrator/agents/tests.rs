@@ -227,16 +227,16 @@ fn project_roles_reach_the_spawn_spec() {
 // Mock-LLM flows
 // ----------------------------------------------------------------------
 
-struct MockReply {
-    message: Value,
-    delay_ms: u64,
+pub(crate) struct MockReply {
+    pub(crate) message: Value,
+    pub(crate) delay_ms: u64,
 }
 
-fn text_reply(text: &str) -> MockReply {
+pub(crate) fn text_reply(text: &str) -> MockReply {
     MockReply { message: json!({ "role": "assistant", "content": text }), delay_ms: 0 }
 }
 
-fn non_system_messages(body: &Value) -> Vec<Value> {
+pub(crate) fn non_system_messages(body: &Value) -> Vec<Value> {
     body["messages"]
         .as_array()
         .cloned()
@@ -246,13 +246,13 @@ fn non_system_messages(body: &Value) -> Vec<Value> {
         .collect()
 }
 
-struct Mock {
+pub(crate) struct Mock {
     base_url: String,
-    requests: Arc<Mutex<Vec<Value>>>,
+    pub(crate) requests: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Mock {
-    fn request_count(&self) -> usize {
+    pub(crate) fn request_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
 }
@@ -322,11 +322,11 @@ async fn read_request_body(stream: &mut tokio::net::TcpStream) -> Option<Value> 
     serde_json::from_slice(&buffer[header_end..]).ok()
 }
 
-struct Harness {
-    state: Arc<AppState>,
-    handle: Arc<RunHandle>,
-    project: PathBuf,
-    mock: Mock,
+pub(crate) struct Harness {
+    pub(crate) state: Arc<AppState>,
+    pub(crate) handle: Arc<RunHandle>,
+    pub(crate) project: PathBuf,
+    pub(crate) mock: Mock,
 }
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -335,7 +335,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-async fn harness(handler: impl Fn(&Value) -> MockReply + Send + Sync + 'static) -> Harness {
+pub(crate) async fn harness(handler: impl Fn(&Value) -> MockReply + Send + Sync + 'static) -> Harness {
     let mock = start_mock(handler).await;
     let agent_dir = temp_dir("agentdir");
     std::fs::write(
@@ -364,7 +364,7 @@ async fn harness(handler: impl Fn(&Value) -> MockReply + Send + Sync + 'static) 
 }
 
 impl Harness {
-    fn parent(&self, mode: &str) -> AgentLoop {
+    pub(crate) fn parent(&self, mode: &str) -> AgentLoop {
         AgentLoop {
             state: self.state.clone(),
             handle: self.handle.clone(),
@@ -388,7 +388,7 @@ impl Harness {
     }
 }
 
-fn parse(result: Result<String, AgentError>) -> Value {
+pub(crate) fn parse(result: Result<String, AgentError>) -> Value {
     match result {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| json!({ "text": text })),
         Err(AgentError::Failed(error)) => panic!("tool failed: {error}"),
@@ -396,15 +396,15 @@ fn parse(result: Result<String, AgentError>) -> Value {
     }
 }
 
-async fn wait_one(parent: &AgentLoop) -> Value {
+pub(crate) async fn wait_one(parent: &AgentLoop) -> Value {
     parse(parent.wait_agent_tool(Duration::from_secs(10)).await)
 }
 
-async fn spawn(parent: &AgentLoop, name: &str, message: &str, role: &str) -> Value {
+pub(crate) async fn spawn(parent: &AgentLoop, name: &str, message: &str, role: &str) -> Value {
     parse(parent.dispatch_agent_tool("spawn_agent", &json!({ "task_name": name, "message": message, "agent_type": role })).await)
 }
 
-fn echo_handler(body: &Value) -> MockReply {
+pub(crate) fn echo_handler(body: &Value) -> MockReply {
     let messages = non_system_messages(body);
     let last = messages.last().and_then(|m| m["content"].as_str()).unwrap_or_default().to_string();
     text_reply(&format!("n={} last={last}", messages.len()))

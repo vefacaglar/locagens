@@ -109,8 +109,7 @@ pub fn summarization_request(history: &[LlmMessage], keep_last: usize) -> Option
         if let Some(id) = &message.tool_call_id {
             rendered.push_str(&format!("tool_call_id: {id}\n"));
         }
-        if rendered.len() > budget {
-            rendered.truncate(budget);
+        if locagens_protocol::text::truncate_at_char_boundary(&mut rendered, budget) {
             rendered.push_str("\n... (transcript truncated)\n");
             transcript.push_str(&rendered);
             break;
@@ -209,6 +208,18 @@ mod tests {
         // A lower configured threshold compacts earlier.
         assert!(should_auto_compact_at(&history(&[1_000; 8]), 1_000));
         assert!(!should_auto_compact_at(&history(&[1_000; 8]), 50_000));
+    }
+
+    /// QA-021: the transcript budget cut must respect char boundaries.
+    #[test]
+    fn transcript_truncation_handles_multibyte_text() {
+        let budget = COMPACT_USER_MESSAGE_MAX_TOKENS * 4;
+        // "## user\n" is 8 bytes; pad so the cut falls inside a 3-byte `→`.
+        let content = format!("{}{}", "x".repeat(budget - 9), "→".repeat(10));
+        let mut hist = vec![LlmMessage { role: "user".into(), content, ..Default::default() }];
+        hist.extend(history(&[10; 8]));
+        let (_, transcript) = summarization_request(&hist, 8).unwrap();
+        assert!(transcript.contains("(transcript truncated)"));
     }
 
     #[test]

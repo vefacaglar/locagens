@@ -223,7 +223,7 @@ fn base_tool_defs() -> Vec<Value> {
                     }
                 })
             }), &["questions"]),
-        def("spawn_agents", "Run parallel sub-agents with the current model: 'explorer' (read-only research) or 'worker' (full workspace tools).",
+        def("spawn_agents", "Run parallel one-shot sub-agents with the current model: 'explorer' (read-only research) or 'worker' (full workspace tools). Waits until every agent finished and returns all results. Each agent takes one of the 4 live agent slots shared with spawn_agent while it runs.",
             json!({
                 "agents": json!({
                     "type": "array",
@@ -327,8 +327,7 @@ pub fn safe_path(project: &Path, relative: &str) -> Result<PathBuf, String> {
 }
 
 fn truncate_output(mut text: String) -> String {
-    if text.len() > MAX_OUTPUT_CHARS {
-        text.truncate(MAX_OUTPUT_CHARS);
+    if locagens_protocol::text::truncate_at_char_boundary(&mut text, MAX_OUTPUT_CHARS) {
         text.push_str("\n... (output truncated)");
     }
     text
@@ -488,7 +487,7 @@ fn read_file(project: &Path, args: &Value) -> Result<String, String> {
     let content = std::fs::read_to_string(&path)
         .map_err(|err| format!("read_file: cannot read {}: {err}", path.display()))?;
     let truncated = if content.len() > MAX_FILE_READ_CHARS {
-        let mut cut = content[..MAX_FILE_READ_CHARS].to_string();
+        let mut cut = locagens_protocol::text::prefix_at_char_boundary(&content, MAX_FILE_READ_CHARS).to_string();
         cut.push_str("\n... (file truncated)");
         cut
     } else {
@@ -1032,6 +1031,24 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// QA-021: cutting tool output / big files at a byte budget that lands
+    /// inside a multibyte character must not panic.
+    #[test]
+    fn truncation_never_splits_multibyte_characters() {
+        // `→` is 3 bytes: 23_999 + 3 straddles the 24_000 cut.
+        let text = format!("{}→ tail", "a".repeat(MAX_OUTPUT_CHARS - 1));
+        let cut = truncate_output(text);
+        assert!(cut.ends_with("\n... (output truncated)"));
+        assert!(cut.starts_with(&"a".repeat(MAX_OUTPUT_CHARS - 1)));
+
+        let ws = temp_ws("big-utf8");
+        let body = format!("{}ğüş\n", "b".repeat(MAX_FILE_READ_CHARS - 1));
+        std::fs::write(ws.join("big.txt"), &body).unwrap();
+        let read = read_file(&ws, &serde_json::json!({ "path": "big.txt" })).unwrap();
+        assert!(read.contains("truncated)"));
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     #[test]

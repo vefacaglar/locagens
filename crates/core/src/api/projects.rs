@@ -65,7 +65,28 @@ pub struct GitSnapshot {
     #[serde(default)]
     pub untracked: Vec<String>,
     pub created_at: String,
+    /// Worktree tree right after the turn ended (same hashing as
+    /// `tree_sha`). Undo restores only the paths whose bytes differ between
+    /// the two trees, and skips those changed again since (QA-030).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_tree_sha: Option<String>,
+    /// HEAD right after the turn ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_head_sha: Option<String>,
+    /// Set on the snapshot returned by an undo: the paths written back or
+    /// deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<String>,
+    /// Set on the snapshot returned by an undo: paths the turn changed that
+    /// were left alone because they changed again after the turn (user edits
+    /// or a later turn).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
+
+/// `run_id` suffix of the backup snapshot an undo takes of the state it
+/// replaces; undoing that snapshot redoes the undone turn.
+pub const UNDO_BACKUP_SUFFIX: &str = "#undo";
 
 /// One entry of `git worktree list --porcelain`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -689,6 +710,10 @@ pub async fn create_git_snapshot_for_path(
         stash_sha: None,
         untracked,
         created_at: now_iso(),
+        after_tree_sha: None,
+        after_head_sha: None,
+        restored: Vec::new(),
+        skipped: Vec::new(),
     };
 
     let mut snapshots = load_snapshots(project_path);
@@ -797,6 +822,37 @@ async fn executable_files(project_path: &Path) -> std::collections::HashSet<Stri
         .collect()
 }
 
+/// Index-copy id suffix of the post-turn index (`<id>.after.index`).
+const AFTER_INDEX_SUFFIX: &str = ".after";
+
+/// Records the post-turn state for snapshot `snapshot_id`: the worktree tree,
+/// HEAD and a copy of the index. Idempotent; a missing snapshot is ignored.
+pub async fn record_turn_end_for_path(project_path: &Path, snapshot_id: &str) -> Result<(), String> {
+    let recorded = load_snapshots(project_path)
+        .iter()
+        .find(|snapshot| snapshot.id == snapshot_id)
+        .map(|snapshot| snapshot.after_tree_sha.is_some());
+    if recorded != Some(false) {
+        return Ok(());
+    }
+    let tree = write_worktree_tree(project_path, &format!("{snapshot_id}-after")).await?;
+    let head = git(project_path, &["rev-parse", "HEAD"]).await.unwrap_or_default().trim().to_string();
+    save_index_copy(project_path, &format!("{snapshot_id}{AFTER_INDEX_SUFFIX}")).await;
+    let mut snapshots = load_snapshots(project_path);
+    if let Some(snapshot) = snapshots.iter_mut().find(|snapshot| snapshot.id == snapshot_id) {
+        snapshot.after_tree_sha = Some(tree);
+        snapshot.after_head_sha = Some(head).filter(|head| !head.is_empty());
+    }
+    persist_snapshots(project_path, &snapshots)
+}
+
+/// `mode sha path` lines of an index (the real one, or a copy), ignoring
+/// the stat data git refreshes on every `git status`.
+async fn index_entries(project_path: &Path, index: Option<&Path>) -> Option<Vec<u8>> {
+    let env: Vec<(&str, &Path)> = index.map(|index| vec![("GIT_INDEX_FILE", index)]).unwrap_or_default();
+    git_bytes(project_path, &["ls-files", "-s", "-z"], &env, None).await.ok()
+}
+
 /// `<snapshot_dir>/<id>.index` — copy of the pre-turn index.
 fn index_copy_path(project_path: &Path, id: &str) -> PathBuf {
     snapshot_dir(project_path).join(format!("{id}.index"))
@@ -826,6 +882,7 @@ fn prune_index_copies(project_path: &Path, kept: &[GitSnapshot]) {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let Some(id) = name.strip_suffix(".index") else { continue };
+        let id = id.strip_suffix(AFTER_INDEX_SUFFIX).unwrap_or(id);
         if !kept.iter().any(|snapshot| snapshot.id == id) {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -852,64 +909,120 @@ pub async fn create_git_snapshot(
         .map_err(ApiError::internal)
 }
 
-/// Undoes the last turn: rewrites every file whose bytes differ from the
-/// snapshot tree, deletes files the turn created, and puts HEAD (soft) and
-/// the index back. The used snapshot is consumed (removed from the store).
+/// Undoes a turn (the run's latest, or the newest of any run):
+///
+/// - Only paths the turn changed are touched: those whose bytes differ
+///   between the pre-turn tree and the post-turn tree. A touched path whose
+///   current bytes differ from the post-turn bytes (edited by the user or a
+///   later turn since) is left alone and reported in `skipped`. Snapshots
+///   from older versions without a post-turn tree fall back to restoring
+///   every file that differs from the pre-turn tree.
+/// - HEAD is reset (soft) and the index restored only if they still are
+///   what the turn left behind.
+/// - The replaced state is saved first as a `<run_id>#undo` snapshot, so the
+///   undo itself can be undone.
+///
+/// The used snapshot is consumed (removed from the store).
 pub async fn undo_last_turn_for_path(
     project_path: &Path,
     run_id: Option<&str>,
 ) -> Result<GitSnapshot, String> {
-    let mut snapshots = load_snapshots(project_path);
+    let snapshots = load_snapshots(project_path);
     let index = match run_id {
         Some(run_id) => snapshots.iter().rposition(|snap| snap.run_id == run_id),
         None => snapshots.len().checked_sub(1),
     }
     .ok_or_else(|| "No git snapshot available to undo".to_string())?;
-    let tree_sha = snapshots[index]
+    let mut snapshot = snapshots[index].clone();
+    let tree_sha = snapshot
         .tree_sha
         .clone()
         .ok_or_else(|| "This snapshot was made by an older Locagens version and cannot be undone".to_string())?;
-    let snapshot = snapshots.remove(index);
 
-    let saved = snapshot_tree_entries(project_path, &tree_sha).await?;
-    let current_files = worktree_files(project_path).await?;
-    let current_shas = hash_files(project_path, &current_files, false).await?;
-    let current: std::collections::HashMap<&str, &str> = current_files
-        .iter()
-        .map(String::as_str)
-        .zip(current_shas.iter().map(String::as_str))
-        .collect();
+    let before = snapshot_tree_entries(project_path, &tree_sha).await?;
+    let after = match snapshot.after_tree_sha.as_deref() {
+        Some(after_tree) => Some(snapshot_tree_entries(project_path, after_tree).await?),
+        None => None,
+    };
+    // Paths the turn changed, and the bytes it left them with.
+    let touched: Vec<String> = match &after {
+        Some(after) => {
+            let mut paths: Vec<String> = before
+                .keys()
+                .chain(after.keys())
+                .filter(|path| before.get(*path) != after.get(*path))
+                .cloned()
+                .collect();
+            paths.sort();
+            paths.dedup();
+            paths
+        }
+        None => {
+            let mut paths: Vec<String> = worktree_files(project_path).await?;
+            paths.extend(before.keys().cloned());
+            paths.sort();
+            paths.dedup();
+            paths
+        }
+    };
+    let existing: Vec<String> = touched.iter().filter(|path| project_path.join(path).is_file()).cloned().collect();
+    let existing_shas = hash_files(project_path, &existing, false).await?;
+    let current: std::collections::HashMap<&str, &str> =
+        existing.iter().map(String::as_str).zip(existing_shas.iter().map(String::as_str)).collect();
 
-    // 1. Files the turn created.
-    for path in current_files.iter().filter(|path| !saved.contains_key(path.as_str())) {
-        remove_inside(project_path, path);
-    }
-    // 2. Files the turn changed or deleted: write the snapshot bytes back.
-    for (path, sha) in &saved {
-        if current.get(path.as_str()) == Some(&sha.as_str()) {
+    // Back up what is about to be replaced (undo of the undo).
+    let backup = create_git_snapshot_for_path(project_path, &format!("{}{UNDO_BACKUP_SUFFIX}", snapshot.run_id)).await?;
+
+    for path in &touched {
+        let now = current.get(path.as_str()).copied();
+        let wanted = before.get(path).map(String::as_str);
+        if now == wanted {
             continue;
         }
-        let Some(full_path) = crate::util::writable_inside(project_path, path) else { continue };
-        let bytes = git_bytes(project_path, &["cat-file", "blob", sha], &[], None).await?;
-        if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+        if let Some(after) = &after {
+            if now != after.get(path).map(String::as_str) {
+                snapshot.skipped.push(path.clone());
+                continue;
+            }
         }
-        std::fs::write(&full_path, bytes).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+        match wanted {
+            None => remove_inside(project_path, path),
+            Some(sha) => {
+                let Some(full_path) = crate::util::writable_inside(project_path, path) else { continue };
+                let bytes = git_bytes(project_path, &["cat-file", "blob", sha], &[], None).await?;
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+                }
+                std::fs::write(&full_path, bytes).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+            }
+        }
+        snapshot.restored.push(path.clone());
     }
-    // 3. HEAD (if the turn committed) and the index.
-    let head_now = git(project_path, &["rev-parse", "HEAD"]).await.unwrap_or_default();
-    if head_now.trim() != snapshot.head_sha {
+
+    // HEAD (if the turn committed) and the index, unless they moved since.
+    let head_now = git(project_path, &["rev-parse", "HEAD"]).await.unwrap_or_default().trim().to_string();
+    let head_is_turns = snapshot.after_head_sha.as_deref().is_none_or(|after| after == head_now);
+    if head_now != snapshot.head_sha && head_is_turns {
         git(project_path, &["reset", "-q", "--soft", &snapshot.head_sha])
             .await
             .map_err(|err| format!("git reset failed: {err}"))?;
     }
     let copy = index_copy_path(project_path, &snapshot.id);
-    if let (true, Some(index)) = (copy.is_file(), git_index_path(project_path).await) {
+    let after_copy = index_copy_path(project_path, &format!("{}{AFTER_INDEX_SUFFIX}", snapshot.id));
+    let index_is_turns = !after_copy.is_file()
+        || index_entries(project_path, None).await == index_entries(project_path, Some(&after_copy)).await;
+    if let (true, true, Some(index)) = (copy.is_file(), index_is_turns && head_is_turns, git_index_path(project_path).await) {
         std::fs::copy(&copy, index).map_err(|err| format!("Failed to restore the git index: {err}"))?;
     }
-    let _ = std::fs::remove_file(copy);
 
+    if let Some(backup) = backup {
+        record_turn_end_for_path(project_path, &backup.id).await?;
+    }
+    let mut snapshots = load_snapshots(project_path);
+    snapshots.retain(|kept| kept.id != snapshot.id);
     persist_snapshots(project_path, &snapshots)?;
+    let _ = std::fs::remove_file(copy);
+    let _ = std::fs::remove_file(after_copy);
     Ok(snapshot)
 }
 
@@ -1327,6 +1440,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// QA-030: undo only reverts what the turn changed; later user edits and
+    /// files created after the turn survive, and the undo itself is undoable.
+    #[tokio::test]
+    async fn undo_leaves_changes_made_after_the_turn_alone_and_can_be_redone() {
+        let root = std::env::temp_dir().join(format!("locagens-snap-narrow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["main.rs", "lib.rs", "keep.rs"] {
+            std::fs::write(root.join(name), format!("// {name} base\n")).unwrap();
+        }
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        let snapshot = create_git_snapshot_for_path(&root, "run-n").await.unwrap().expect("snapshot");
+        // The turn edits main.rs and lib.rs and creates gen.txt.
+        std::fs::write(root.join("main.rs"), "// main.rs by the turn\n").unwrap();
+        std::fs::write(root.join("lib.rs"), "// lib.rs by the turn\n").unwrap();
+        std::fs::write(root.join("gen.txt"), "turn artifact\n").unwrap();
+        record_turn_end_for_path(&root, &snapshot.id).await.unwrap();
+
+        // Afterwards the user edits main.rs again and creates notes.txt.
+        std::fs::write(root.join("main.rs"), "// main.rs edited by the user\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "user notes\n").unwrap();
+
+        let undone = undo_last_turn_for_path(&root, Some("run-n")).await.unwrap();
+        let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+        assert_eq!(read("lib.rs"), "// lib.rs base\n", "the turn's own change is reverted");
+        assert!(!root.join("gen.txt").exists(), "the turn's new file is removed");
+        assert_eq!(read("main.rs"), "// main.rs edited by the user\n", "user edit survives");
+        assert_eq!(read("notes.txt"), "user notes\n", "file created after the turn survives");
+        assert_eq!(read("keep.rs"), "// keep.rs base\n");
+        assert_eq!(undone.skipped, vec!["main.rs".to_string()]);
+        let mut restored = undone.restored.clone();
+        restored.sort();
+        assert_eq!(restored, vec!["gen.txt".to_string(), "lib.rs".to_string()]);
+
+        // The undo left a backup: undoing it redoes the turn's changes.
+        let backup_run = format!("run-n{UNDO_BACKUP_SUFFIX}");
+        undo_last_turn_for_path(&root, Some(&backup_run)).await.unwrap();
+        assert_eq!(read("lib.rs"), "// lib.rs by the turn\n");
+        assert_eq!(read("gen.txt"), "turn artifact\n");
+        assert_eq!(read("main.rs"), "// main.rs edited by the user\n");
+        assert_eq!(read("notes.txt"), "user notes\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn parses_worktree_porcelain() {
         let output = "worktree /repo/main\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo/wt\nHEAD def\nbranch refs/heads/feature\n";
@@ -1354,7 +1513,10 @@ mod tests {
             stash_sha: None,
             untracked: vec![],
             created_at: now_iso(),
-
+            after_tree_sha: None,
+            after_head_sha: None,
+            restored: vec![],
+            skipped: vec![],
         };
         std::fs::write(
             legacy.join("snapshots.json"),

@@ -562,7 +562,12 @@ async fn send_with_retry(
 ) -> anyhow::Result<reqwest::Response> {
     let mut attempt = 0usize;
     loop {
-        match make_request().send().await {
+        // The shared client has no total timeout (long streams are fine);
+        // waiting for the response headers is bounded here instead.
+        let Ok(sent) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, make_request().send()).await else {
+            anyhow::bail!("Provider did not respond within {} s", STREAM_IDLE_TIMEOUT.as_secs());
+        };
+        match sent {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success()
@@ -698,7 +703,10 @@ async fn consume_response(
 
     if !content_type.contains("text/event-stream") {
         // Non-streaming fallback: the endpoint ignored `stream: true`.
-        let body: Value = response.json().await.unwrap_or(Value::Null);
+        let body: Value = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, response.json()).await {
+            Ok(body) => body.unwrap_or(Value::Null),
+            Err(_) => anyhow::bail!("Stream stalled: no data from the provider for {} s", STREAM_IDLE_TIMEOUT.as_secs()),
+        };
         let mut acc = StreamAcc::default();
         if is_responses {
             // Replay the full response object as the equivalent events.
@@ -751,24 +759,13 @@ async fn consume_response(
         return finish(acc);
     }
 
-    use futures::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut stream = Box::pin(response.bytes_stream());
+    let mut lines = SseLineBuffer::default();
     let mut acc = StreamAcc::default();
 
-    while let Some(chunk) = stream.next().await {
-        if should_stop() {
-            anyhow::bail!("cancelled");
-        }
-        let bytes = chunk.map_err(|err| anyhow::anyhow!("Stream interrupted: {err}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-        while let Some(newline) = buffer.find('\n') {
-            let mut line = buffer[..newline].to_string();
-            buffer.drain(..=newline);
-            if line.ends_with('\r') {
-                line.pop();
-            }
+    while let Some(bytes) = next_stream_chunk(&mut stream, should_stop).await? {
+        lines.push(&bytes);
+        while let Some(line) = lines.next_line() {
             if is_responses {
                 let Some(event) = parse_responses_sse_line(&line) else {
                     continue;
@@ -830,6 +827,93 @@ async fn consume_response(
     }
 
     finish(acc)
+}
+
+/// Longest silence tolerated between two stream chunks. Replaces the old
+/// 600 s *total* request timeout, which killed long reasoning streams.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often `should_stop` is polled while waiting for the next chunk.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Raw SSE bytes split into lines on `b'\n'` *before* UTF-8 decoding, so a
+/// multibyte character split across two network chunks stays intact.
+#[derive(Default)]
+pub struct SseLineBuffer {
+    pending: Vec<u8>,
+}
+
+impl SseLineBuffer {
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+    }
+
+    /// The next complete line (without `\n` / `\r\n`), if one is buffered.
+    pub fn next_line(&mut self) -> Option<String> {
+        let newline = self.pending.iter().position(|byte| *byte == b'\n')?;
+        let mut line: Vec<u8> = self.pending.drain(..=newline).collect();
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+}
+
+/// Reads the next stream chunk, failing after [`STREAM_IDLE_TIMEOUT`] of
+/// silence and returning `"cancelled"` as soon as `should_stop` fires (it is
+/// polled while waiting, not only when a chunk arrives).
+async fn next_stream_chunk<S, B>(
+    stream: &mut S,
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<Option<B>>
+where
+    S: futures::Stream<Item = reqwest::Result<B>> + Unpin,
+{
+    next_stream_chunk_within(stream, should_stop, STREAM_IDLE_TIMEOUT).await
+}
+
+async fn next_stream_chunk_within<S, B, E>(
+    stream: &mut S,
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+    idle_timeout: Duration,
+) -> Result<Option<B>>
+where
+    S: futures::Stream<Item = std::result::Result<B, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    use futures::StreamExt;
+    let started = tokio::time::Instant::now();
+    loop {
+        if should_stop() {
+            anyhow::bail!("cancelled");
+        }
+        match tokio::time::timeout(STOP_POLL_INTERVAL, stream.next()).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(chunk)) => {
+                if should_stop() {
+                    anyhow::bail!("cancelled");
+                }
+                return chunk.map(Some).map_err(|err| anyhow::anyhow!("Stream interrupted: {err}"));
+            }
+            Err(_) if started.elapsed() >= idle_timeout => {
+                anyhow::bail!("Stream stalled: no data from the provider for {} s", idle_timeout.as_secs())
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// The one HTTP client shared by every model call (connection reuse). It has
+/// a connect timeout but no total timeout: streams may legitimately run for a
+/// long time, and stalls are caught by [`STREAM_IDLE_TIMEOUT`] instead.
+pub fn shared_http_client() -> reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default()
+    });
+    CLIENT.clone()
 }
 
 fn finish(acc: StreamAcc) -> Result<StreamOutcome> {
@@ -1314,6 +1398,54 @@ fn summarize_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA-025: a multibyte character split across two network chunks must
+    /// survive (it used to become U+FFFD per chunk).
+    #[test]
+    fn sse_lines_keep_multibyte_text_split_across_chunks() {
+        let line = "data: {\"t\":\"çğü → 日本 🙂\"}\r\n".as_bytes();
+        let mut buffer = SseLineBuffer::default();
+        // Split inside the 3-byte `→` and inside the 4-byte emoji.
+        let arrow = line.windows(3).position(|w| w == "→".as_bytes()).unwrap();
+        let emoji = line.windows(4).position(|w| w == "🙂".as_bytes()).unwrap();
+        buffer.push(&line[..arrow + 1]);
+        assert!(buffer.next_line().is_none());
+        buffer.push(&line[arrow + 1..emoji + 2]);
+        assert!(buffer.next_line().is_none());
+        buffer.push(&line[emoji + 2..]);
+        assert_eq!(buffer.next_line().as_deref(), Some("data: {\"t\":\"çğü → 日本 🙂\"}"));
+        assert!(buffer.next_line().is_none());
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_fails_after_the_idle_timeout_and_stops_on_cancel() {
+        let mut silent = futures::stream::pending::<std::result::Result<Vec<u8>, String>>();
+        let err = next_stream_chunk_within(&mut silent, &|| false, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Stream stalled"), "{err}");
+
+        // Cancellation is noticed while no chunk arrives at all.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let should_stop = move || stop.load(std::sync::atomic::Ordering::SeqCst);
+        let err = next_stream_chunk_within(&mut silent, &should_stop, Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "cancelled");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // A chunk that keeps arriving resets nothing but is returned as is.
+        let mut one = futures::stream::iter(vec![Ok::<_, String>(b"x".to_vec())]);
+        let chunk = next_stream_chunk_within(&mut one, &|| false, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk, Some(b"x".to_vec()));
+        assert_eq!(next_stream_chunk_within(&mut one, &|| false, Duration::from_secs(1)).await.unwrap(), None);
+    }
 
     #[test]
     fn tool_progress_reports_growing_arguments_of_wanted_tools_only() {

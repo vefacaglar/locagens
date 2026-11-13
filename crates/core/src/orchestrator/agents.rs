@@ -311,6 +311,42 @@ impl AgentHub {
         lock(&self.mailbox).drain(..).collect()
     }
 
+    /// Free concurrency slots (live agents count, completed ones included).
+    pub fn free_slots(&self) -> usize {
+        let live = lock(&self.agents).iter().filter(|agent| agent.status != "closed").count();
+        MAX_CONCURRENT_AGENTS.saturating_sub(live)
+    }
+
+    /// Takes the mailbox updates of `ids` only (others stay for `wait_agent`).
+    fn take_updates_of(&self, ids: &[String]) -> Vec<AgentUpdate> {
+        let mut mailbox = lock(&self.mailbox);
+        let (mine, rest): (VecDeque<AgentUpdate>, VecDeque<AgentUpdate>) =
+            mailbox.drain(..).partition(|update| ids.contains(&update.agent_id));
+        *mailbox = rest;
+        mine.into_iter().collect()
+    }
+
+    /// Waits until every agent in `ids` reported one update (the batch
+    /// `spawn_agents` call); `None` when `cancelled` resolves first.
+    pub async fn wait_for_agents(&self, ids: &[String], cancelled: impl Future<Output = ()>) -> Option<Vec<AgentUpdate>> {
+        tokio::pin!(cancelled);
+        let mut collected: Vec<AgentUpdate> = Vec::new();
+        loop {
+            for update in self.take_updates_of(ids) {
+                if !collected.iter().any(|seen| seen.agent_id == update.agent_id) {
+                    collected.push(update);
+                }
+            }
+            if ids.iter().all(|id| collected.iter().any(|update| &update.agent_id == id)) {
+                return Some(collected);
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = &mut cancelled => return None,
+            }
+        }
+    }
+
     /// Waits until any agent has an unread update, `timeout` passes, or
     /// `cancelled` resolves.
     pub async fn wait_for_update(&self, timeout: Duration, cancelled: impl Future<Output = ()>) -> WaitOutcome {
@@ -494,24 +530,34 @@ impl AgentLoop {
         let roles = agent_roles::load_roles(&self.project_path);
         let role = agent_roles::resolve_role(&roles, text_arg(args, &["agent_type", "role"]), &self.mode).map_err(failed)?;
         let requested_name = text_arg(args, &["task_name", "name"]).map(sanitize_task_name);
+        let info = self
+            .start_agent(&role, requested_name.unwrap_or_else(|| derive_task_name(message)), message)
+            .map_err(failed)?;
+        Ok(to_text(json!({
+            "agent_id": info.id,
+            "task_name": info.task_name,
+            "nickname": info.nickname,
+            "role": info.role,
+            "note": "Running in the background. Use wait_agent to collect its result.",
+        })))
+    }
 
+    /// Registers an agent in the hub (counting against
+    /// [`MAX_CONCURRENT_AGENTS`]) and starts its background task. Shared by
+    /// `spawn_agent` and the `spawn_agents` batch.
+    fn start_agent(&self, role: &AgentRole, task_name: String, message: &str) -> Result<AgentInfo, String> {
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         let interrupt = Arc::new(AtomicBool::new(false));
-        let info = self
-            .handle
-            .agents
-            .register(NewAgent {
-                task_name: requested_name.unwrap_or_else(|| derive_task_name(message)),
-                role: role.name.clone(),
-                nicknames: role.nicknames.clone(),
-                commands: commands_tx,
-                interrupt: interrupt.clone(),
-            })
-            .map_err(failed)?;
-
-        let spec = self.agent_spec(&role, &info.nickname, message);
-        let abort = tokio::spawn(run_agent_task(spec, info.id.clone(), commands_rx, interrupt, self.turn_diff.clone()))
-            .abort_handle();
+        let info = self.handle.agents.register(NewAgent {
+            task_name,
+            role: role.name.clone(),
+            nicknames: role.nicknames.clone(),
+            commands: commands_tx,
+            interrupt: interrupt.clone(),
+        })?;
+        let spec = self.agent_spec(role, &info.nickname, message);
+        let task = supervised_agent_task(spec, info.id.clone(), commands_rx, interrupt, self.turn_diff.clone());
+        let abort = tokio::spawn(task).abort_handle();
         self.handle.agents.set_abort(&info.id, abort);
         self.handle.emit(json!({
             "type": "agent_spawned",
@@ -520,13 +566,59 @@ impl AgentLoop {
             "taskName": info.task_name,
             "role": info.role,
         }));
-        Ok(to_text(json!({
-            "agent_id": info.id,
-            "task_name": info.task_name,
-            "nickname": info.nickname,
-            "role": info.role,
-            "note": "Running in the background. Use wait_agent to collect its result.",
-        })))
+        Ok(info)
+    }
+
+    /// `spawn_agents`: the one-shot parallel batch, implemented on the same
+    /// hub as `spawn_agent` (QA-033): every agent takes a slot, the call
+    /// waits for each agent's first turn, then closes them all.
+    pub(super) async fn spawn_agents_tool(&self, args: &Value) -> Result<String, AgentError> {
+        let requested = args.get("agents").and_then(Value::as_array).cloned().unwrap_or_default();
+        let jobs: Vec<(Option<String>, String)> = requested
+            .iter()
+            .filter_map(|agent| {
+                let task = text_arg(agent, &["task", "message"])?.to_string();
+                Some((text_arg(agent, &["role", "agent_type"]).map(str::to_string), task))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return Err(failed("spawn_agents: agents must be a non-empty array of {role, task}."));
+        }
+        let free = self.handle.agents.free_slots();
+        if jobs.len() > free {
+            return Err(failed(format!(
+                "spawn_agents: {} agents requested but only {free} of {MAX_CONCURRENT_AGENTS} agent slots are free. Close agents you no longer need (close_agent) or request fewer.",
+                jobs.len()
+            )));
+        }
+        let roles = agent_roles::load_roles(&self.project_path);
+        let mut started: Vec<(AgentInfo, String)> = Vec::new();
+        let mut results: Vec<String> = Vec::new();
+        for (role, task) in jobs {
+            let outcome = agent_roles::resolve_role(&roles, role.as_deref(), &self.mode)
+                .and_then(|role| self.start_agent(&role, derive_task_name(&task), &task));
+            match outcome {
+                Ok(info) => started.push((info, task)),
+                Err(err) => results.push(format!("## {}: {task}\n(agent failed: {err})", role.unwrap_or_default())),
+            }
+        }
+        let ids: Vec<String> = started.iter().map(|(info, _)| info.id.clone()).collect();
+        let updates = self.handle.agents.wait_for_agents(&ids, self.handle.cancelled()).await;
+        for id in &ids {
+            self.handle.agents.close(id);
+        }
+        let Some(updates) = updates else {
+            return Err(AgentError::Cancelled);
+        };
+        for (info, task) in started {
+            let Some(update) = updates.iter().find(|update| update.agent_id == info.id) else { continue };
+            let body = match update.status.as_str() {
+                "completed" => update.output.clone(),
+                _ => format!("(agent {}: {})", update.status, update.output),
+            };
+            results.push(format!("## {}: {task}\n{body}", info.role));
+        }
+        Ok(format!("Sub-agent results:\n\n{}", results.join("\n\n")))
     }
 
     fn agent_spec(&self, role: &AgentRole, title: &str, task: &str) -> SubAgentSpec {
@@ -652,6 +744,25 @@ impl AgentLoop {
 // The agent task
 // ----------------------------------------------------------------------
 
+/// [`run_agent_task`] with a panic guard: a crashing agent reports a
+/// `failed` update instead of leaving waiters hanging on a `running` agent.
+async fn supervised_agent_task(
+    spec: SubAgentSpec,
+    id: String,
+    commands: mpsc::UnboundedReceiver<AgentCommand>,
+    interrupt: Arc<AtomicBool>,
+    turn_diff: Arc<super::TurnDiffTracker>,
+) {
+    use futures::FutureExt;
+    let handle = spec.handle.clone();
+    let task = std::panic::AssertUnwindSafe(run_agent_task(spec, id.clone(), commands, interrupt, turn_diff));
+    if let Err(payload) = task.catch_unwind().await {
+        let reason = super::panic_message(payload);
+        tracing::error!("Sub-agent {id} panicked: {reason}");
+        handle.agents.finish_turn(&id, "failed", format!("The agent crashed: {reason}"));
+    }
+}
+
 /// Body of the tokio task behind one agent: turn → report → idle → repeat.
 async fn run_agent_task(
     spec: SubAgentSpec,
@@ -700,7 +811,7 @@ async fn run_agent_task(
 }
 
 /// Resolves once `interrupt_agent` raised the flag.
-async fn interrupt_raised(flag: &AtomicBool) {
+pub(super) async fn interrupt_raised(flag: &AtomicBool) {
     while !flag.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
@@ -739,4 +850,4 @@ pub fn repair_dangling_tool_calls(history: &mut Vec<super::llm::LlmMessage>) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

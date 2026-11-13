@@ -34,6 +34,9 @@ pub mod turn_diff_tracker;
 
 pub use turn_diff_tracker::TurnDiffTracker;
 
+#[cfg(test)]
+mod lifecycle_tests;
+
 use crate::db::{Plan, RunMessage, UsageLogEntry};
 use crate::pi_providers::PiProviderManager;
 use crate::AppState;
@@ -47,7 +50,6 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 const MAX_ROUNDS: usize = 40;
 const SUB_AGENT_MAX_ROUNDS: usize = 24;
-const MAX_SUB_AGENTS: usize = 4;
 /// SSE throttling for `message_updated` while tokens stream in.
 const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(60);
 /// Persistence throttling for streaming `messages.jsonl` rewrites.
@@ -124,11 +126,72 @@ pub struct PendingPermission {
 pub struct PermissionSlot {
     pub pending: Option<PendingPermission>,
     pub sender: Option<oneshot::Sender<String>>,
+    /// Id of the prompt that owns the slot (see [`RunHandle::ask_permission`]),
+    /// so a late cleanup never clears a newer prompt.
+    prompt_id: u64,
 }
 
 impl Default for PermissionSlot {
     fn default() -> Self {
-        Self { pending: None, sender: None }
+        Self { pending: None, sender: None, prompt_id: 0 }
+    }
+}
+
+/// One interactive permission prompt for [`RunHandle::ask_permission`].
+pub(crate) struct PermissionPrompt {
+    pub tool_call: Value,
+    pub preview: Option<Value>,
+    pub agent_role: Option<String>,
+    pub agent_name: Option<String>,
+    /// When set, the prompt is skipped (`None`) if the flag dropped to false
+    /// while it waited for its turn (a network prompt whose tool call ended).
+    pub armed: Option<Arc<AtomicBool>>,
+}
+
+/// Clears a permission prompt's slot and status however its future ends —
+/// answered, cancelled, or dropped mid-wait because the sub-agent was
+/// closed/aborted (QA-029).
+struct PromptCleanup {
+    handle: Arc<RunHandle>,
+    db: Arc<crate::db::Db>,
+    prompt_id: u64,
+}
+
+impl PromptCleanup {
+    fn clear(slot: &mut PermissionSlot, prompt_id: u64) {
+        if slot.prompt_id == prompt_id {
+            slot.pending = None;
+            slot.sender = None;
+        }
+    }
+}
+
+impl Drop for PromptCleanup {
+    fn drop(&mut self) {
+        let prompt_id = self.prompt_id;
+        match self.handle.permission.try_lock() {
+            Ok(mut slot) => Self::clear(&mut slot, prompt_id),
+            Err(_) => {
+                // Someone holds the slot for an instant: clear it from a task.
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let handle = self.handle.clone();
+                    runtime.spawn(async move { Self::clear(&mut *handle.permission.lock().await, prompt_id) });
+                }
+            }
+        }
+        // Back to `generating` unless the run is being cancelled (the cancel
+        // path records the terminal status itself).
+        if !self.handle.is_cancelled() {
+            let run_id = self.handle.run_id.clone();
+            let reverted = self
+                .db
+                .get_run_full(&run_id)
+                .is_some_and(|run| run.status == "awaiting_permission");
+            if reverted {
+                self.db.patch_run(&run_id, |run| run.status = "generating".into());
+                self.handle.emit(json!({ "type": "status_changed", "status": "generating" }));
+            }
+        }
     }
 }
 
@@ -145,7 +208,10 @@ impl Default for QuestionSlot {
     }
 }
 
-/// Shared, per-run coordination state handed to routes and the agent loop.
+/// Shared coordination state of ONE drive of a run (a turn), handed to the
+/// facade and the agent loop. Every drive gets a fresh handle: cancellation
+/// is final for a handle and is never reset, so a cancelled loop that is
+/// still unwinding can never be revived by the next turn (QA-023).
 pub struct RunHandle {
     pub run_id: String,
     cancel_flag: Arc<AtomicBool>,
@@ -155,16 +221,30 @@ pub struct RunHandle {
     pub permission: tokio::sync::Mutex<PermissionSlot>,
     pub question: tokio::sync::Mutex<QuestionSlot>,
     pub allow_run: AtomicBool,
-    /// Serializes interactive permission prompts: concurrent sub-agents share
-    /// the single pending-permission slot, so they queue here.
+    /// Serializes interactive permission prompts: concurrent sub-agents and
+    /// network approvals share the single pending-permission slot, so they
+    /// queue here (QA-028).
     permission_gate: tokio::sync::Mutex<()>,
+    next_prompt_id: std::sync::atomic::AtomicU64,
     /// Named sub-agents spawned by `spawn_agent` plus the parent mailbox.
     pub agents: agents::AgentHub,
+    /// Hosts approved with "Allow for Run" during this drive (QA-032).
+    pub(crate) approved_hosts: Mutex<std::collections::HashSet<String>>,
+    /// Set when a drive owns this handle (`prepare_drive` / `spawn`).
+    claimed: AtomicBool,
+    /// `true` once the drive task (and its cleanup) has finished.
+    finished_tx: watch::Sender<bool>,
+    /// Aborts the drive task (last resort when it does not unwind in time).
+    drive_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    /// `(project, snapshot id)` of this turn's pre-turn git snapshot until
+    /// its post-turn state is recorded (QA-030).
+    turn_snapshot: Mutex<Option<(PathBuf, String)>>,
 }
 
 impl RunHandle {
     fn new(run_id: &str) -> Arc<Self> {
         let (cancelled_tx, _) = watch::channel(false);
+        let (finished_tx, _) = watch::channel(false);
         let (events, _) = tokio::sync::broadcast::channel(512);
         Arc::new(Self {
             run_id: run_id.to_string(),
@@ -176,8 +256,22 @@ impl RunHandle {
             question: tokio::sync::Mutex::new(QuestionSlot::default()),
             allow_run: AtomicBool::new(false),
             permission_gate: tokio::sync::Mutex::new(()),
+            next_prompt_id: std::sync::atomic::AtomicU64::new(1),
             agents: agents::AgentHub::default(),
+            approved_hosts: Mutex::new(std::collections::HashSet::new()),
+            claimed: AtomicBool::new(false),
+            finished_tx,
+            drive_abort: Mutex::new(None),
+            turn_snapshot: Mutex::new(None),
         })
+    }
+
+    /// Records the post-turn tree of this turn's undo snapshot (once).
+    async fn record_turn_end(&self) {
+        let Some((project, snapshot_id)) = lock_ignoring_poison(&self.turn_snapshot).take() else { return };
+        if let Err(err) = crate::api::projects::record_turn_end_for_path(&project, &snapshot_id).await {
+            tracing::warn!("Could not record the post-turn snapshot of run {}: {err}", self.run_id);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -189,9 +283,83 @@ impl RunHandle {
         self.cancelled_tx.send_replace(true);
     }
 
-    pub fn reset_cancel(&self) {
-        self.cancel_flag.store(false, Ordering::SeqCst);
-        self.cancelled_tx.send_replace(false);
+    /// Whether this handle's drive has finished (or was never claimed by a
+    /// drive: `prepare_drive` / `spawn` claim it).
+    pub fn is_finished(&self) -> bool {
+        !self.claimed.load(Ordering::SeqCst) || *self.finished_tx.borrow()
+    }
+
+    fn mark_finished(&self) {
+        self.finished_tx.send_replace(true);
+    }
+
+    /// Waits up to `timeout` for the drive to finish; `true` when it did.
+    pub async fn wait_finished(&self, timeout: Duration) -> bool {
+        if self.is_finished() {
+            return true;
+        }
+        let mut rx = self.finished_tx.subscribe();
+        tokio::time::timeout(timeout, async {
+            while !*rx.borrow_and_update() {
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Aborts the drive task; its supervisor still runs the cleanup.
+    fn abort_drive(&self) {
+        if let Some(abort) = lock_ignoring_poison(&self.drive_abort).as_ref() {
+            abort.abort();
+        }
+    }
+
+    /// Shows one permission prompt and waits for the decision. Every prompt
+    /// (tool calls of the main agent and sub-agents, network approvals) goes
+    /// through here: prompts queue on `permission_gate`, own the slot by id,
+    /// and a drop guard clears the slot and restores the status even when
+    /// the waiting future is aborted. `None` means cancelled / skipped.
+    pub(crate) async fn ask_permission(
+        self: &Arc<Self>,
+        db: &Arc<crate::db::Db>,
+        prompt: PermissionPrompt,
+    ) -> Option<String> {
+        let gate = tokio::select! {
+            gate = self.permission_gate.lock() => gate,
+            _ = self.cancelled() => return None,
+        };
+        if prompt.armed.as_ref().is_some_and(|armed| !armed.load(Ordering::SeqCst)) || self.is_cancelled() {
+            return None;
+        }
+        let prompt_id = self.next_prompt_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel::<String>();
+        {
+            let mut slot = self.permission.lock().await;
+            slot.pending = Some(PendingPermission { tool_call: prompt.tool_call.clone(), preview: prompt.preview.clone() });
+            slot.sender = Some(sender);
+            slot.prompt_id = prompt_id;
+        }
+        let cleanup = PromptCleanup { handle: self.clone(), db: db.clone(), prompt_id };
+        db.patch_run(&self.run_id, |run| run.status = "awaiting_permission".into());
+        self.emit(json!({ "type": "status_changed", "status": "awaiting_permission" }));
+        self.emit(json!({
+            "type": "permission_requested",
+            "runId": self.run_id,
+            "toolCall": prompt.tool_call,
+            "preview": prompt.preview,
+            "agentRole": prompt.agent_role,
+            "agentName": prompt.agent_name,
+        }));
+        let decision = tokio::select! {
+            decision = receiver => decision.ok(),
+            _ = self.cancelled() => None,
+        };
+        drop(cleanup);
+        drop(gate);
+        decision
     }
 
     /// Completes when cancellation fires (for `tokio::select!`).
@@ -236,9 +404,18 @@ impl RunHandle {
     }
 }
 
+/// How long `cancel_run` / a new turn waits for a cancelled drive to unwind
+/// before aborting its task.
+pub const DRIVE_UNWIND_GRACE: Duration = Duration::from_secs(5);
+
 /// Registry of live run handles.
 pub struct Orchestrator {
     runs: Mutex<HashMap<String, Arc<RunHandle>>>,
+    /// Exec sessions per run id. They outlive a `done` turn (a dev server the
+    /// agent started stays reachable via `write_stdin` next turn) and are
+    /// killed when a turn of the run is cancelled, fails or panics, or when
+    /// [`Orchestrator::kill_exec_sessions`] is called (QA-027).
+    exec_sessions: Mutex<HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl Default for Orchestrator {
@@ -247,25 +424,91 @@ impl Default for Orchestrator {
     }
 }
 
+fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Orchestrator {
     pub fn new() -> Self {
-        Self { runs: Mutex::new(HashMap::new()) }
+        Self { runs: Mutex::new(HashMap::new()), exec_sessions: Mutex::new(HashMap::new()) }
     }
 
     /// The live handle for a run, if the orchestrator knows about it.
     pub fn handle(&self, run_id: &str) -> Option<Arc<RunHandle>> {
-        self.runs.lock().expect("orchestrator lock poisoned").get(run_id).cloned()
+        lock_ignoring_poison(&self.runs).get(run_id).cloned()
     }
 
     /// Gets or creates the handle for a run.
     pub fn ensure_handle(&self, run_id: &str) -> Arc<RunHandle> {
-        let mut runs = self.runs.lock().expect("orchestrator lock poisoned");
+        let mut runs = lock_ignoring_poison(&self.runs);
         runs.entry(run_id.to_string()).or_insert_with(|| RunHandle::new(run_id)).clone()
     }
 
     /// Forgets a finished run's handle (its terminal state lives in the Db).
     pub fn drop_handle(&self, run_id: &str) {
-        self.runs.lock().expect("orchestrator lock poisoned").remove(run_id);
+        lock_ignoring_poison(&self.runs).remove(run_id);
+    }
+
+    /// Forgets `handle` only if it is still the run's current handle, so a
+    /// finishing old drive never removes the handle of a newer drive.
+    fn drop_own_handle(&self, handle: &Arc<RunHandle>) {
+        let mut runs = lock_ignoring_poison(&self.runs);
+        if runs.get(&handle.run_id).is_some_and(|current| Arc::ptr_eq(current, handle)) {
+            runs.remove(&handle.run_id);
+        }
+    }
+
+    /// Whether a drive of this run is in flight in this process and has not
+    /// been cancelled.
+    pub fn is_driving(&self, run_id: &str) -> bool {
+        self.handle(run_id).is_some_and(|handle| !handle.is_finished() && !handle.is_cancelled())
+    }
+
+    /// A fresh handle for the next drive of `run_id`. A previous handle that
+    /// is still unwinding (cancelled) is waited for up to `grace`, then its
+    /// task is aborted, so two drive loops never share a run (QA-022/023).
+    /// Fails when a live, uncancelled drive owns the run.
+    pub async fn prepare_drive(&self, run_id: &str, grace: Duration) -> Result<Arc<RunHandle>, String> {
+        loop {
+            let previous = {
+                let mut runs = lock_ignoring_poison(&self.runs);
+                match runs.get(run_id) {
+                    Some(previous) => previous.clone(),
+                    None => {
+                        let fresh = RunHandle::new(run_id);
+                        fresh.claimed.store(true, Ordering::SeqCst);
+                        runs.insert(run_id.to_string(), fresh.clone());
+                        return Ok(fresh);
+                    }
+                }
+            };
+            if !previous.is_finished() {
+                if !previous.is_cancelled() {
+                    return Err("Run is still generating; queue the message instead.".to_string());
+                }
+                self.stop_drive(&previous, grace).await;
+            }
+            // Swap in a fresh, claimed handle unless another caller already
+            // replaced `previous` meanwhile (then re-check that one).
+            let mut runs = lock_ignoring_poison(&self.runs);
+            let unchanged = runs.get(run_id).is_none_or(|current| Arc::ptr_eq(current, &previous));
+            if unchanged {
+                let fresh = RunHandle::new(run_id);
+                fresh.claimed.store(true, Ordering::SeqCst);
+                runs.insert(run_id.to_string(), fresh.clone());
+                return Ok(fresh);
+            }
+        }
+    }
+
+    /// Waits for a (cancelled) drive to finish, aborting it after `grace`.
+    pub async fn stop_drive(&self, handle: &Arc<RunHandle>, grace: Duration) {
+        if handle.wait_finished(grace).await {
+            return;
+        }
+        tracing::warn!("Run {} did not unwind within {grace:?}; aborting its drive task", handle.run_id);
+        handle.abort_drive();
+        handle.wait_finished(Duration::from_secs(2)).await;
     }
 
     /// Emits a `status_changed` event on a live handle, if one exists.
@@ -275,15 +518,114 @@ impl Orchestrator {
         }
     }
 
+    fn track_exec_session(&self, run_id: &str, session_id: &str) {
+        lock_ignoring_poison(&self.exec_sessions)
+            .entry(run_id.to_string())
+            .or_default()
+            .insert(session_id.to_string());
+    }
+
+    fn untrack_exec_session(&self, run_id: &str, session_id: &str) {
+        let mut sessions = lock_ignoring_poison(&self.exec_sessions);
+        if let Some(ids) = sessions.get_mut(run_id) {
+            ids.remove(session_id);
+            if ids.is_empty() {
+                sessions.remove(run_id);
+            }
+        }
+    }
+
+    /// Exec session ids started by a run that are still tracked.
+    pub fn exec_sessions(&self, run_id: &str) -> Vec<String> {
+        lock_ignoring_poison(&self.exec_sessions)
+            .get(run_id)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Kills (process tree / Job Object) and forgets every exec session the
+    /// run started. Used on cancel, failure, panic and run deletion.
+    pub async fn kill_exec_sessions(&self, processes: &locagens_execpolicy::processes::ProcessManager, run_id: &str) {
+        let ids = lock_ignoring_poison(&self.exec_sessions).remove(run_id).unwrap_or_default();
+        for id in ids {
+            processes.kill(&id).await;
+            processes.drop_session(&id);
+        }
+    }
+
     /// Spawns the drive task for a run that already has its initial user
-    /// message persisted.
+    /// message persisted. A supervisor awaits the task: a panic marks the
+    /// run `failed` (QA-024), and every ending (normal, panic, abort) runs
+    /// the same cleanup — sub-agents closed, exec sessions killed unless the
+    /// turn completed, handle dropped.
     pub fn spawn(self: &Arc<Self>, state: Arc<AppState>, run_id: &str) {
         let handle = self.ensure_handle(run_id);
+        let drive = drive_run(state.clone(), handle.clone());
+        self.supervise(state, handle, drive);
+    }
+
+    /// Runs `drive` as the drive task of `handle` under the supervisor.
+    fn supervise(
+        self: &Arc<Self>,
+        state: Arc<AppState>,
+        handle: Arc<RunHandle>,
+        drive: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        handle.claimed.store(true, Ordering::SeqCst);
+        let drive = tokio::spawn(drive);
+        *lock_ignoring_poison(&handle.drive_abort) = Some(drive.abort_handle());
         let orchestrator = self.clone();
         tokio::spawn(async move {
-            drive_run(state, handle, orchestrator).await;
+            if let Err(err) = drive.await {
+                if err.is_panic() {
+                    let reason = panic_message(err.into_panic());
+                    tracing::error!("Run {} drive task panicked: {reason}", handle.run_id);
+                    record_drive_panic(&state, &handle, &reason);
+                }
+            }
+            orchestrator.finish_drive(&state, &handle).await;
         });
     }
+
+    async fn finish_drive(&self, state: &AppState, handle: &Arc<RunHandle>) {
+        handle.agents.shutdown();
+        let completed = state.db.get_run_full(&handle.run_id).is_some_and(|run| run.status == "done");
+        if !completed {
+            self.kill_exec_sessions(&state.processes, &handle.run_id).await;
+        }
+        // Normally recorded by the drive; this covers panics and aborts.
+        handle.record_turn_end().await;
+        self.drop_own_handle(handle);
+        handle.mark_finished();
+    }
+}
+
+/// The text of a task panic payload.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
+}
+
+/// Lands `failed` for a run whose drive task panicked (unless it already
+/// reached a terminal state).
+fn record_drive_panic(state: &AppState, handle: &RunHandle, reason: &str) {
+    let terminal = state
+        .db
+        .get_run_full(&handle.run_id)
+        .is_some_and(|run| TERMINAL_STATUSES.contains(&run.status.as_str()));
+    if terminal {
+        return;
+    }
+    let error = format!("Internal error: the run's agent loop crashed ({reason}).");
+    state.db.patch_run(&handle.run_id, |run| {
+        run.status = "failed".into();
+        run.error_message = Some(error.clone());
+    });
+    handle.emit(json!({ "type": "status_changed", "status": "failed" }));
+    handle.emit(json!({ "type": "run_failed", "errorMessage": error }));
 }
 
 // ----------------------------------------------------------------------
@@ -612,6 +954,18 @@ impl AgentLoop {
         self.handle.is_cancelled() || self.interrupted()
     }
 
+    /// Resolves once the run is cancelled or this agent is interrupted (for
+    /// `tokio::select!` around long awaits).
+    async fn stop_signal(&self) {
+        match self.extras.interrupt.as_ref() {
+            Some(flag) => tokio::select! {
+                _ = self.handle.cancelled() => {}
+                _ = agents::interrupt_raised(flag) => {}
+            },
+            None => self.handle.cancelled().await,
+        }
+    }
+
     fn check_cancel(&self) -> Result<(), AgentError> {
         if self.stop_requested() {
             Err(AgentError::Cancelled)
@@ -691,13 +1045,9 @@ impl AgentLoop {
             let mut patch_streams: HashMap<usize, patch_progress::PatchArgsStream> = HashMap::new();
             let mut last_patch_emit = Instant::now() - Duration::from_secs(1);
 
-            let stream = llm::stream_chat_observed(
-                &endpoint_http(&self.state),
-                &endpoint,
-                &self.system,
-                &self.history,
-                &self.tools,
-                &mut |content_delta: &str, reasoning_delta: &str| {
+            let http = endpoint_http(&self.state);
+            let stream = {
+                let mut on_delta = |content_delta: &str, reasoning_delta: &str| {
                     content.push_str(content_delta);
                     reasoning.push_str(reasoning_delta);
                     message.content = content.clone();
@@ -717,8 +1067,8 @@ impl AgentLoop {
                             .stream_message(&self.run_id, &message_id, &content, Some(&reasoning));
                         last_persist = Instant::now();
                     }
-                },
-                &mut |progress: &llm::ToolArgsProgress| {
+                };
+                let mut on_tool_args = |progress: &llm::ToolArgsProgress| {
                     let patch = patch_streams.entry(progress.index).or_default();
                     let changed = patch.update(&progress.arguments);
                     if changed && (patch.ended() || last_patch_emit.elapsed() >= STREAM_EMIT_INTERVAL) {
@@ -730,10 +1080,25 @@ impl AgentLoop {
                             self.agent_name.as_deref(),
                         ));
                     }
-                },
-                &|| self.stop_requested(),
-            )
-            .await;
+                };
+                let should_stop = || self.stop_requested();
+                let call = llm::stream_chat_observed(
+                    &http,
+                    &endpoint,
+                    &self.system,
+                    &self.history,
+                    &self.tools,
+                    &mut on_delta,
+                    &mut on_tool_args,
+                    &should_stop,
+                );
+                // Race the whole call (request, retries, stream) against
+                // cancellation so a stalled provider cannot pin a cancelled loop.
+                tokio::select! {
+                    stream = call => stream,
+                    _ = self.stop_signal() => return Err(AgentError::Cancelled),
+                }
+            };
 
             let outcome = match stream {
                 Ok(outcome) => outcome,
@@ -977,7 +1342,7 @@ impl AgentLoop {
                 self.ask_user_question(&normalized).await
             }
             "compact_context" => self.compact_context_tool().await,
-            "spawn_agents" if self.depth_left > 0 => self.spawn_agents(args).await,
+            "spawn_agents" if self.depth_left > 0 => self.spawn_agents_tool(args).await,
             name if agents::is_agent_tool(name) && self.depth_left > 0 => self.dispatch_agent_tool(name, args).await,
             tool_search::TOOL_SEARCH_NAME => {
                 tool_search::apply_search(&mut self.tools, &self.extras.deferred_tools, args).map_err(AgentError::Failed)
@@ -1195,36 +1560,54 @@ impl AgentLoop {
             .state
             .processes
             .spawn_with_options(&command, workdir, options);
+        // Tracked per run so cancel / failure kills it (QA-027).
+        self.state.orchestrator.track_exec_session(&self.run_id, &info.id);
         let started = std::time::Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Some(poll) = self.state.processes.poll_output(&info.id, max_chars) {
-                if poll.status == "exited" {
-                    self.state.processes.drop_session(&info.id);
-                    return Ok(serde_json::json!({
-                        "exit_code": poll.exit_code.unwrap_or(-1),
-                        "output": poll.output,
-                        "wall_time_ms": started.elapsed().as_millis() as u64,
-                    })
-                    .to_string());
-                }
-            }
-            if started.elapsed().as_millis() as u64 >= yield_ms {
-                break;
-            }
+        self.wait_exec_session(&info.id, yield_ms).await.map_err(|_| "cancelled".to_string())?;
+        let poll = self.state.processes.poll_output(&info.id, max_chars).unwrap_or(
+            locagens_execpolicy::processes::ExecPoll { output: String::new(), status: "exited".into(), exit_code: None },
+        );
+        if poll.status == "exited" {
+            self.forget_exec_session(&info.id);
+            return Ok(serde_json::json!({
+                "exit_code": poll.exit_code.unwrap_or(-1),
+                "output": poll.output,
+                "wall_time_ms": started.elapsed().as_millis() as u64,
+            })
+            .to_string());
         }
-        let output = self
-            .state
-            .processes
-            .poll_output(&info.id, max_chars)
-            .map(|poll| poll.output)
-            .unwrap_or_default();
         Ok(serde_json::json!({
             "session_id": info.id,
             "status": "running",
-            "output": output,
+            "output": poll.output,
         })
         .to_string())
+    }
+
+    /// Waits until the session's process exits or `yield_ms` passes, without
+    /// consuming output (it is read once afterwards, so nothing is lost).
+    /// Checks for cancellation / interrupt every 100 ms (QA-023).
+    async fn wait_exec_session(&self, session_id: &str, yield_ms: u64) -> Result<(), AgentError> {
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            self.check_cancel()?;
+            let running = self.state.processes.is_running(session_id).unwrap_or(false);
+            if !running {
+                // Let the pipe readers flush the last chunks after the exit.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                return Ok(());
+            }
+            if started.elapsed().as_millis() as u64 >= yield_ms {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Drops a finished exec session and stops tracking it for the run.
+    fn forget_exec_session(&self, session_id: &str) {
+        self.state.processes.drop_session(session_id);
+        self.state.orchestrator.untrack_exec_session(&self.run_id, session_id);
     }
 
     /// `write_stdin`: feeds characters to a running exec session and polls
@@ -1252,34 +1635,29 @@ impl AgentLoop {
             .and_then(Value::as_u64)
             .unwrap_or(20_000)
             .clamp(1_000, 200_000) as usize * 4;
-        let started = std::time::Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Some(poll) = self.state.processes.poll_output(&session_id, max_chars) {
-                if poll.status == "exited" {
-                    self.state.processes.drop_session(&session_id);
-                    return Ok(serde_json::json!({
-                        "session_id": session_id,
-                        "status": "exited",
-                        "exit_code": poll.exit_code.unwrap_or(-1),
-                        "output": poll.output,
-                    })
-                    .to_string());
-                }
-                if started.elapsed().as_millis() as u64 >= yield_ms {
-                    return Ok(serde_json::json!({
-                        "session_id": session_id,
-                        "status": "running",
-                        "output": poll.output,
-                    })
-                    .to_string());
-                }
-            } else {
-                return Err(AgentError::Failed(format!(
-                    "write_stdin: unknown session {session_id}."
-                )));
-            }
+        if self.state.processes.is_running(&session_id).is_none() {
+            return Err(AgentError::Failed(format!("write_stdin: unknown session {session_id}.")));
         }
+        self.wait_exec_session(&session_id, yield_ms).await?;
+        let Some(poll) = self.state.processes.poll_output(&session_id, max_chars) else {
+            return Err(AgentError::Failed(format!("write_stdin: unknown session {session_id}.")));
+        };
+        if poll.status == "exited" {
+            self.forget_exec_session(&session_id);
+            return Ok(serde_json::json!({
+                "session_id": session_id,
+                "status": "exited",
+                "exit_code": poll.exit_code.unwrap_or(-1),
+                "output": poll.output,
+            })
+            .to_string());
+        }
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "status": "running",
+            "output": poll.output,
+        })
+        .to_string())
     }
 
     /// Manual context compaction (`compact_context` tool).
@@ -1323,16 +1701,15 @@ impl AgentLoop {
             content: transcript,
             ..Default::default()
         }];
-        let outcome = llm::stream_chat(
-            &endpoint_http(&self.state),
-            &endpoint,
-            &system,
-            &messages,
-            &[],
-            &mut |_content_delta: &str, _reasoning_delta: &str| {},
-            &|| self.handle.is_cancelled(),
-        )
-        .await
+        let http = endpoint_http(&self.state);
+        let mut ignore_deltas = |_content_delta: &str, _reasoning_delta: &str| {};
+        let should_stop = || self.handle.is_cancelled();
+        let summary = llm::stream_chat(&http, &endpoint, &system, &messages, &[], &mut ignore_deltas, &should_stop);
+        let summary = tokio::select! {
+            summary = summary => summary,
+            _ = self.handle.cancelled() => return Err(AgentError::Cancelled),
+        };
+        let outcome = summary
         .map_err(|err| {
             if err.to_string() == "cancelled" || self.handle.is_cancelled() {
                 AgentError::Cancelled
@@ -1445,95 +1822,6 @@ impl AgentLoop {
         ))
     }
 
-    // -- Delegation ------------------------------------------------------
-
-    async fn run_sub_agent(
-        &self,
-        role: &str,
-        title: &str,
-        provider_id: &str,
-        model: &str,
-        reasoning: Option<&str>,
-        task: &str,
-        readonly: bool,
-    ) -> Result<String, AgentError> {
-        let spec = SubAgentSpec {
-            state: self.state.clone(),
-            handle: self.handle.clone(),
-            run_id: self.run_id.clone(),
-            project_path: self.project_path.clone(),
-            mode: self.mode.clone(),
-            provider_id: if provider_id.trim().is_empty() { self.provider_id.clone() } else { provider_id.trim().to_string() },
-            model: if model.trim().is_empty() { self.model.clone() } else { model.trim().to_string() },
-            reasoning_effort: reasoning.map(str::to_string).filter(|r| !r.is_empty()),
-            role: role.to_string(),
-            instructions: None,
-            title: title.to_string(),
-            task: task.to_string(),
-            readonly,
-            depth_left: 0,
-        };
-        run_sub_agent_owned(spec, self.turn_diff.clone())
-            .await
-            .map_err(|err| {
-                if err == "cancelled" || self.handle.is_cancelled() {
-                    AgentError::Cancelled
-                } else {
-                    AgentError::Failed(err)
-                }
-            })
-    }
-
-    async fn spawn_agents(&self, args: &Value) -> Result<String, AgentError> {
-        let agents = args.get("agents").and_then(Value::as_array).cloned().unwrap_or_default();
-        if agents.is_empty() {
-            return Err(AgentError::Failed("spawn_agents: agents must be a non-empty array.".into()));
-        }
-        // Validate up front (forcing read-only roles in plan/chat), then run
-        // everything concurrently.
-        let specs: Vec<(&'static str, String)> = agents
-            .iter()
-            .filter_map(|agent| {
-                let task = agent.get("task").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-                if task.is_empty() {
-                    return None;
-                }
-                let role = agent.get("role").and_then(Value::as_str).unwrap_or("explorer");
-                Some((sub_agent_role_static(role, &self.mode), task))
-            })
-            .take(MAX_SUB_AGENTS)
-            .collect();
-        if specs.is_empty() {
-            return Err(AgentError::Failed("spawn_agents: no agent carried a non-empty task.".into()));
-        }
-
-        let outcomes = futures::future::join_all(specs.into_iter().map(|(agent_role, task)| async move {
-            let outcome = self
-                .run_sub_agent(
-                    agent_role,
-                    &task,
-                    &self.provider_id,
-                    &self.model,
-                    self.reasoning_effort.as_deref(),
-                    &task,
-                    agent_role == "explorer",
-                )
-                .await;
-            (task, agent_role, outcome)
-        }))
-        .await;
-
-        let mut results = Vec::new();
-        for (task, agent_role, outcome) in outcomes {
-            match outcome {
-                Ok(answer) => results.push(format!("## {agent_role}: {task}\n{answer}")),
-                Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
-                Err(AgentError::Failed(err)) => results.push(format!("## {agent_role}: {task}\n(agent failed: {err})")),
-            }
-        }
-        Ok(format!("Sub-agent results:\n\n{}", results.join("\n\n")))
-    }
-
     // -- Permission gating -------------------------------------------------
 
     /// Network allowlist + live domain approval for a sandboxed command.
@@ -1541,7 +1829,7 @@ impl AgentLoop {
         &self,
         args: &Value,
     ) -> (locagens_execpolicy::network_proxy::NetworkPolicy, network_access::ApprovalWindow) {
-        network_access::command_network_policy(&self.state, &self.handle, &self.run_id, &self.project_path, args)
+        network_access::command_network_policy(&self.state, &self.handle, &self.project_path, args)
     }
 
     fn standing_grant(&self, name: &str, args: &Value) -> bool {
@@ -1598,48 +1886,25 @@ impl AgentLoop {
             hook_calls::PermissionVerdict::Deny(reason) => return Ok(format!("Denied by PermissionRequest hook: {reason}")),
             hook_calls::PermissionVerdict::Ask => {}
         }
-        // Concurrent sub-agents share one pending-permission slot: queue up
-        // so each request is shown (and answered) on its own.
-        let gate = tokio::select! {
-            gate = self.handle.permission_gate.lock() => gate,
-            _ = self.handle.cancelled() => return Err(AgentError::Cancelled),
-        };
+        // One shared prompt path: queues behind other sub-agents' and network
+        // prompts, and its slot/status are restored even if this future is
+        // aborted (`close_agent` mid-prompt).
         self.notification_hook("permission_prompt", &format!("Locagens needs permission to run {name}")).await;
-        self.state.db.patch_run(&self.run_id, |run| run.status = "awaiting_permission".into());
-        self.handle.emit(json!({ "type": "status_changed", "status": "awaiting_permission" }));
-        self.handle.emit(json!({
-            "type": "permission_requested",
-            "runId": self.run_id,
-            "toolCall": tool_call,
-            "preview": preview,
-            "agentRole": self.agent_role,
-            "agentName": self.agent_name,
-        }));
-
-        let (sender, receiver) = oneshot::channel::<String>();
-        {
-            let mut slot = self.handle.permission.lock().await;
-            slot.pending = Some(crate::orchestrator::PendingPermission { tool_call, preview });
-            slot.sender = Some(sender);
-        }
-        let decision = tokio::select! {
-            decision = receiver => decision.ok(),
-            _ = self.handle.cancelled() => None,
+        let prompt = PermissionPrompt {
+            tool_call,
+            preview,
+            agent_role: self.agent_role.clone(),
+            agent_name: self.agent_name.clone(),
+            armed: None,
         };
-        {
-            let mut slot = self.handle.permission.lock().await;
-            slot.pending = None;
-            slot.sender = None;
-        }
-        drop(gate);
-        if decision.is_none() {
+        let Some(decision) = self.handle.ask_permission(&self.state.db, prompt).await else {
+            return Err(AgentError::Cancelled);
+        };
+        if self.stop_requested() {
             return Err(AgentError::Cancelled);
         }
 
-        self.state.db.patch_run(&self.run_id, |run| run.status = "generating".into());
-        self.handle.emit(json!({ "type": "status_changed", "status": "generating" }));
-
-        let decision = decision.unwrap();
+        // Standing grants are persisted here only (QA-031), never by the facade.
         match decision.as_str() {
             "deny" => Ok("The user denied permission for this tool call.".to_string()),
             "allow_run" => {
@@ -1693,13 +1958,10 @@ impl AgentLoop {
     }
 }
 
-/// Shared HTTP client for streaming calls (long timeouts: streams can run
-/// for minutes).
+/// Shared HTTP client for streaming calls (see [`llm::shared_http_client`]:
+/// connection reuse, connect timeout, per-read idle timeout).
 fn endpoint_http(_state: &AppState) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(600))
-        .build()
-        .unwrap_or_default()
+    llm::shared_http_client()
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -1813,13 +2075,6 @@ fn normalize_request_user_input(args: &Value) -> Value {
     json!({ "questions": normalized })
 }
 
-fn sub_agent_role_static(role: &str, mode: &str) -> &'static str {
-    if mode == "plan" || mode == "chat" {
-        return "explorer";
-    }
-    if role == "worker" { "worker" } else { "explorer" }
-}
-
 /// The command string of a `run_command`/`exec_command` call: `command`
 /// first, Codex's `cmd` as fallback.
 fn extract_command_str(args: &Value) -> &str {
@@ -1899,26 +2154,6 @@ struct SubAgentSpec {
     depth_left: u32,
 }
 
-/// Runs a one-shot sub-agent to completion (`spawn_agents`). Boxed to break
-/// the recursion cycle (sub-agent → run → dispatch → spawn → sub-agent).
-fn run_sub_agent_owned(
-    spec: SubAgentSpec,
-    turn_diff: Arc<TurnDiffTracker>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> {
-    Box::pin(run_sub_agent_inner(spec, turn_diff))
-}
-
-async fn run_sub_agent_inner(spec: SubAgentSpec, turn_diff: Arc<TurnDiffTracker>) -> Result<String, String> {
-    let mut sub = build_sub_loop(spec, None, turn_diff, None).await;
-    sub.subagent_start_hook().await;
-    let result = Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS)).await;
-    sub.subagent_stop_hook(&result).await;
-    result.map_err(|err| match err {
-            AgentError::Cancelled => "cancelled".to_string(),
-            AgentError::Failed(err) => err,
-        })
-}
-
 /// Builds the loop of one sub-agent (history seeded with its task). The
 /// persistent agents in `agents.rs` keep it alive across turns.
 async fn build_sub_loop(
@@ -1969,12 +2204,15 @@ async fn build_sub_loop(
 
 /// The spawned task that owns one run: seeds history, drives the loop and
 /// lands the terminal status + events.
-async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: Arc<Orchestrator>) {
+/// Handle cleanup (sub-agents, exec sessions, handle removal) is done by the
+/// supervisor in [`Orchestrator::spawn`], so it also runs after a panic.
+async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
     let run_id = handle.run_id.clone();
-    handle.reset_cancel();
+    if handle.is_cancelled() {
+        return;
+    }
 
     let Some(run) = state.db.get_run_full(&run_id) else {
-        orchestrator.drop_handle(&run_id);
         return;
     };
 
@@ -2080,10 +2318,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         let Some(body) = skill.body.as_deref().filter(|body| !body.trim().is_empty()) else {
             continue;
         };
-        let mut take = body.len().min(skill_budget);
-        while take > 0 && !body.is_char_boundary(take) {
-            take -= 1;
-        }
+        let take = locagens_protocol::text::floor_char_boundary(body, skill_budget);
         if take == 0 {
             break;
         }
@@ -2109,11 +2344,10 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     // Pre-turn git baseline (best-effort): lets `/undo` restore the exact
     // pre-turn state. Never fails a non-git run.
     if run_full.mode != "plan" && run_full.mode != "chat" && !run_full.project_path.is_empty() {
-        let _ = crate::api::projects::create_git_snapshot_for_path(
-            Path::new(&run_full.project_path),
-            &run_id,
-        )
-        .await;
+        let project = PathBuf::from(&run_full.project_path);
+        if let Ok(Some(snapshot)) = crate::api::projects::create_git_snapshot_for_path(&project, &run_id).await {
+            *lock_ignoring_poison(&handle.turn_snapshot) = Some((project, snapshot.id));
+        }
     }
 
     let result = match prompt_block {
@@ -2121,12 +2355,16 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         None => agent.run(MAX_ROUNDS).await,
     };
     handle.agents.shutdown();
+    // Post-turn tree before the terminal status, so an immediate `/undo`
+    // already knows which files this turn changed.
+    handle.record_turn_end().await;
     hook_calls::session_end_hook(&run_full.project_path, &run_id, &result).await;
 
     // Land the terminal state unless the route already recorded it (cancel).
+    // Drives of one run never overlap (`Orchestrator::prepare_drive`), so
+    // the run's status here belongs to this drive.
     let current = state.db.get_run_full(&run_id);
     if current.map(|run| TERMINAL_STATUSES.contains(&run.status.as_str())).unwrap_or(false) {
-        orchestrator.drop_handle(&run_id);
         return;
     }
     match result {
@@ -2152,7 +2390,6 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
             handle.emit(json!({ "type": "run_failed", "errorMessage": err }));
         }
     }
-    orchestrator.drop_handle(&run_id);
 }
 
 #[cfg(test)]
@@ -2292,9 +2529,12 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_roles_force_explorer_in_readonly_modes() {
-        assert_eq!(sub_agent_role_static("worker", "plan"), "explorer");
-        assert_eq!(sub_agent_role_static("nonsense", "auto"), "explorer");
+    fn sub_agent_roles_are_read_only_in_readonly_modes() {
+        // `spawn_agents` and `spawn_agent` share `resolve_role` (QA-033).
+        let roles = agent_roles::builtin_roles();
+        assert!(agent_roles::resolve_role(&roles, Some("worker"), "plan").unwrap().readonly);
+        assert!(!agent_roles::resolve_role(&roles, Some("worker"), "auto").unwrap().readonly);
+        assert_eq!(agent_roles::resolve_role(&roles, None, "auto").unwrap().name, "explorer");
     }
 
     #[test]

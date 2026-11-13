@@ -247,7 +247,15 @@ pub async fn execute(
         SlashCommand::Undo => {
             match crate::api::projects::undo_last_turn(state, &project_str, session.session.as_deref()).await {
                 Ok(snapshot) => {
-                    result.notice(format!("Restored snapshot {} (HEAD {}).", snapshot.id, snapshot.head_sha))
+                    result.notice(format!(
+                        "Restored snapshot {} (HEAD {}, {} file(s)).",
+                        snapshot.id,
+                        snapshot.head_sha,
+                        snapshot.restored.len()
+                    ));
+                    if !snapshot.skipped.is_empty() {
+                        result.notice(format!("Left alone (changed after that turn): {}", snapshot.skipped.join(", ")));
+                    }
                 }
                 Err(err) => result.error(format!("undo failed: {err}")),
             }
