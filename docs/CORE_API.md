@@ -109,6 +109,21 @@ pub async fn fetch_models(state, input: &FetchModelsInput) -> ApiResult<Vec<Stri
 pub async fn test_provider(state, input: &TestProviderInput) -> ApiResult<TestProviderResult>
 pub async fn get_pi_auth(state) -> ApiResult<Vec<Value>>                // ~/.pi/agent/auth.json status
 pub async fn set_pi_auth(state, input: &SetPiAuthInput) -> ApiResult<()>
+
+// OAuth device login (xai today). Credentials go to ~/.locagens/auth.json only.
+pub fn oauth_providers() -> Vec<OAuthProviderInfo>                       // { id, name, loginLabel }
+pub async fn start_oauth_login(state, provider_id: &str) -> ApiResult<OAuthLoginStart>
+    // { providerId, userCode, verificationUri (https), expiresInSecs, intervalSecs, handle (opaque) }
+pub async fn finish_oauth_login(state, start: &OAuthLoginStart) -> ApiResult<()>
+    // polls until approved/denied/expired and stores the credential; drop the future to cancel
+pub fn open_verification_url(url: &str) -> ApiResult<()>                 // https only, OS opener, no shell
+```
+
+`get_pi_auth` reports OAuth entries as `type: "oauth"`, `keyPreview: "oauth"`,
+`expiresAt` (epoch ms) and `expired`; tokens are never returned. Expired OAuth
+tokens are refreshed transparently when a run resolves its credential
+(under an `auth.json.lock` directory, compatible with pi). `list_providers`
+only returns configured providers (see `docs/CLI.md`).
 ```
 
 ### `api::permissions` — standing grants

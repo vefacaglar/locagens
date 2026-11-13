@@ -86,11 +86,28 @@ Credentials live in `~/.pi/agent/auth.json`, shared with `pi` and the desktop
 app. Keys are prompted with no echo when `--api-key` is omitted.
 
 ```powershell
+lcgn auth                       # provider table (id, name, sign-in method, status) + usage hint
+lcgn auth login                 # numbered table; on a terminal, prompts for number or id
 lcgn auth login opencode-go [--api-key <key>]
+lcgn auth login xai             # OAuth device login (SuperGrok / X Premium)
 lcgn auth logout opencode-go
 lcgn auth check                 # exit 0 ready / 1 not ready
 lcgn auth check --provider opencode-go --json
 ```
+
+Status shows `signed in (oauth)`, `signed in (api key)`, `env $VAR` or `-`
+(never key or token values). Without a terminal, `lcgn auth login` only prints
+the table and exits 2.
+
+`lcgn auth login xai` prints a verification URL and a code, opens the URL in
+your browser (https only), and waits for approval (Ctrl+C cancels). The OAuth
+credential is written to `~/.locagens/auth.json` in pi's format
+(`type: "oauth"`, `access`, `refresh`, `expires`) and refreshed automatically
+before it expires. Pass `--api-key` to store an API key instead.
+`lcgn auth check` reports OAuth credentials as valid/expired (never the
+tokens). Only providers you have configured (credential in `auth.json`, the
+provider's own env var, or an entry in `models.json` / Codex `config.toml`)
+appear in `/model` and `--list-models`.
 
 ## Flags reference
 

@@ -6,8 +6,8 @@
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::pi_providers::{
-    EditableProviderConfig, FetchModelsInput, ProviderMetadata, SaveProviderConfigInput,
-    SetPiAuthInput, TestProviderInput,
+    DeviceCodeSession, EditableProviderConfig, FetchModelsInput, OAuthProviderInfo, ProviderMetadata,
+    SaveProviderConfigInput, SetPiAuthInput, TestProviderInput,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,22 @@ impl Serialize for TestProviderResult {
         }
         map.end()
     }
+}
+
+/// A started OAuth device login: show `user_code` and `verification_uri` to
+/// the user, then pass the whole value to [`finish_oauth_login`]. `handle`
+/// is opaque (it carries the private device code and is redacted from
+/// `Debug`).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthLoginStart {
+    pub provider_id: String,
+    pub user_code: String,
+    /// Validated https URL (the "complete" URL when the server sent one).
+    pub verification_uri: String,
+    pub expires_in_secs: u64,
+    pub interval_secs: u64,
+    pub handle: DeviceCodeSession,
 }
 
 /// Lists all configured / authenticated providers (`GET /api/providers`).
@@ -140,4 +156,72 @@ pub async fn set_pi_auth(state: &AppState, input: &SetPiAuthInput) -> ApiResult<
         .pi
         .set_pi_auth(input)
         .map_err(|err| ApiError::bad_request(format!("Failed to update pi auth: {err}")))
+}
+
+/// Providers that support OAuth sign-in (currently `xai`).
+pub fn oauth_providers() -> Vec<OAuthProviderInfo> {
+    locagens_config::oauth::oauth_providers().to_vec()
+}
+
+/// Starts an OAuth device login: requests a device code from the provider.
+pub async fn start_oauth_login(state: &AppState, provider_id: &str) -> ApiResult<OAuthLoginStart> {
+    let provider_id = provider_id.trim();
+    if locagens_config::oauth::oauth_provider_info(provider_id).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "Provider \"{provider_id}\" does not support OAuth login"
+        )));
+    }
+    let session = state
+        .pi
+        .start_oauth_login(provider_id)
+        .await
+        .map_err(|err| ApiError::internal(format!("Failed to start OAuth login: {err}")))?;
+    Ok(OAuthLoginStart {
+        provider_id: provider_id.to_string(),
+        user_code: session.user_code.clone(),
+        verification_uri: session.verification_uri.clone(),
+        expires_in_secs: session.expires_in_secs.ceil() as u64,
+        interval_secs: session.interval_secs.map(|secs| secs.ceil() as u64).unwrap_or(5),
+        handle: session,
+    })
+}
+
+/// Polls until the user approves the login and stores the credential in
+/// `~/.locagens/auth.json`. Cancel by dropping the future.
+pub async fn finish_oauth_login(state: &AppState, start: &OAuthLoginStart) -> ApiResult<()> {
+    state
+        .pi
+        .finish_oauth_login(&start.provider_id, &start.handle)
+        .await
+        .map_err(|err| ApiError::bad_request(format!("OAuth login failed: {err}")))
+}
+
+/// Opens a verification URL in the default browser. Only https URLs are
+/// opened, and the URL is handed to the OS opener directly (never through a
+/// shell).
+pub fn open_verification_url(url: &str) -> ApiResult<()> {
+    let url = locagens_config::oauth::xai::validate_verification_uri(url)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url.as_str()]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url.as_str());
+        command
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url.as_str());
+        command
+    };
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| ApiError::internal(format!("Could not open the browser: {err}")))
 }

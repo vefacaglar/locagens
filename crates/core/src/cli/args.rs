@@ -87,8 +87,9 @@ pub struct Cli {
 pub enum Command {
     /// Manage provider credentials (Codex / Locagens Auth & Providers: ~/.locagens/auth.json, Codex-compatible with ~/.codex/auth.json + ~/.pi/agent fallback)
     Auth {
+        /// Omit to list the providers you can sign in to
         #[command(subcommand)]
-        action: AuthAction,
+        action: Option<AuthAction>,
     },
     /// List sessions for the current directory
     Sessions {
@@ -100,10 +101,13 @@ pub enum Command {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthAction {
-    /// Store an API key for a provider
+    /// Sign in to a provider: OAuth device login where supported (e.g. xai),
+    /// otherwise store an API key
     Login {
-        provider: String,
-        /// Key on the command line (prompted with no echo when omitted)
+        /// Provider id or number; omit to pick from the provider list
+        provider: Option<String>,
+        /// Store an API key instead of using OAuth (prompted with no echo
+        /// when the key is omitted for providers without OAuth)
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
     },
@@ -279,9 +283,9 @@ mod tests {
         let parsed = cli(&["auth", "login", "opencode-go"]);
         match parsed.command {
             Some(Command::Auth {
-                action: AuthAction::Login { provider, api_key },
+                action: Some(AuthAction::Login { provider, api_key }),
             }) => {
-                assert_eq!(provider, "opencode-go");
+                assert_eq!(provider.as_deref(), Some("opencode-go"));
                 assert!(api_key.is_none());
             }
             other => panic!("unexpected: {other:?}"),
@@ -290,7 +294,16 @@ mod tests {
         assert!(matches!(
             parsed.command,
             Some(Command::Auth {
-                action: AuthAction::Check { json: true, .. }
+                action: Some(AuthAction::Check { json: true, .. })
+            })
+        ));
+        let parsed = cli(&["auth"]);
+        assert!(matches!(parsed.command, Some(Command::Auth { action: None })));
+        let parsed = cli(&["auth", "login"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Auth {
+                action: Some(AuthAction::Login { provider: None, .. })
             })
         ));
         let parsed = cli(&["sessions"]);

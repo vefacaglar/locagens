@@ -15,6 +15,9 @@
 //! Plus Locagens UI metadata under the app-support dir:
 //! `locagens-providers-meta.json` (display names / model settings).
 
+use crate::oauth::auth_lock::AuthFileLock;
+use crate::oauth::xai::{DeviceCodeSession, XaiOAuth};
+use crate::oauth::{self, OAuthTokens};
 use crate::paths;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -258,6 +261,30 @@ pub fn model_reasoning_efforts(
     Vec::new()
 }
 
+/// How a provider is currently authenticated (never carries secret values).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginStatus {
+    OAuth,
+    ApiKey,
+    /// Name of the environment variable that supplies the key.
+    Env(String),
+    SignedOut,
+}
+
+/// One row of the `lcgn auth` provider table.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginProvider {
+    pub id: String,
+    pub name: String,
+    /// `Some(label)` when OAuth sign-in is supported.
+    pub oauth_label: Option<String>,
+    /// Built-in API-key environment variable; `None` for keyless providers.
+    pub api_key_env: Option<String>,
+    pub status: LoginStatus,
+}
+
 struct BuiltinProvider {
     id: &'static str,
     name: &'static str,
@@ -341,8 +368,8 @@ const BUILTINS: &[BuiltinProvider] = &[
         id: "xai",
         name: "xAI",
         base_url: "https://api.x.ai/v1",
-        api: "openai-compatible",
-        models: &[],
+        api: "openai-responses",
+        models: &["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3"],
         env_var: "XAI_API_KEY",
     },
     BuiltinProvider {
@@ -372,20 +399,10 @@ fn codex_credential(key: &str, value: &Value) -> Vec<(String, Value)> {
         }
         return Vec::new();
     }
-    // Codex ChatGPT-login `auth.json`: the OAuth `tokens.access_token` is a
-    // usable OpenAI credential when `OPENAI_API_KEY` is absent/null.
+    // Codex ChatGPT-login `tokens` are intentionally ignored: that OAuth
+    // access token does not work against api.openai.com/v1 (Phase 2 adds
+    // ChatGPT login as its own provider).
     if key == "tokens" {
-        let access_token = value
-            .get("access_token")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|token| !token.is_empty());
-        if let Some(access_token) = access_token {
-            return vec![(
-                "openai".to_string(),
-                json!({ "type": "api_key", "key": access_token }),
-            )];
-        }
         return Vec::new();
     }
     // pi-style credential entries pass through keyed by provider id.
@@ -428,6 +445,7 @@ pub struct PiProviderManager {
     http: reqwest::Client,
     /// Cache of `!command` stdout results, keyed by command string.
     command_cache: Mutex<HashMap<String, String>>,
+    xai_oauth: XaiOAuth,
 }
 
 impl PiProviderManager {
@@ -457,7 +475,14 @@ impl PiProviderManager {
             app_support_dir,
             http,
             command_cache: Mutex::new(HashMap::new()),
+            xai_oauth: XaiOAuth::default(),
         }
+    }
+
+    /// Replaces the xAI OAuth endpoints (tests point them at a mock server).
+    pub fn with_xai_oauth(mut self, xai_oauth: XaiOAuth) -> Self {
+        self.xai_oauth = xai_oauth;
+        self
     }
 
     // ------------------------------------------------------------------
@@ -509,39 +534,9 @@ impl PiProviderManager {
             let path = directory.join("auth.json");
             match Self::read_json(&path) {
                 Value::Object(map) => {
-                    // An explicit non-empty `OPENAI_API_KEY` must win over a
-                    // `tokens.access_token` from the same file, regardless of
-                    // JSON key order.
-                    let mut explicit_openai: Option<Value> = None;
-                    let mut tokens_openai: Option<Value> = None;
-                    let mut others: Vec<(String, Value)> = Vec::new();
                     for (key, value) in map {
-                        if key == "OPENAI_API_KEY" {
-                            explicit_openai =
-                                codex_credential(&key, &value).into_iter().next().map(|(_, entry)| entry);
-                        } else {
-                            let from_tokens = key == "tokens";
-                            for (provider_id, entry) in codex_credential(&key, &value) {
-                                if from_tokens && provider_id == "openai" {
-                                    tokens_openai = Some(entry.clone());
-                                }
-                                others.push((provider_id, entry));
-                            }
-                        }
-                    }
-                    for (provider_id, entry) in others {
-                        merged.entry(provider_id).or_insert(entry);
-                    }
-                    if let Some(entry) = explicit_openai {
-                        // Only override a tokens-derived openai entry from this
-                        // same file (or nothing at all); credentials from
-                        // earlier chain entries keep their fallback priority.
-                        let overwritable = match merged.get("openai") {
-                            Some(existing) => tokens_openai.as_ref() == Some(existing),
-                            None => true,
-                        };
-                        if overwritable {
-                            merged.insert("openai".to_string(), entry);
+                        for (provider_id, entry) in codex_credential(&key, &value) {
+                            merged.entry(provider_id).or_insert(entry);
                         }
                     }
                 }
@@ -559,8 +554,31 @@ impl PiProviderManager {
         merged
     }
 
-    fn write_auth_map(&self, map: Map<String, Value>) -> Result<()> {
-        Self::write_json(&self.auth_path(), &Value::Object(map))
+    /// Strict read of one `auth.json`: a missing file is empty, a file that is
+    /// not a JSON object is an error so it is never silently overwritten.
+    fn read_auth_file(path: &Path) -> Result<Map<String, Value>> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(err) => return Err(err.into()),
+        };
+        if raw.trim().is_empty() {
+            return Ok(Map::new());
+        }
+        match serde_json::from_str(&raw) {
+            Ok(Value::Object(map)) => Ok(map),
+            _ => anyhow::bail!("{} is not a valid auth.json; fix or remove it first", path.display()),
+        }
+    }
+
+    /// Read-modify-write of the PRIMARY `auth.json` only, under its lock, so
+    /// fallback (`~/.codex`, `~/.pi`) credentials are never copied into it.
+    fn update_primary_auth(&self, change: impl FnOnce(&mut Map<String, Value>) -> Result<()>) -> Result<()> {
+        let path = self.auth_path();
+        let _lock = AuthFileLock::acquire_blocking(&path)?;
+        let mut map = Self::read_auth_file(&path)?;
+        change(&mut map)?;
+        Self::write_json(&path, &Value::Object(map))
     }
 
     fn read_models_json(&self) -> Value {
@@ -674,6 +692,10 @@ impl PiProviderManager {
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            if kind == "oauth" {
+                // A failed refresh is final: do not silently fall back to env keys.
+                return self.resolve_oauth_access(provider_id, credential).await;
+            }
             if kind == "api_key" || kind.is_empty() {
                 if let Some(key) = credential
                     .get("key")
@@ -718,6 +740,97 @@ impl PiProviderManager {
             .into_iter()
             .find_map(|var| std::env::var(var).ok().filter(|v| !v.trim().is_empty()))
             .map(|value| value.trim().to_string())
+    }
+
+    // ------------------------------------------------------------------
+    // OAuth login & token refresh
+    // ------------------------------------------------------------------
+
+    /// Starts an OAuth device login (`xai` only for now).
+    pub async fn start_oauth_login(&self, provider_id: &str) -> Result<DeviceCodeSession> {
+        match provider_id {
+            "xai" => self.xai_oauth.start().await,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth login"),
+        }
+    }
+
+    /// Waits for the user to approve the device login, then stores the
+    /// tokens in the primary `auth.json`.
+    pub async fn finish_oauth_login(&self, provider_id: &str, session: &DeviceCodeSession) -> Result<()> {
+        let tokens = match provider_id {
+            "xai" => self.xai_oauth.poll(session).await?,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth login"),
+        };
+        let path = self.auth_path();
+        let _lock = AuthFileLock::acquire(&path).await?;
+        let mut map = Self::read_auth_file(&path)?;
+        map.insert(provider_id.to_string(), tokens.to_credential());
+        Self::write_json(&path, &Value::Object(map))
+    }
+
+    /// Access token of an OAuth credential, refreshing it when expired.
+    async fn resolve_oauth_access(&self, provider_id: &str, credential: &Value) -> Option<String> {
+        if let Some(access) = valid_oauth_access(credential) {
+            return Some(access);
+        }
+        match self.refresh_oauth_credential(provider_id).await {
+            Ok(access) => Some(access),
+            Err(err) => {
+                tracing::error!("[Providers] OAuth token refresh for {provider_id} failed: {err}");
+                None
+            }
+        }
+    }
+
+    /// Refreshes under the lock of the `auth.json` the credential came from
+    /// (primary or a fallback dir), picking up a refresh another process
+    /// already did, and writes the result back to that same file.
+    async fn refresh_oauth_credential(&self, provider_id: &str) -> Result<String> {
+        let path = self
+            .oauth_source_path(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("no stored OAuth credential found"))?;
+        let _lock = AuthFileLock::acquire(&path).await?;
+        let mut map = Self::read_auth_file(&path)?;
+        let entry = map
+            .get(provider_id)
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no stored OAuth credential found"))?;
+        if let Some(access) = valid_oauth_access(&Value::Object(entry.clone())) {
+            return Ok(access);
+        }
+        let refresh_token = entry
+            .get("refresh")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("stored OAuth credential has no refresh token"))?;
+        let tokens = self.refresh_tokens(provider_id, refresh_token).await?;
+        let mut updated = entry;
+        tokens.apply_to(&mut updated);
+        map.insert(provider_id.to_string(), Value::Object(updated));
+        Self::write_json(&path, &Value::Object(map))?;
+        Ok(tokens.access)
+    }
+
+    async fn refresh_tokens(&self, provider_id: &str, refresh_token: &str) -> Result<OAuthTokens> {
+        match provider_id {
+            "xai" => self.xai_oauth.refresh(refresh_token).await,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth refresh"),
+        }
+    }
+
+    /// The `auth.json` holding the winning pi-style credential for a
+    /// provider, in the same precedence as `read_auth_map`: primary first,
+    /// then fallbacks last-to-first (a later fallback wins the merge).
+    fn oauth_source_path(&self, provider_id: &str) -> Option<PathBuf> {
+        std::iter::once(self.auth_path())
+            .chain(self.fallback_dirs.iter().rev().map(|dir| dir.join("auth.json")))
+            .find(|path| {
+                Self::read_json(path)
+                    .get(provider_id)
+                    .map(|entry| entry.get("type").and_then(Value::as_str) == Some("oauth"))
+                    .unwrap_or(false)
+            })
     }
 
     /// Expands `!command` (shell stdout, cached) and `$ENV_VAR` forms.
@@ -994,28 +1107,39 @@ impl PiProviderManager {
         }
     }
 
-    /// Provider ids to expose: built-ins plus anything present in `auth.json`,
-    /// `models.json` or Codex `config.toml`.
+    /// Provider ids to expose: everything the user configured, i.e. any
+    /// `auth.json` entry, `models.json` / Codex `config.toml` provider, and
+    /// built-ins whose own env var (or configured `envKey`) is set.
     fn provider_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = BUILTINS.iter().map(|p| p.id.to_string()).collect();
-        for key in self.read_auth_map().keys() {
-            if !ids.contains(key) {
-                ids.push(key.clone());
-            }
-        }
+        let mut ids: Vec<String> = self.read_auth_map().keys().cloned().collect();
         if let Value::Object(providers) = self.read_models_json().get("providers").cloned().unwrap_or(Value::Null) {
-            for key in providers.keys() {
-                if !ids.contains(key) {
-                    ids.push(key.clone());
-                }
+            ids.extend(providers.keys().cloned());
+        }
+        ids.extend(self.codex_config_providers().keys().cloned());
+        for provider in BUILTINS {
+            if self.builtin_env_configured(provider) {
+                ids.push(provider.id.to_string());
             }
         }
-        for key in self.codex_config_providers().keys() {
-            if !ids.contains(key) {
-                ids.push(key.clone());
+        let mut unique: Vec<String> = Vec::new();
+        for id in ids {
+            if !unique.contains(&id) {
+                unique.push(id);
             }
         }
-        ids
+        unique
+    }
+
+    /// True when the built-in's own env var or its configured `envKey` is set.
+    fn builtin_env_configured(&self, provider: &BuiltinProvider) -> bool {
+        let env_key = self
+            .models_json_provider(provider.id)
+            .and_then(|entry| entry.get("envKey").and_then(Value::as_str).map(str::to_string));
+        [Some(provider.env_var.to_string()), env_key]
+            .into_iter()
+            .flatten()
+            .filter(|var| !var.is_empty())
+            .any(|var| std::env::var(&var).map(|value| !value.trim().is_empty()).unwrap_or(false))
     }
 
     /// Resolved display name / model settings from
@@ -1129,6 +1253,52 @@ impl PiProviderManager {
         models
     }
 
+    /// Providers the user can sign in to: every built-in in catalog order,
+    /// then any other provider found in auth / models.json / Codex config.
+    /// Statuses carry no key or token values.
+    pub fn login_providers(&self) -> Vec<LoginProvider> {
+        let mut ids: Vec<String> = BUILTINS.iter().map(|p| p.id.to_string()).collect();
+        for id in self.provider_ids() {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let auth = self.read_auth_map();
+        ids.into_iter()
+            .map(|id| LoginProvider {
+                name: self.display_name(&id),
+                oauth_label: oauth::oauth_provider_info(&id).map(|info| info.login_label.to_string()),
+                api_key_env: builtin(&id).map(|p| p.env_var).filter(|var| !var.is_empty()).map(str::to_string),
+                status: self.login_status(&id, auth.get(&id)),
+                id,
+            })
+            .collect()
+    }
+
+    fn display_name(&self, provider_id: &str) -> String {
+        self.meta_entry(provider_id)
+            .and_then(|entry| entry.get("displayName").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| builtin(provider_id).map(|p| p.name.to_string()))
+            .unwrap_or_else(|| provider_id.to_string())
+    }
+
+    fn login_status(&self, provider_id: &str, credential: Option<&Value>) -> LoginStatus {
+        if let Some(credential) = credential {
+            let is_oauth = credential.get("type").and_then(Value::as_str) == Some("oauth");
+            return if is_oauth { LoginStatus::OAuth } else { LoginStatus::ApiKey };
+        }
+        let env_key = self
+            .models_json_provider(provider_id)
+            .and_then(|entry| entry.get("envKey").and_then(Value::as_str).map(str::to_string));
+        let builtin_var = builtin(provider_id).map(|p| p.env_var.to_string());
+        [builtin_var, env_key]
+            .into_iter()
+            .flatten()
+            .filter(|var| !var.is_empty())
+            .find(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()))
+            .map_or(LoginStatus::SignedOut, LoginStatus::Env)
+    }
+
     /// All configured / authenticated providers for `GET /api/providers`, in
     /// the web client's `ProviderMetadata[]` contract shape.
     pub async fn list_providers(&self) -> Vec<ProviderMetadata> {
@@ -1227,12 +1397,11 @@ impl PiProviderManager {
         // 1. API key → auth.json (preserve existing keys when masked).
         if let Some(api_key) = input.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
             if api_key != PRESERVE_API_KEY {
-                let mut auth = self.read_auth_map();
-                auth.insert(
-                    provider_id.to_string(),
-                    serde_json::to_value(AuthCredential::api_key(api_key))?,
-                );
-                self.write_auth_map(auth)?;
+                let credential = serde_json::to_value(AuthCredential::api_key(api_key))?;
+                self.update_primary_auth(|auth| {
+                    auth.insert(provider_id.to_string(), credential);
+                    Ok(())
+                })?;
             }
         }
 
@@ -1361,7 +1530,6 @@ impl PiProviderManager {
         }
         let mut models_doc = self.read_models_json();
         let mut meta = Self::read_json(&self.meta_path());
-        let mut auth = self.read_auth_map();
         for id in &removed {
             if let Some(providers) = models_doc.get_mut("providers").and_then(Value::as_object_mut) {
                 providers.remove(id);
@@ -1369,12 +1537,15 @@ impl PiProviderManager {
             if let Some(providers) = meta.get_mut("providers").and_then(Value::as_object_mut) {
                 providers.remove(id);
             }
-            auth.remove(id);
         }
         Self::write_json(&self.models_path(), &models_doc)?;
         Self::write_json(&self.meta_path(), &meta)?;
-        self.write_auth_map(auth)?;
-        Ok(())
+        self.update_primary_auth(|auth| {
+            for id in &removed {
+                auth.remove(id);
+            }
+            Ok(())
+        })
     }
 
     // ------------------------------------------------------------------
@@ -1636,12 +1807,20 @@ impl PiProviderManager {
                             format!("{}***{}", &key[..4], &key[key.len() - 4..])
                         }
                     });
-                json!({
+                let mut status = json!({
                     "providerId": provider_id,
                     "type": kind,
                     "hasCredential": true,
                     "keyPreview": key_preview,
-                })
+                });
+                if kind == "oauth" {
+                    // Expiry only; the access/refresh tokens never leave auth.json.
+                    let expires = credential.get("expires").and_then(Value::as_i64).unwrap_or(0);
+                    status["keyPreview"] = json!("oauth");
+                    status["expiresAt"] = json!(expires);
+                    status["expired"] = json!(expires <= oauth::now_ms());
+                }
+                status
             })
             .collect()
     }
@@ -1652,13 +1831,14 @@ impl PiProviderManager {
         if input.provider_id.trim().is_empty() {
             anyhow::bail!("providerId is required");
         }
-        let mut auth = self.read_auth_map();
+        let provider_id = input.provider_id.trim();
         match input.action.as_str() {
-            "delete" | "remove" => {
-                if auth.remove(input.provider_id.trim()).is_none() {
+            "delete" | "remove" => self.update_primary_auth(|auth| {
+                if auth.remove(provider_id).is_none() {
                     anyhow::bail!("No credential for provider \"{}\"", input.provider_id);
                 }
-            }
+                Ok(())
+            }),
             "set" | "save" => {
                 let key = input
                     .api_key
@@ -1666,18 +1846,29 @@ impl PiProviderManager {
                     .map(str::trim)
                     .filter(|k| !k.is_empty())
                     .ok_or_else(|| anyhow::anyhow!("apiKey is required to set a credential"))?;
-                auth.insert(
-                    input.provider_id.trim().to_string(),
-                    serde_json::to_value(AuthCredential::api_key(key))?,
-                );
+                let credential = serde_json::to_value(AuthCredential::api_key(key))?;
+                self.update_primary_auth(|auth| {
+                    auth.insert(provider_id.to_string(), credential);
+                    Ok(())
+                })
             }
-            _ => anyhow::bail!(
-                "Invalid action. Must be 'set' or 'delete'"
-            ),
+            _ => anyhow::bail!("Invalid action. Must be 'set' or 'delete'"),
         }
-        self.write_auth_map(auth)
     }
 
+}
+
+/// `access` of an OAuth credential whose `expires` (epoch ms) is still ahead.
+fn valid_oauth_access(credential: &Value) -> Option<String> {
+    let expires = credential.get("expires").and_then(Value::as_i64)?;
+    if expires <= oauth::now_ms() {
+        return None;
+    }
+    credential
+        .get("access")
+        .and_then(Value::as_str)
+        .filter(|access| !access.is_empty())
+        .map(str::to_string)
 }
 
 /// Short human-readable error summary from an API error body.
@@ -1768,7 +1959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_oauth_tokens_in_auth_json_resolve_for_openai() {
+    async fn codex_chatgpt_tokens_are_ignored_but_openai_api_key_works() {
         let (agent, support) = temp_dirs("codex-tokens");
         let codex = std::env::temp_dir().join(format!(
             "locagens-pi-codex-tokens-fallback-{}",
@@ -1781,22 +1972,23 @@ mod tests {
             vec![codex.clone()],
         );
 
-        // `OPENAI_API_KEY: null` + OAuth `tokens.access_token` → openai works.
+        // ChatGPT-login `tokens` alone do NOT configure openai.
         let value = json!({
+            "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
-            "tokens": {
-                "access_token": "  ey-oauth-token  ",
-                "refresh_token": "r",
-                "account_id": "acc"
-            }
+            "tokens": { "access_token": "ey-oauth-token", "refresh_token": "r", "account_id": "acc" }
         });
         PiProviderManager::write_json(&codex.join("auth.json"), &value).unwrap();
-        assert_eq!(
-            manager.resolve_api_key("openai", None).await.as_deref(),
-            Some("ey-oauth-token")
-        );
+        assert!(manager.resolve_api_key("openai", None).await.is_none());
+        assert!(!manager.has_api_key("openai"));
+        assert!(manager.list_providers().await.is_empty());
 
-        // An explicit non-empty OPENAI_API_KEY wins over tokens.
+        // A pi provider next to a ChatGPT-mode codex file lists only the pi one.
+        write_auth(&agent, json!({ "opencode-go": { "type": "api_key", "key": "k-12345678" } }));
+        let listed: Vec<String> = manager.list_providers().await.into_iter().map(|p| p.id).collect();
+        assert_eq!(listed, vec!["opencode-go".to_string()]);
+
+        // A non-empty OPENAI_API_KEY still maps to openai.
         let value = json!({
             "OPENAI_API_KEY": "sk-explicit-key",
             "tokens": { "access_token": "ey-oauth-token" }
@@ -1807,7 +1999,7 @@ mod tests {
             Some("sk-explicit-key")
         );
 
-        // Empty/missing tokens fall back cleanly.
+        // Null key and empty tokens configure nothing.
         let value = json!({ "OPENAI_API_KEY": null, "tokens": { "access_token": "" } });
         PiProviderManager::write_json(&codex.join("auth.json"), &value).unwrap();
         assert!(manager.read_auth_map().get("openai").is_none());
@@ -1902,6 +2094,10 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        write_auth(&agent, json!({
+            "openai": { "type": "api_key", "key": "sk-openai-12345678" },
+            "anthropic": { "type": "api_key", "key": "sk-ant-12345678" },
+        }));
         let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
 
         let providers = tokio::runtime::Runtime::new()
@@ -2257,4 +2453,305 @@ wire_api = "chat"
         let _ = std::fs::remove_dir_all(fallback);
     }
 
+    // ------------------------------------------------------------------
+    // OAuth credentials
+    // ------------------------------------------------------------------
+
+    use crate::oauth::device_code::PollTiming;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock xAI endpoints. `/token` answers refresh and device-token posts
+    /// with `token_body`; `hits` counts token requests.
+    async fn spawn_xai_mock(token_status: u16, token_body: Value) -> (XaiOAuth, Arc<AtomicUsize>) {
+        use axum::{routing::post, Json, Router};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = Router::new()
+            .route(
+                "/device",
+                post(|| async {
+                    Json(json!({
+                        "device_code": "dev-secret",
+                        "user_code": "WXYZ-0001",
+                        "verification_uri": "https://auth.x.ai/device",
+                        "interval": 0.01,
+                        "expires_in": 5
+                    }))
+                }),
+            )
+            .route(
+                "/token",
+                post(move || {
+                    let counter = counter.clone();
+                    let body = token_body.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        (axum::http::StatusCode::from_u16(token_status).unwrap(), Json(body))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let timing = PollTiming {
+            default_interval: Duration::from_millis(10),
+            min_interval: Duration::from_millis(5),
+            slow_down_step: Duration::from_millis(10),
+        };
+        (XaiOAuth::with_endpoints(&format!("{base}/device"), &format!("{base}/token"), timing), hits)
+    }
+
+    use std::time::Duration;
+
+    fn write_auth(dir: &Path, value: Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("auth.json"), serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn read_auth(dir: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap()).unwrap()
+    }
+
+    fn oauth_entry(access: &str, refresh: &str, expires: i64) -> Value {
+        json!({ "type": "oauth", "access": access, "refresh": refresh, "expires": expires, "accountId": "acct-1" })
+    }
+
+    #[tokio::test]
+    async fn valid_oauth_credential_resolves_without_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        write_auth(&agent, json!({ "xai": oauth_entry("acc-live", "ref-live", oauth::now_ms() + 600_000) }));
+        let (xai, hits) = spawn_xai_mock(500, json!({})).await;
+        let manager = PiProviderManager::with_dirs(agent.clone(), support).with_xai_oauth(xai);
+        assert_eq!(manager.resolve_api_key("xai", None).await.as_deref(), Some("acc-live"));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn expired_oauth_credential_refreshes_into_its_source_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support, pi_dir) =
+            (tmp.path().join("agent"), tmp.path().join("support"), tmp.path().join("pi"));
+        // Credential lives only in the fallback dir; the refresh must go back there.
+        write_auth(&pi_dir, json!({ "xai": oauth_entry("acc-old", "ref-old", 1), "other": { "type": "api_key", "key": "k" } }));
+        // Token response omits refresh_token: the previous one is kept.
+        let (xai, hits) = spawn_xai_mock(200, json!({ "access_token": "acc-new", "expires_in": 3600 })).await;
+        let manager =
+            PiProviderManager::with_chain(agent.clone(), support, vec![pi_dir.clone()]).with_xai_oauth(xai);
+
+        assert_eq!(manager.resolve_api_key("xai", None).await.as_deref(), Some("acc-new"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let stored = read_auth(&pi_dir);
+        assert_eq!(stored["xai"]["access"], "acc-new");
+        assert_eq!(stored["xai"]["refresh"], "ref-old");
+        assert_eq!(stored["xai"]["accountId"], "acct-1");
+        assert!(stored["xai"]["expires"].as_i64().unwrap() > oauth::now_ms());
+        assert_eq!(stored["other"]["key"], "k");
+        assert!(!agent.join("auth.json").exists(), "primary must stay untouched");
+        assert!(!pi_dir.join("auth.json.lock").exists(), "lock dir must be released");
+
+        // Second resolve uses the refreshed token without another request.
+        assert_eq!(manager.resolve_api_key("xai", None).await.as_deref(), Some("acc-new"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_oauth_refresh_resolves_to_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        write_auth(&agent, json!({ "xai": oauth_entry("acc-old", "ref-old", 1) }));
+        let (xai, _) = spawn_xai_mock(400, json!({ "error": "invalid_grant" })).await;
+        let manager = PiProviderManager::with_dirs(agent.clone(), support).with_xai_oauth(xai);
+        assert!(manager.resolve_api_key("xai", None).await.is_none());
+        assert_eq!(read_auth(&agent)["xai"]["access"], "acc-old");
+        assert!(!agent.join("auth.json.lock").exists());
+    }
+
+    #[tokio::test]
+    async fn oauth_login_stores_credential_in_primary_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support, pi_dir) =
+            (tmp.path().join("agent"), tmp.path().join("support"), tmp.path().join("pi"));
+        write_auth(&pi_dir, json!({ "other": { "type": "api_key", "key": "fallback-secret" } }));
+        let (xai, _) = spawn_xai_mock(
+            200,
+            json!({ "access_token": "acc-login", "refresh_token": "ref-login", "expires_in": 3600 }),
+        )
+        .await;
+        let manager =
+            PiProviderManager::with_chain(agent.clone(), support, vec![pi_dir.clone()]).with_xai_oauth(xai);
+
+        let session = manager.start_oauth_login("xai").await.unwrap();
+        assert_eq!(session.user_code, "WXYZ-0001");
+        manager.finish_oauth_login("xai", &session).await.unwrap();
+
+        let primary = read_auth(&agent);
+        assert_eq!(primary["xai"]["type"], "oauth");
+        assert_eq!(primary["xai"]["access"], "acc-login");
+        assert_eq!(primary["xai"]["refresh"], "ref-login");
+        assert!(primary.get("other").is_none());
+        assert!(manager.start_oauth_login("acme").await.is_err());
+    }
+
+    #[test]
+    fn set_pi_auth_does_not_copy_fallback_credentials_into_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support, pi_dir) =
+            (tmp.path().join("agent"), tmp.path().join("support"), tmp.path().join("pi"));
+        write_auth(&pi_dir, json!({ "groq": { "type": "api_key", "key": "fallback-secret" } }));
+        let manager = PiProviderManager::with_chain(agent.clone(), support, vec![pi_dir.clone()]);
+
+        manager
+            .set_pi_auth(&SetPiAuthInput {
+                provider_id: "acme".into(),
+                action: "set".into(),
+                api_key: Some("sk-acme-12345678".into()),
+            })
+            .unwrap();
+        let primary = read_auth(&agent);
+        assert_eq!(primary["acme"]["key"], "sk-acme-12345678");
+        assert!(primary.get("groq").is_none(), "fallback credential leaked into primary");
+        assert!(!agent.join("auth.json.lock").exists());
+
+        // The fallback credential still resolves, and its file is unchanged.
+        assert!(manager.has_api_key("groq"));
+        assert_eq!(read_auth(&pi_dir)["groq"]["key"], "fallback-secret");
+    }
+
+    #[test]
+    fn set_pi_auth_refuses_to_overwrite_a_corrupt_auth_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join("auth.json"), "{ not json").unwrap();
+        let manager = PiProviderManager::with_dirs(agent.clone(), tmp.path().join("support"));
+        let result = manager.set_pi_auth(&SetPiAuthInput {
+            provider_id: "acme".into(),
+            action: "set".into(),
+            api_key: Some("sk-acme-12345678".into()),
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(agent.join("auth.json")).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn auth_status_for_oauth_never_contains_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("agent");
+        let expires = oauth::now_ms() + 600_000;
+        write_auth(&agent, json!({
+            "xai": oauth_entry("acc-secret-value", "ref-secret-value", expires),
+            "gone": oauth_entry("acc-secret-2", "ref-secret-2", 1),
+        }));
+        let manager = PiProviderManager::with_dirs(agent, tmp.path().join("support"));
+        let status = manager.pi_auth_status();
+        let raw = serde_json::to_string(&status).unwrap();
+        assert!(!raw.contains("secret"), "{raw}");
+        let xai = status.iter().find(|s| s["providerId"] == "xai").unwrap();
+        assert_eq!(xai["type"], "oauth");
+        assert_eq!(xai["keyPreview"], "oauth");
+        assert_eq!(xai["expiresAt"], expires);
+        assert_eq!(xai["expired"], false);
+        let gone = status.iter().find(|s| s["providerId"] == "gone").unwrap();
+        assert_eq!(gone["expired"], true);
+    }
+
+    #[test]
+    fn xai_builtin_uses_responses_api_with_grok_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PiProviderManager::with_dirs(tmp.path().join("agent"), tmp.path().join("support"));
+        assert_eq!(manager.resolve_endpoint("xai"), ("https://api.x.ai/v1".to_string(), "openai-responses".to_string()));
+        assert!(manager.model_info("xai", "grok-4.7").is_some());
+        assert!(manager.model_info("xai", "grok-4.3").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_providers_only_returns_configured_providers() {
+        let _guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for var in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "XAI_API_KEY"] {
+            std::env::remove_var(var);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("agent");
+        let manager = PiProviderManager::with_dirs(agent.clone(), tmp.path().join("support"));
+        let ids = |providers: Vec<ProviderMetadata>| providers.into_iter().map(|p| p.id).collect::<Vec<_>>();
+
+        // Nothing configured: no built-ins.
+        assert!(ids(manager.list_providers().await).is_empty());
+
+        // auth.json entry (api key or oauth) lists the built-in, and only it.
+        write_auth(&agent, json!({
+            "anthropic": { "type": "api_key", "key": "sk-ant-12345678" },
+            "xai": oauth_entry("a", "r", 1),
+        }));
+        let listed = ids(manager.list_providers().await);
+        assert!(listed.contains(&"anthropic".to_string()) && listed.contains(&"xai".to_string()));
+        assert!(!listed.contains(&"openai".to_string()) && !listed.contains(&"deepseek".to_string()));
+
+        // Only its own env var set.
+        std::env::set_var("GROQ_API_KEY", "gsk-test");
+        let listed = ids(manager.list_providers().await);
+        std::env::remove_var("GROQ_API_KEY");
+        assert!(listed.contains(&"groq".to_string()));
+        assert!(!listed.contains(&"openai".to_string()));
+
+        // A shared-chain env var of another provider does not list this one.
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        let listed = ids(manager.list_providers().await);
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(listed.contains(&"openai".to_string()));
+        assert!(!listed.contains(&"deepseek".to_string()));
+
+        // models.json custom provider.
+        std::fs::write(
+            agent.join("models.json"),
+            json!({ "providers": { "my-local": { "baseUrl": "http://localhost:1/v1" } } }).to_string(),
+        )
+        .unwrap();
+        assert!(ids(manager.list_providers().await).contains(&"my-local".to_string()));
+    }
+
+    #[test]
+    fn login_providers_report_status_without_secrets() {
+        let _guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for provider in BUILTINS {
+            if !provider.env_var.is_empty() {
+                std::env::remove_var(provider.env_var);
+            }
+        }
+        std::env::set_var("GROQ_API_KEY", "gsk-secret-env");
+        std::env::set_var("ACME_TEST_KEY", "acme-secret-env");
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join("primary");
+        let fallback = tmp.path().join("fallback");
+        write_auth(&primary, json!({
+            "anthropic": { "type": "api_key", "key": "sk-secret-key" },
+            "xai": oauth_entry("acc-secret", "ref-secret", oauth::now_ms() + 600_000),
+        }));
+        std::fs::write(
+            primary.join("models.json"),
+            json!({ "providers": { "acme": { "baseUrl": "http://localhost:1/v1", "envKey": "ACME_TEST_KEY" } } }).to_string(),
+        )
+        .unwrap();
+        let manager = PiProviderManager::with_chain(primary, tmp.path().join("support"), vec![fallback]);
+        let rows = manager.login_providers();
+        std::env::remove_var("GROQ_API_KEY");
+        std::env::remove_var("ACME_TEST_KEY");
+
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(&ids[..9], ["opencode-go", "anthropic", "openai", "google", "openrouter", "deepseek", "groq", "xai", "ollama"]);
+        assert_eq!(ids[9], "acme");
+        let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row("anthropic").status, LoginStatus::ApiKey);
+        assert_eq!(row("xai").status, LoginStatus::OAuth);
+        assert_eq!(row("groq").status, LoginStatus::Env("GROQ_API_KEY".into()));
+        assert_eq!(row("acme").status, LoginStatus::Env("ACME_TEST_KEY".into()));
+        assert_eq!(row("openai").status, LoginStatus::SignedOut);
+        assert!(row("xai").oauth_label.is_some() && row("openai").oauth_label.is_none());
+        assert_eq!(row("ollama").api_key_env, None);
+
+        let raw = serde_json::to_string(&rows).unwrap();
+        assert!(!raw.contains("secret"), "{raw}");
+    }
 }

@@ -70,6 +70,8 @@ pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
         )
     };
 
+    let color_scheme = if dark_mode { "dark" } else { "light" };
+
     let (text, text_secondary, text_tertiary, shadow) = if dark_mode {
         ("#f3f3f3", "#c8c8c8", "#8a8a8a", "0 4px 14px rgba(0, 0, 0, 0.35)")
     } else {
@@ -112,6 +114,8 @@ pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
 
     format!(r#"
 * {{ margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }}
+/* Native scrollbars / form controls follow the app theme (WebView2 dark Fluent scrollbars). */
+:root {{ color-scheme: {color_scheme}; }}
 html, body {{ height: 100%; overflow: hidden; }}
 body {{
   font-family: {font_ui};
@@ -879,6 +883,14 @@ mod tests {
             let light = build_stylesheet_for(platform, false);
             assert!(!dark.is_empty() && !light.is_empty(), "{platform} styles empty");
             assert_ne!(dark, light, "{platform} dark and light styles differ");
+        }
+    }
+
+    #[test]
+    fn native_scrollbars_follow_the_theme() {
+        for platform in PLATFORMS {
+            assert!(build_stylesheet_for(platform, true).contains("color-scheme: dark;"));
+            assert!(build_stylesheet_for(platform, false).contains("color-scheme: light;"));
         }
     }
 

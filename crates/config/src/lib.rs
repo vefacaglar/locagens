@@ -1,9 +1,10 @@
 //! Locagens configuration crate.
 //!
 //! Hosts the platform path resolution ([`paths`]) and the pure Rust
-//! provider / auth / model engine ([`providers`]) shared by the backend,
+//! provider / auth / model engine ([`providers`]) and OAuth login ([`oauth`]) shared by the backend,
 //! the desktop app and future consumers.
 
+pub mod oauth;
 pub mod paths;
 pub mod providers;
 

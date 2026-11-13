@@ -5,6 +5,7 @@
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::plugins::ToggleInput;
+use locagens_core::api::providers::OAuthLoginStart;
 use locagens_core::db::{Memory, PermissionRule};
 use locagens_core::pi_providers::ProviderMetadata;
 use locagens_core::services::mcp::McpServerInput;
@@ -134,36 +135,139 @@ fn ProviderRow(provider: ProviderMetadata, selected: bool) -> Element {
     }
 }
 
-/// Native auth.json accounts (~/.locagens, Codex / pi fallbacks).
+/// Native auth.json accounts (~/.locagens, Codex / pi fallbacks) plus OAuth
+/// sign-in for providers that support it.
 #[component]
 fn AuthTab() -> Element {
     let accounts: Signal<Vec<Value>> = use_signal(Vec::new);
-    use_effect(move || {
-        let mut accounts = accounts;
-        spawn(async move {
-            let state = core();
-            accounts.set(locagens_core::api::providers::get_pi_auth(&state).await.unwrap_or_default());
-        });
-    });
+    let pending: Signal<Option<OAuthLoginStart>> = use_signal(|| None);
+    let login_task: Signal<Option<dioxus::core::Task>> = use_signal(|| None);
+    let store: UiStore = use_context();
+    use_effect(move || reload_accounts(accounts));
+
     let data = accounts.read().clone();
-    if data.is_empty() {
-        return rsx! {
-            div { class: "settings-empty", "No auth accounts found. Run `lcgn auth login` in a terminal (reads ~/.locagens/auth.json with ~/.codex + ~/.pi fallbacks)." }
-        };
-    }
+    let waiting = pending.read().clone();
     rsx! {
+        for info in locagens_core::api::providers::oauth_providers() {
+            div {
+                key: "{info.id}",
+                class: "settings-row",
+                div { class: "grow", "{info.name}" }
+                button {
+                    disabled: waiting.is_some(),
+                    onclick: move |_| begin_oauth_login(info.id, accounts, pending, login_task, store),
+                    "{info.login_label}"
+                }
+            }
+        }
+        if let Some(start) = waiting {
+            div {
+                class: "settings-row",
+                div {
+                    class: "grow",
+                    div { "Enter this code on the sign-in page:" }
+                    div { class: "mono", style: "font-size:20px;font-weight:600", "{start.user_code}" }
+                    div { class: "mono", style: "font-size:11px", "{start.verification_uri}" }
+                }
+                button {
+                    onclick: {
+                        let url = start.verification_uri.clone();
+                        move |_| {
+                            if let Err(err) = locagens_core::api::providers::open_verification_url(&url) {
+                                store.toast(format!("{err}"));
+                            }
+                        }
+                    },
+                    "Open browser"
+                }
+                button {
+                    class: "danger",
+                    onclick: move |_| {
+                        let mut pending = pending;
+                        let mut login_task = login_task;
+                        if let Some(task) = login_task.take() {
+                            task.cancel();
+                        }
+                        pending.set(None);
+                    },
+                    "Cancel"
+                }
+            }
+        }
+        if data.is_empty() {
+            div { class: "settings-empty", "No auth accounts found. Sign in above or run `lcgn auth login` in a terminal (reads ~/.locagens/auth.json with ~/.codex + ~/.pi fallbacks)." }
+        }
         for (index, account) in data.iter().enumerate() {
             div {
                 key: "{index}",
                 class: "settings-row",
                 div {
-                    class: "grow mono",
-                    style: "font-size:12px",
-                    "{serde_json::to_string_pretty(account).unwrap_or_default()}"
+                    class: "grow",
+                    span { style: "font-weight:600", "{account[\"providerId\"].as_str().unwrap_or(\"?\")} " }
+                    span { class: "badge", "{account[\"type\"].as_str().unwrap_or(\"unknown\")}" }
                 }
+                div { class: "mono", style: "font-size:12px", "{account_detail(account)}" }
             }
         }
     }
+}
+
+fn reload_accounts(accounts: Signal<Vec<Value>>) {
+    let mut accounts = accounts;
+    spawn(async move {
+        let state = core();
+        accounts.set(locagens_core::api::providers::get_pi_auth(&state).await.unwrap_or_default());
+    });
+}
+
+/// Requests a device code, shows it, then waits for approval in the background.
+fn begin_oauth_login(
+    provider_id: &'static str,
+    accounts: Signal<Vec<Value>>,
+    pending: Signal<Option<OAuthLoginStart>>,
+    login_task: Signal<Option<dioxus::core::Task>>,
+    store: UiStore,
+) {
+    let mut pending = pending;
+    let mut login_task = login_task;
+    spawn(async move {
+        let state = core();
+        let start = match locagens_core::api::providers::start_oauth_login(&state, provider_id).await {
+            Ok(start) => start,
+            Err(err) => {
+                store.toast(format!("Sign-in failed: {err}"));
+                return;
+            }
+        };
+        pending.set(Some(start.clone()));
+        let task = spawn(async move {
+            let state = core();
+            match locagens_core::api::providers::finish_oauth_login(&state, &start).await {
+                Ok(()) => store.toast("Signed in.".to_string()),
+                Err(err) => store.toast(format!("Sign-in failed: {err}")),
+            }
+            pending.set(None);
+            login_task.set(None);
+            reload_accounts(accounts);
+        });
+        login_task.set(Some(task));
+    });
+}
+
+/// Human-readable credential detail: OAuth expiry or masked key preview.
+fn account_detail(account: &Value) -> String {
+    if account["type"] == "oauth" {
+        let expires_at = account["expiresAt"].as_i64().unwrap_or(0);
+        if account["expired"] == true {
+            return "access token expired (refreshes on next use)".to_string();
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        return format!("access token valid for ~{} min", ((expires_at - now_ms) / 60_000).max(0));
+    }
+    account["keyPreview"].as_str().unwrap_or("").to_string()
 }
 
 /// Stored permission rules (standing grants) with delete.

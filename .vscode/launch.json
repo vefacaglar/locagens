@@ -1,79 +1,43 @@
 {
-  // Locagens launch configurations.
+  // Locagens run configurations (no debugger).
   //
-  // The first (default) entries are No-Debug runs using the built-in
-  // `node-terminal` type: they just build and execute the binary in the
-  // integrated terminal, so no C++/LLDB debugger extensions are required.
-  // The cppdbg/gdb entries use the w64devkit gdb; the CodeLLDB entries work
-  // on any platform when the `vadimcn.vscode-lldb` extension is installed.
+  // `node-terminal` just runs the command in an integrated terminal, so no
+  // C++/LLDB extensions are needed. On Windows the GNU toolchain is used
+  // (no MSVC build tools required) with w64devkit's gcc/dlltool on PATH.
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Locagens Desktop (No Debug)",
+      "name": "Run Locagens Desktop",
       "type": "node-terminal",
+      "request": "launch",
       "command": "cargo run -p locagens-desktop --bin locagens",
-      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-desktop --bin locagens" },
-      "cwd": "${workspaceFolder}"
+      "cwd": "${workspaceFolder}",
+      "windows": {
+        "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-desktop --bin locagens",
+        "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
+      }
     },
     {
-      "name": "Run Locagens Desktop Release (No Debug)",
+      "name": "Run Locagens Desktop (Release)",
       "type": "node-terminal",
+      "request": "launch",
       "command": "cargo run --release -p locagens-desktop --bin locagens",
-      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run --release -p locagens-desktop --bin locagens" },
-      "cwd": "${workspaceFolder}"
+      "cwd": "${workspaceFolder}",
+      "windows": {
+        "command": "rustup run stable-x86_64-pc-windows-gnu cargo run --release -p locagens-desktop --bin locagens",
+        "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
+      }
     },
     {
-      "name": "Run lcgn CLI (No Debug)",
+      "name": "Run lcgn CLI",
       "type": "node-terminal",
+      "request": "launch",
       "command": "cargo run -p locagens-cli --bin lcgn",
-      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-cli --bin lcgn" },
-      "cwd": "${workspaceFolder}"
-    },
-    {
-      "name": "Debug Locagens Desktop (cppdbg / gdb)",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/locagens.exe",
-      "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "environment": [],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "${env:USERPROFILE}/w64devkit/w64devkit/bin/gdb.exe",
-      "preLaunchTask": "cargo: build desktop (debug)"
-    },
-    {
-      "name": "Debug lcgn CLI (cppdbg / gdb)",
-      "type": "cppdbg",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/lcgn.exe",
-      "args": [],
-      "stopAtEntry": false,
-      "cwd": "${workspaceFolder}",
-      "environment": [],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "${env:USERPROFILE}/w64devkit/w64devkit/bin/gdb.exe",
-      "preLaunchTask": "cargo: build lcgn CLI (debug)"
-    },
-    {
-      "name": "Debug Locagens Desktop (CodeLLDB)",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/locagens",
-      "args": [],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "cargo: build desktop (debug)"
-    },
-    {
-      "name": "Debug lcgn CLI --list-models (CodeLLDB)",
-      "type": "lldb",
-      "request": "launch",
-      "program": "${workspaceFolder}/target/debug/lcgn",
-      "args": ["--list-models"],
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "cargo: build lcgn CLI (debug)"
+      "windows": {
+        "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-cli --bin lcgn",
+        "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
+      }
     }
   ]
 }

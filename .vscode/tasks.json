@@ -1,13 +1,8 @@
 {
-  // Locagens task runner — w64devkit toolchain on Windows (gcc/gdb for cppdbg),
-  // plain cargo elsewhere. Tasks use `rustup run` so the GNU toolchain is
-  // selected even when rustup defaults differ.
+  // Locagens task runner — on Windows the GNU toolchain via `rustup run`
+  // (selected even when the rustup default is MSVC) with w64devkit's
+  // gcc/dlltool on PATH; plain cargo elsewhere.
   "version": "2.0.0",
-  "options": {
-    "env": {
-      "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}"
-    }
-  },
   "windows": {
     "options": {
       "env": {

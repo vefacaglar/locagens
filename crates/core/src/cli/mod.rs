@@ -47,7 +47,7 @@ async fn run(cli: Cli) -> i32 {
     // Subcommands first: auth / sessions.
     if let Some(command) = cli.command.clone() {
         return match command {
-            Command::Auth { action } => auth::auth_command(&state.pi, action).await,
+            Command::Auth { action } => auth::auth_command(&state, action).await,
             Command::Sessions { json } => {
                 let project = match cli.project_dir() {
                     Ok(project) => project,
