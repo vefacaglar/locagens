@@ -1,9 +1,12 @@
-//! Right inspector panel: Plan, Agents, Git and Terminal (Processes) tabs,
-//! all wired in-process to `locagens_core::api`.
+//! Right inspector: a flat column of collapsible sections (Environment,
+//! Context, Plan, Agents, Changes, Terminal), all wired in-process to
+//! `locagens_core::api`.
 
+use crate::components::icons::*;
 use crate::components::message_thread::DiffView;
+use crate::components::start_window_drag;
 use crate::markdown::render_markdown;
-use crate::state_ui::{core, UiStore};
+use crate::state_ui::{core, RightPanelTab, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::projects::{GitFileDiff, GitStatus, GitWorktree};
 use locagens_core::api::processes::{list_processes, process_logs, spawn_process, SpawnProcessInput};
@@ -14,39 +17,229 @@ use std::time::Duration;
 #[component]
 pub fn RightPanel() -> Element {
     let store: UiStore = use_context();
-    let tab = *store.right_panel_tab.read();
+    let changed_files = store
+        .turn_diff
+        .read()
+        .as_ref()
+        .map(|(_, files)| *files)
+        .filter(|files| *files > 0);
+    let task_count = store
+        .plan
+        .read()
+        .as_ref()
+        .and_then(|plan| plan.tasks.as_array().map(|tasks| tasks.len()))
+        .filter(|count| *count > 0);
+    let agent_count = {
+        let messages = store.messages.read();
+        let mut names: std::collections::HashSet<String> = messages
+            .iter()
+            .filter(|message| message.agent_role.is_some())
+            .map(|message| message.agent_name.clone().or(message.agent_role.clone()).unwrap_or_default())
+            .collect();
+        for agent in store.spawned_agents.read().iter() {
+            if let Some(name) = agent.get("name").and_then(Value::as_str) {
+                names.insert(name.to_string());
+            }
+        }
+        names.len()
+    };
 
     rsx! {
         div {
-            class: "right-panel-tabs",
+            class: "right-panel-head",
             // Draggable window titlebar strip (double-click to maximize).
-            onmousedown: move |_| {
-                dioxus::desktop::use_window().drag();
-            },
+            onmousedown: start_window_drag,
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
-            for tab_item in crate::state_ui::RightPanelTab::ALL.iter() {
-                button {
-                    key: "{tab_item.label()}",
-                    class: if *tab_item == tab { "active" } else { "" },
-                    // Clicks on the tab must not start a window drag.
-                    onmousedown: move |e| e.stop_propagation(),
-                    onclick: move |_| {
-                        let mut store = store;
-                        store.right_panel_tab.set(*tab_item);
-                    },
-                    "{tab_item.label()}"
-                }
-            }
+            span { class: "head-title", "Inspector" }
         }
         div {
             class: "right-panel-body",
-            match tab {
-                crate::state_ui::RightPanelTab::Plan => rsx! { PlanTab {} },
-                crate::state_ui::RightPanelTab::Agents => rsx! { AgentsTab {} },
-                crate::state_ui::RightPanelTab::Git => rsx! { GitTab {} },
-                crate::state_ui::RightPanelTab::Terminal => rsx! { TerminalTab {} },
+            EnvironmentSection {}
+            ContextSection {}
+            for tab in RightPanelTab::ALL {
+                InspectorSection {
+                    key: "{tab.label()}",
+                    tab,
+                    count: match tab {
+                        RightPanelTab::Plan => task_count,
+                        RightPanelTab::Agents => Some(agent_count).filter(|count| *count > 0),
+                        RightPanelTab::Git => changed_files,
+                        RightPanelTab::Terminal => None,
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Muted icon, one-line title and optional hint for an empty section.
+#[component]
+fn EmptyState(icon: Element, title: String, hint: Option<String>) -> Element {
+    rsx! {
+        div {
+            class: "empty-state",
+            {icon}
+            div { class: "empty-title", "{title}" }
+            if let Some(hint) = hint {
+                div { class: "empty-hint", "{hint}" }
+            }
+        }
+    }
+}
+
+/// One collapsible section: icon, name, optional count chip and the tab body.
+#[component]
+fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
+    let store: UiStore = use_context();
+    let initially_open = matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents)
+        || *store.right_panel_tab.peek() == tab;
+    let mut open = use_signal(|| initially_open);
+    let (name, icon) = match tab {
+        RightPanelTab::Plan => ("Plan", icon_list_checks()),
+        RightPanelTab::Agents => ("Agents", icon_users()),
+        RightPanelTab::Git => ("Changes", icon_git_branch()),
+        RightPanelTab::Terminal => ("Terminal", icon_terminal()),
+    };
+    rsx! {
+        section {
+            class: "inspector-section",
+            button {
+                class: "section-head",
+                title: "{tab.label()}",
+                onclick: move |_| {
+                    let mut store = store;
+                    let next = !*open.read();
+                    open.set(next);
+                    if next {
+                        store.right_panel_tab.set(tab);
+                    }
+                },
+                span { class: if *open.read() { "chev open" } else { "chev" }, {icon_chevron_right()} }
+                {icon}
+                span { class: "section-name", "{name}" }
+                if let Some(count) = count {
+                    span { class: "count-chip", "{count}" }
+                }
+            }
+            if *open.read() {
+                div {
+                    class: "section-body",
+                    match tab {
+                        RightPanelTab::Plan => rsx! { PlanTab {} },
+                        RightPanelTab::Agents => rsx! { AgentsTab {} },
+                        RightPanelTab::Git => rsx! { GitTab {} },
+                        RightPanelTab::Terminal => rsx! { TerminalTab {} },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Project folder, git branch and execution mode of the current conversation.
+#[component]
+fn EnvironmentSection() -> Element {
+    let store: UiStore = use_context();
+    let project_path = inspector_project_path(&store);
+    let branch = use_resource(move || async move {
+        let path = inspector_project_path(&store)?;
+        let state = core();
+        locagens_core::api::projects::git_status(&state, &path)
+            .await
+            .ok()
+            .filter(|status| status.is_git)
+            .and_then(|status| status.branch)
+    });
+    let folder = project_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string());
+    let mode = match store.selected_mode.read().as_str() {
+        "plan" => "Plan",
+        "auto" => "Full Access",
+        _ => "Build",
+    };
+    let branch = branch.read().clone().flatten();
+    rsx! {
+        section {
+            class: "inspector-section",
+            div { class: "section-label", "Environment" }
+            div {
+                class: "section-body",
+                if let Some(folder) = folder {
+                    div {
+                        class: "info-row",
+                        title: "{project_path.clone().unwrap_or_default()}",
+                        {icon_folder()}
+                        span { class: "grow", "{folder}" }
+                    }
+                }
+                if let Some(branch) = branch {
+                    div {
+                        class: "info-row",
+                        {icon_git_branch()}
+                        span { class: "grow mono", "{branch}" }
+                    }
+                }
+                div {
+                    class: "info-row",
+                    {icon_shield()}
+                    span { class: "grow", "{mode}" }
+                }
+            }
+        }
+    }
+}
+
+/// Context usage of the conversation: average input tokens per model call
+/// against the selected model's context window, when the catalog knows it.
+#[component]
+fn ContextSection() -> Element {
+    let store: UiStore = use_context();
+    let Some(usage) = store.run_usage.read().clone() else {
+        return rsx! {};
+    };
+    let selected_provider = store.selected_provider.read().clone();
+    let selected_model = store.selected_model.read().clone();
+    let limit = store
+        .providers_catalog
+        .read()
+        .iter()
+        .find(|provider| provider.id == selected_provider)
+        .and_then(|provider| provider.model_settings.as_ref())
+        .and_then(|settings| settings.get(selected_model.as_str()))
+        .and_then(|entry| entry.get("contextLimit"))
+        .and_then(Value::as_i64)
+        .filter(|limit| *limit > 0);
+    let per_call = if usage.total_calls > 0 {
+        usage.total_input_tokens / usage.total_calls as i64
+    } else {
+        0
+    };
+    let percent = limit.map(|limit| ((per_call * 100) / limit).clamp(0, 100));
+    rsx! {
+        section {
+            class: "inspector-section",
+            div { class: "section-label", "Context" }
+            div {
+                class: "section-body",
+                div {
+                    class: "info-row",
+                    span { class: "grow", "Window used" }
+                    if let Some(percent) = percent {
+                        span { class: "mono", "{percent}%" }
+                    } else {
+                        span { class: "mono", "{crate::state_ui::fmt_tokens(per_call)} tok" }
+                    }
+                }
+                if let Some(percent) = percent {
+                    div {
+                        class: "meter",
+                        div { class: "meter-fill", style: "width: {percent}%" }
+                    }
+                }
             }
         }
     }
@@ -58,7 +251,11 @@ fn PlanTab() -> Element {
     let store: UiStore = use_context();
     let Some(plan) = store.plan.read().clone() else {
         return rsx! {
-            div { class: "settings-empty", "No plan for this conversation yet. Switch the mode to Plan and ask for one." }
+            EmptyState {
+                icon: icon_list_checks(),
+                title: "No plan yet",
+                hint: "Switch to Plan mode and ask for one.".to_string(),
+            }
         };
     };
     let tasks: Vec<(String, String)> = plan
@@ -94,7 +291,14 @@ fn PlanTab() -> Element {
                     div {
                         key: "{index}",
                         class: "plan-task task-{status}",
-                        span { class: "task-status", "{status}" }
+                        span {
+                            class: "task-icon",
+                            match status.as_str() {
+                                "completed" => icon_task_done(),
+                                "in_progress" => icon_task_active(),
+                                _ => icon_task_pending(),
+                            }
+                        }
                         span { class: "task-text", "{text}" }
                     }
                 }
@@ -136,7 +340,11 @@ fn AgentsTab() -> Element {
 
     if spawned.is_empty() && derived.is_empty() {
         return rsx! {
-            div { class: "settings-empty", "No sub-agents ran in this conversation." }
+            EmptyState {
+                icon: icon_users(),
+                title: "No sub-agents yet",
+                hint: "Agents the model spawns will show up here.".to_string(),
+            }
         };
     }
     rsx! {
@@ -149,13 +357,11 @@ fn AgentsTab() -> Element {
                 rsx! {
                     div {
                         key: "spawned-{index}-{agent_id}",
-                        class: "panel-card",
-                        div {
-                            style: "display:flex;align-items:center;gap:8px",
-                            span { class: "badge accent", "{role}" }
-                            span { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", "{name}" }
-                            span { class: "badge", "{status}" }
-                        }
+                        class: "list-row",
+                        if role == "worker" { {icon_wrench()} } else { {icon_search()} }
+                        span { class: "grow", "{name}" }
+                        span { class: "badge", "{role}" }
+                        span { class: "badge", "{status}" }
                     }
                 }
             }
@@ -163,13 +369,11 @@ fn AgentsTab() -> Element {
         for (index, (role, name, count)) in derived.iter().enumerate() {
             div {
                 key: "derived-{index}",
-                class: "panel-card",
-                div {
-                    style: "display:flex;align-items:center;gap:8px",
-                    span { class: "badge accent", "{role}" }
-                    span { style: "flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", "{name}" }
-                    span { class: "badge", "{count} msgs" }
-                }
+                class: "list-row",
+                if role == "worker" { {icon_wrench()} } else { {icon_search()} }
+                span { class: "grow", "{name}" }
+                span { class: "badge", "{role}" }
+                span { class: "count-chip", "{count}" }
             }
         }
     }
@@ -267,9 +471,6 @@ fn GitTab() -> Element {
         .filter(|(diff, _)| !diff.trim().is_empty());
 
     rsx! {
-        div {
-            class: "panel-section-title", "Git"
-        }
         if let Some((diff, files_changed)) = active_turn_diff {
             div {
                 class: "panel-card",
@@ -285,23 +486,25 @@ fn GitTab() -> Element {
                 rsx! {
                     div {
                         class: "panel-card",
-                        div { "Branch: " span { class: "mono", "{git_status.branch.clone().unwrap_or_default()}" } }
-                        if git_status.has_changes.unwrap_or(false) {
-                            div { style: "color:#e6b455", "Working tree has changes." }
-                        } else {
-                            div { style: "color:#4ecf7a", "Working tree clean." }
+                        div {
+                            class: "panel-row",
+                            {icon_git_branch()}
+                            span { class: "grow mono", "{git_status.branch.clone().unwrap_or_default()}" }
+                            if git_status.has_changes.unwrap_or(false) {
+                                span { class: "tree-state dirty", "Uncommitted changes" }
+                            } else {
+                                span { class: "tree-state clean", "Clean" }
+                            }
                         }
                     }
                     if !changed_files.is_empty() {
                         div {
                             class: "panel-card",
                             div {
-                                style: "display:flex;align-items:center;gap:4px;flex-wrap:wrap",
-                                span { class: "panel-section-title", "Changed files" }
-                                span { style: "flex:1" }
+                                class: "panel-row",
+                                span { class: "panel-section-title grow", "Changed files" }
                                 button {
-                                    class: "subtle",
-                                    style: "font-size:11px;padding:3px 7px",
+                                    class: "subtle small",
                                     title: "Restore the project to the pre-turn snapshot (git)",
                                     onclick: move |_| {
                                         let path = path_for_undo.clone();
@@ -321,8 +524,7 @@ fn GitTab() -> Element {
                                     "Undo"
                                 }
                                 button {
-                                    class: "subtle",
-                                    style: "font-size:11px;padding:3px 7px",
+                                    class: "subtle small",
                                     onclick: move |_| {
                                         let path = path_for_stage_all.clone();
                                         spawn(async move {
@@ -337,8 +539,7 @@ fn GitTab() -> Element {
                                     "Stage all"
                                 }
                                 button {
-                                    class: "subtle",
-                                    style: "font-size:11px;padding:3px 7px",
+                                    class: "subtle small",
                                     onclick: move |_| {
                                         let path = path_for_unstage_all.clone();
                                         spawn(async move {
@@ -356,6 +557,7 @@ fn GitTab() -> Element {
                             for diff in changed_files.iter() {
                                 {
                                     let file_path = diff.path.clone();
+                                    let display_path = diff.path.clone();
                                     let file_kind = diff.kind.clone();
                                     let stage_path = diff.path.clone();
                                     let unstage_path = diff.path.clone();
@@ -365,18 +567,23 @@ fn GitTab() -> Element {
                                     rsx! {
                                         div {
                                             key: "{file_path}",
-                                            class: "settings-row",
-                                            div {
-                                                class: "grow",
-                                                onclick: move |_| selected_file.set(if selected_now.as_ref() == Some(&file_path) { None } else { Some(file_path.clone()) }),
-                                                style: "cursor:pointer",
-                                                div {
-                                                    style: "font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
-                                                    "{file_path}"
+                                            class: "file-row",
+                                            span {
+                                                class: "file-kind {file_kind}",
+                                                title: "{file_kind}",
+                                                match file_kind.as_str() {
+                                                    "created" => "A",
+                                                    "deleted" => "D",
+                                                    _ => "M",
                                                 }
-                                                span { class: "badge", "{file_kind}" }
+                                            }
+                                            div {
+                                                class: "file-main",
+                                                onclick: move |_| selected_file.set(if selected_now.as_ref() == Some(&file_path) { None } else { Some(file_path.clone()) }),
+                                                div { class: "file-name", title: "{display_path}", "{display_path}" }
                                             }
                                             button {
+                                                class: "subtle small",
                                                 onclick: move |_| {
                                                     let path = stage_project.clone();
                                                     let files = vec![stage_path.clone()];
@@ -392,6 +599,7 @@ fn GitTab() -> Element {
                                                 "Stage"
                                             }
                                             button {
+                                                class: "subtle small",
                                                 onclick: move |_| {
                                                     let path = unstage_project.clone();
                                                     let files = vec![unstage_path.clone()];
@@ -429,10 +637,10 @@ fn GitTab() -> Element {
                             "Worktrees"
                         }
                         div {
-                            style: "display:flex;gap:6px;align-items:center",
+                            class: "panel-row",
                             input {
                                 placeholder: "Branch…",
-                                style: "flex:1;min-width:0",
+                                class: "grow",
                                 value: "{worktree_branch.read()}",
                                 oninput: move |event| worktree_branch.set(event.value()),
                             }
@@ -456,11 +664,11 @@ fn GitTab() -> Element {
                                         version.with_mut(|value| *value += 1);
                                     });
                                 },
-                                "+ Worktree"
+                                {icon_plus()} "Worktree"
                             }
                         }
                         if worktree_list.is_empty() {
-                            div { class: "settings-empty", "No worktrees." }
+                            div { class: "empty-hint inline", "No worktrees." }
                         }
                         for worktree in worktree_list.iter() {
                             {
@@ -474,8 +682,7 @@ fn GitTab() -> Element {
                                         key: "{wt_path}",
                                         class: "settings-row",
                                         div {
-                                            class: "grow",
-                                            style: "cursor:pointer",
+                                            class: "grow clickable",
                                             onclick: move |_| {
                                                 let switch_path = switch_path.clone();
                                                 spawn(async move {
@@ -496,26 +703,21 @@ fn GitTab() -> Element {
                                                 });
                                             },
                                             div {
-                                                style: "display:flex;align-items:center;gap:6px;min-width:0",
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
-                                                    "{wt_branch}"
-                                                }
+                                                class: "panel-row",
+                                                span { class: "mono grow", "{wt_branch}" }
                                                 if worktree.is_main {
-                                                    span { class: "badge", "[main]" }
+                                                    span { class: "badge", "main" }
                                                 }
                                             }
                                             div {
-                                                class: "mono",
-                                                style: "font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
+                                                class: "mono path-line",
                                                 title: "{wt_path}",
                                                 "{wt_path}"
                                             }
                                         }
                                         if !worktree.is_main {
                                             button {
-                                                class: "danger",
+                                                class: "icon-btn danger",
                                                 title: "Remove worktree",
                                                 onclick: move |_| {
                                                     let project = remove_project.clone();
@@ -533,7 +735,7 @@ fn GitTab() -> Element {
                                                         version.with_mut(|value| *value += 1);
                                                     });
                                                 },
-                                                "✕"
+                                                {icon_x()}
                                             }
                                         }
                                     }
@@ -550,7 +752,7 @@ fn GitTab() -> Element {
                         }
                     }
                     div {
-                        style: "display:flex;gap:8px",
+                        class: "panel-actions",
                         button {
                             class: "primary",
                             disabled: *busy.read() || message.read().trim().is_empty(),
@@ -613,10 +815,10 @@ fn GitTab() -> Element {
                 }
             }
             Some(_) => rsx! {
-                div { class: "settings-empty", "The selected folder is not a git repository." }
+                EmptyState { icon: icon_git_branch(), title: "Not a git repository", hint: "The selected folder has no git history.".to_string() }
             },
             None => rsx! {
-                div { class: "settings-empty", "Select a project to inspect its git status." }
+                EmptyState { icon: icon_git_branch(), title: "No project selected", hint: "Select a project to inspect its changes.".to_string() }
             },
         }
     }
@@ -692,9 +894,6 @@ fn TerminalTab() -> Element {
 
     rsx! {
         div {
-            class: "panel-section-title", "Terminal · Processes"
-        }
-        div {
             class: "composer-row-top",
             input {
                 placeholder: "Command to run in the background…",
@@ -764,7 +963,7 @@ fn TerminalTab() -> Element {
             }
         }
         if process_list.is_empty() {
-            div { class: "settings-empty", "No background processes yet. Enter a command above to launch one." }
+            EmptyState { icon: icon_terminal(), title: "No processes", hint: "Run a command above to start one in the background.".to_string() }
         }
         for process in process_list.iter() {
             {
@@ -775,20 +974,16 @@ fn TerminalTab() -> Element {
                 rsx! {
                     div {
                         key: "{id}",
-                        class: "settings-row",
-                        style: if is_selected { "border-color:color-mix(in srgb, #60cdff 45%, transparent)" } else { "" },
+                        class: if is_selected { "settings-row selected" } else { "settings-row" },
                         onclick: move |_| selected.set(if is_selected { None } else { Some(id.clone()) }),
                         div {
                             class: "grow",
-                            div {
-                                class: "mono",
-                                style: "font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
-                                "{process.command}"
-                            }
+                            div { class: "mono proc-command", "{process.command}" }
                             span { class: "badge", "{process_status} · {id}" }
                         }
                         button {
-                            class: "danger",
+                            class: "icon-btn danger",
+                            title: "Stop process",
                             onclick: move |event: Event<MouseData>| {
                                 event.stop_propagation();
                                 let kill_id = kill_id.clone();
@@ -801,7 +996,7 @@ fn TerminalTab() -> Element {
                                     version.with_mut(|value| *value += 1);
                                 });
                             },
-                            "Stop"
+                            {icon_stop()}
                         }
                     }
                 }
@@ -815,21 +1010,16 @@ fn TerminalTab() -> Element {
                     "Logs · {data.process.command}"
                 }
                 div {
-                    class: "tool-output",
-                    style: "max-height:340px",
+                    class: "tool-output log-view",
                     if data.logs.is_empty() {
                         "No output yet…"
                     }
                     for (index, entry) in data.logs.iter().enumerate() {
                         div {
                             key: "{index}",
-                            style: "display:flex;gap:8px",
-                            span {
-                                class: "badge",
-                                style: "font-size:10px;flex:none",
-                                "{entry.stream}"
-                            }
-                            span { class: "mono", style: "font-size:11.5px;white-space:pre-wrap;word-break:break-word", "{entry.text}" }
+                            class: "log-line",
+                            span { class: "badge", "{entry.stream}" }
+                            span { class: "mono", "{entry.text}" }
                         }
                     }
                 }

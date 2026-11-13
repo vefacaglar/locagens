@@ -1,5 +1,6 @@
 //! Usage logs page: metrics cards and a paged table of token/cost entries.
 
+use super::icons::{icon_arrow_left, icon_arrow_right};
 use crate::state_ui::{core, fmt_cost, fmt_tokens, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::runs::{usage_logs, UsageLogQuery, UsageLogsResponse};
@@ -46,9 +47,7 @@ pub fn UsageLogsPage() -> Element {
         div {
             class: "page-header",
             // Draggable window titlebar strip (double-click to maximize).
-            onmousedown: move |_| {
-                dioxus::desktop::use_window().drag();
-            },
+            onmousedown: super::start_window_drag,
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
@@ -70,7 +69,7 @@ pub fn UsageLogsPage() -> Element {
                     let mut store = store;
                     store.page.set(crate::state_ui::AppPage::Chat);
                 },
-                "← Back to Chat"
+                {icon_arrow_left()} "Back to Chat"
             }
         }
         div {
@@ -119,13 +118,13 @@ pub fn UsageLogsPage() -> Element {
                     }
                     if logs.is_empty() {
                         tr {
-                            td { colspan: "9", style: "text-align:center;color:var(--muted,#8a8a8a)", "No usage entries yet." }
+                            td { class: "empty-cell", colspan: "9", "No usage entries yet." }
                         }
                     }
                 }
             }
             div {
-                style: "display:flex;gap:8px;align-items:center;justify-content:flex-end",
+                class: "usage-toolbar",
                 span { class: "composer-hint", "{total} entries" }
                 button {
                     disabled: *offset.read() <= 0,
@@ -134,7 +133,7 @@ pub fn UsageLogsPage() -> Element {
                         let current = *offset.read();
                         offset.set((current - PAGE_SIZE).max(0));
                     },
-                    "← Prev"
+                    {icon_arrow_left()} "Prev"
                 }
                 button {
                     disabled: *offset.read() + PAGE_SIZE >= total as i64,
@@ -143,7 +142,7 @@ pub fn UsageLogsPage() -> Element {
                         let current = *offset.read();
                         offset.set(current + PAGE_SIZE);
                     },
-                    "Next →"
+                    "Next" {icon_arrow_right()}
                 }
             }
         }

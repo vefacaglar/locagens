@@ -1,7 +1,8 @@
-//! Chat header: integrated top bar (window drag strip) with run title,
-//! project pill, token/cost summary, theme toggle, Stop Run and Inspector
-//! (right panel) toggle. Completely boxless, like Antigravity.
+//! Chat header: the top strip of the main column (window drag area) with a
+//! status dot, `project / conversation` breadcrumb, a token/cost chip and
+//! icon buttons for stop, theme and the inspector panel.
 
+use super::icons::{icon_folder, icon_moon, icon_panel_right, icon_stop, icon_sun};
 use super::*;
 use crate::state_ui::{fmt_cost, fmt_tokens, UiStore};
 use dioxus::prelude::*;
@@ -25,63 +26,65 @@ pub fn ChatHeader() -> Element {
         .map(|run| run.status.clone())
         .unwrap_or_else(|| "done".to_string());
     let is_active = run_active(run.as_ref());
+    let dark = *store.dark_mode.read();
+    let inspector_open = *store.right_panel_open.read();
+    let files_changed = store
+        .turn_diff
+        .read()
+        .as_ref()
+        .map(|(_, files)| *files)
+        .unwrap_or(0);
 
-    let usage = store.run_usage.read().clone();
-    let usage_text = usage.as_ref().map(|usage| {
+    let usage_text = store.run_usage.read().as_ref().map(|usage| {
         format!(
             "{} tok · {}",
             fmt_tokens(usage.total_input_tokens + usage.total_output_tokens),
             fmt_cost(usage.total_cost),
         )
     });
+    let folder = std::path::Path::new(&project_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| project_path.clone());
 
     rsx! {
         header {
             class: "chat-header",
             // Draggable window titlebar strip (double-click to maximize).
-            onmousedown: move |_| {
-                dioxus::desktop::use_window().drag();
-            },
+            onmousedown: start_window_drag,
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
             div {
                 class: "chat-header-meta",
-                span {
-                    class: "status-dot {status}",
-                    title: "{status_label(&status)}",
+                {status_dot(&status)}
+                if !project_path.is_empty() {
+                    span {
+                        class: "crumb",
+                        title: "{project_path}",
+                        {icon_folder()}
+                        span { "{folder}" }
+                        span { class: "crumb-sep", "/" }
+                    }
                 }
                 div {
                     class: "chat-title",
                     title: "{title}",
                     "{title}"
                 }
-                if !project_path.is_empty() {
-                    {
-                        let folder = std::path::Path::new(&project_path)
-                            .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| project_path.clone());
-                        rsx! {
-                            span {
-                                class: "pill",
-                                title: "{project_path}",
-                                "📁 {folder}"
-                            }
-                        }
-                    }
-                }
-                if let Some(usage_text) = usage_text {
-                    span { class: "badge", "{usage_text}" }
-                }
             }
             div {
                 class: "chat-header-actions",
-                // Clicks on the buttons must not start a window drag.
+                // Clicks on the buttons must neither start a drag nor maximize.
                 onmousedown: move |e| e.stop_propagation(),
+                ondoubleclick: move |e| e.stop_propagation(),
+                if let Some(usage_text) = usage_text {
+                    span { class: "usage-chip", "{usage_text}" }
+                }
                 if is_active {
                     button {
-                        class: "danger",
+                        class: "icon-btn danger",
+                        title: "Stop the running turn",
                         onclick: move |_| {
                             let store = store;
                             let run_id = run.as_ref().map(|run| run.id.clone());
@@ -95,38 +98,30 @@ pub fn ChatHeader() -> Element {
                                 }
                             });
                         },
-                        "■ Stop"
+                        {icon_stop()}
                     }
                 }
                 button {
-                    class: "subtle icon-btn",
-                    title: "Toggle dark / light theme",
+                    class: "icon-btn",
+                    title: if dark { "Switch to light theme" } else { "Switch to dark theme" },
                     onclick: move |_| {
                         let mut store = store;
                         let dark = *store.dark_mode.read();
                         store.dark_mode.set(!dark);
                     },
-                    if *store.dark_mode.read() { "☾" } else { "☀" }
+                    if dark { {icon_sun()} } else { {icon_moon()} }
                 }
                 button {
-                    // Highlighted while the inspector panel is open; appends the
-                    // changed-file count of the current turn diff when present.
-                    class: "subtle icon-btn",
+                    class: if inspector_open { "icon-btn on" } else { "icon-btn" },
                     title: "Toggle inspector panel",
-                    style: if *store.right_panel_open.read() { "color: #0a84ff;" } else { "" },
                     onclick: move |_| {
                         let mut store = store;
                         let open = *store.right_panel_open.read();
                         store.right_panel_open.set(!open);
                     },
-                    if let Some((_, files_changed)) = store.turn_diff.read().as_ref() {
-                        if *files_changed > 0 {
-                            "◫ {files_changed}"
-                        } else {
-                            "◫"
-                        }
-                    } else {
-                        "◫"
+                    {icon_panel_right()}
+                    if files_changed > 0 {
+                        span { class: "count-chip", "{files_changed}" }
                     }
                 }
             }

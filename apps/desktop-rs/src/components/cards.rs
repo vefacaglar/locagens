@@ -1,6 +1,7 @@
 //! Pending permission approval and question cards, rendered between the chat
 //! thread and the composer while a run waits for the user.
 
+use super::icons::{icon_arrow_left, icon_arrow_right, icon_check};
 use crate::markdown::{parse_diff, pseudo_diff, DiffLine};
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
@@ -150,15 +151,15 @@ fn PermissionCard(request: Value) -> Element {
             div {
                 class: "pc-title",
                 span { class: "badge warn", "Permission requested" }
-                span { class: "tool-name mono", style: "font-family:monospace;font-size:12px", "{tool_name}" }
+                span { class: "tool-name", "{tool_name}" }
             }
             div {
                 class: "pc-detail",
                 "The agent wants to run "
-                span { style: "font-weight:600", "{tool_name}" }
+                strong { "{tool_name}" }
                 if !display_path.is_empty() {
                     " on "
-                    span { style: "font-weight:600", "{display_path}" }
+                    strong { "{display_path}" }
                 }
                 "."
             }
@@ -327,7 +328,10 @@ fn QuestionCard(request: Value) -> Element {
                                         }
                                     });
                                 },
-                                if multi && selected { "☑ " } else if multi { "☐ " } else if selected { "● " } else { "○ " }
+                                span {
+                                    class: if multi { "qc-mark multi" } else { "qc-mark" },
+                                    if selected { {icon_check()} }
+                                }
                                 "{option}"
                             }
                         }
@@ -358,7 +362,7 @@ fn QuestionCard(request: Value) -> Element {
                             let mut current = current;
                             current.set(idx - 1);
                         },
-                        "← Back"
+                        {icon_arrow_left()} "Back"
                     }
                 }
                 if idx < questions.len().saturating_sub(1) {
@@ -368,7 +372,7 @@ fn QuestionCard(request: Value) -> Element {
                             let mut current = current;
                             current.set(idx + 1);
                         },
-                        "Next →"
+                        "Next" {icon_arrow_right()}
                     }
                 }
                 button {
