@@ -458,6 +458,10 @@ pub fn keep_stored_auth(mut config: McpServerConfig) -> McpServerConfig {
     let Some(stored) = stored else {
         return config;
     };
+    // Fields the edit form cannot express arrive as `None`: keep the stored
+    // ones (an explicit empty list/map still clears them).
+    config.args = config.args.or(stored.args);
+    config.env = config.env.or(stored.env);
     config.bearer_token_env_var = config.bearer_token_env_var.or(stored.bearer_token_env_var);
     config.http_headers = config.http_headers.or(stored.http_headers);
     config.env_http_headers = config.env_http_headers.or(stored.env_http_headers);

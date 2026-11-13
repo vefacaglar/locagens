@@ -402,6 +402,28 @@ fn saving_from_the_form_keeps_stored_auth_settings() {
     assert_eq!(merged.scopes.unwrap(), vec!["read".to_string()]);
 }
 
+#[test]
+fn saving_from_the_form_keeps_stored_args_and_env() {
+    let project = tempfile::tempdir().unwrap();
+    let project_path = std::fs::canonicalize(project.path()).unwrap().to_string_lossy().to_string();
+    let mut stored = remote_config("local-tool", "http://127.0.0.1:1/mcp");
+    stored.transport = "stdio".to_string();
+    stored.url = None;
+    stored.command = Some("node".to_string());
+    stored.args = Some(vec!["server.js".to_string()]);
+    stored.env = Some(BTreeMap::from([("API_TOKEN".to_string(), "secret".to_string())]));
+    stored.scope = "project".to_string();
+    stored.project_path = Some(project_path.clone());
+    super::save_config(&stored).unwrap();
+
+    let mut edited = stored.clone();
+    edited.args = None;
+    edited.env = None;
+    let merged = super::keep_stored_auth(edited);
+    assert_eq!(merged.args.as_deref(), Some(&["server.js".to_string()][..]));
+    assert_eq!(merged.env.unwrap()["API_TOKEN"], "secret");
+}
+
 #[tokio::test]
 async fn concurrent_expired_calls_share_one_refresh() {
     let (base, mock) = spawn_mock(false, None).await;
