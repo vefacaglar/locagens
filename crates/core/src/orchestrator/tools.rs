@@ -781,7 +781,11 @@ pub async fn run_command_with_network(
     )
     .await
     .map_err(|err| match err.kind() {
-        std::io::ErrorKind::TimedOut => "run_command: timed out after 120 seconds.".to_string(),
+        // The sandbox appends its violation note to the timeout message.
+        std::io::ErrorKind::TimedOut => format!(
+            "run_command: timed out after 120 seconds.{}",
+            err.to_string().strip_prefix("command timed out").unwrap_or_default()
+        ),
         _ => format!("run_command: {err}"),
     })?;
 
@@ -807,7 +811,13 @@ pub async fn run_command_with_network(
         result.push_str("\n\n");
         result.push_str(&locagens_execpolicy::network_proxy::blocked_hosts_note(&output.blocked_hosts));
     }
-    Ok(truncate_output(result))
+    let mut result = truncate_output(result);
+    if !output.sandbox_violations.is_empty() {
+        // After truncation, so the warning is never cut off.
+        result.push_str("\n\n");
+        result.push_str(&locagens_execpolicy::sandbox::sandbox_violation_note(&output.sandbox_violations));
+    }
+    Ok(result)
 }
 
 /// Redirects `fetch_url` follows, each re-validated like the first URL.

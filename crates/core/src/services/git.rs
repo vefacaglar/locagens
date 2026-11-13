@@ -3,9 +3,22 @@
 
 use std::path::Path;
 
+/// Repairs git / `.locagens` metadata a still-running sandboxed command in
+/// `project_path` replaced (Windows; see `locagens_execpolicy::sandbox::
+/// repair_workspace_metadata`), so Locagens' own unsandboxed git never
+/// runs planted hooks or config. A repair is an error carrying the note.
+pub fn check_sandbox_metadata(project_path: &Path) -> Result<(), String> {
+    let reports = locagens_execpolicy::sandbox::repair_workspace_metadata(project_path);
+    if reports.is_empty() {
+        return Ok(());
+    }
+    Err(locagens_execpolicy::sandbox::sandbox_violation_note(&reports))
+}
+
 /// Runs `git` in `project_path` and returns stdout; stderr (or the spawn
 /// failure) becomes the error message.
 pub async fn git(project_path: &Path, args: &[&str]) -> Result<String, String> {
+    check_sandbox_metadata(project_path)?;
     let output = tokio::process::Command::new("git")
         .args(args)
         .current_dir(project_path)
@@ -31,6 +44,7 @@ pub async fn git_bytes(
     stdin: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncWriteExt;
+    check_sandbox_metadata(project_path)?;
     let mut command = tokio::process::Command::new("git");
     command
         .args(args)

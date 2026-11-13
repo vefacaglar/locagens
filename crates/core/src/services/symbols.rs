@@ -149,6 +149,9 @@ pub fn extract(file_path: &str, content: &str) -> Vec<CodeSymbol> {
 
 fn list_files(project_path: &Path) -> Vec<String> {
     // Prefer git's file list (respects .gitignore via -co --exclude-standard).
+    // Metadata a sandboxed command swapped is repaired first, so git never
+    // reads a planted config (the repair itself is reported by the tools).
+    let _ = crate::services::git::check_sandbox_metadata(project_path);
     if let Ok(output) = std::process::Command::new("git")
         .args(["ls-files", "-co", "--exclude-standard"])
         .current_dir(project_path)

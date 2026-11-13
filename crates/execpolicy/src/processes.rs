@@ -469,7 +469,7 @@ impl ProcessManager {
             }
         };
         let pid = child.pid;
-        let crate::windows_sandbox::SandboxedChild { stdin, stdout, stderr, .. } = child;
+        let crate::windows_sandbox::SandboxedChild { stdin, stdout, stderr, earlier_violations, .. } = child;
         let stdin = stdin.map(|file| StdinSink::Channel(spawn_stdin_writer(file)));
         {
             let managed_arc = self.get_arc(id).unwrap();
@@ -482,6 +482,9 @@ impl ProcessManager {
             m.sandbox = Some(session);
         }
         self.append_log(id, "system", &format!("[Process started with PID {pid} (sandboxed)]"));
+        if !earlier_violations.is_empty() {
+            self.append_log(id, "system", &crate::sandbox::sandbox_violation_note(&earlier_violations));
+        }
         self.spawn_blocking_reader(id.to_string(), stdout, "stdout");
         self.spawn_blocking_reader(id.to_string(), stderr, "stderr");
         let this = Arc::clone(self);
@@ -492,20 +495,28 @@ impl ProcessManager {
         });
     }
 
-    /// Natural exit of a sandboxed root: keep background descendants, tell
-    /// the model about refused hosts, then record the exit.
+    /// Exit of a sandboxed root: keep background descendants (natural exit
+    /// only), repair replaced workspace metadata, tell the model about
+    /// refused hosts and repairs, then record the exit.
     #[cfg(windows)]
     fn finish_sandboxed_exit(self: &Arc<Self>, id: &str, code: Option<i32>) {
-        let blocked = self.get_arc(id).and_then(|managed| {
+        let notes = self.get_arc(id).and_then(|managed| {
             let m = managed.lock().expect("managed process poisoned");
             let session = m.sandbox.as_ref()?;
-            if m.info.status == "running" {
-                session.release_descendants();
-            }
-            Some(session.blocked_hosts())
+            let violations = if m.info.status == "running" {
+                session.finish_natural_exit()
+            } else {
+                session.check_metadata()
+            };
+            Some((session.blocked_hosts(), violations))
         });
-        if let Some(hosts) = blocked.filter(|hosts| !hosts.is_empty()) {
-            self.append_log(id, "system", &blocked_hosts_note(&hosts));
+        if let Some((hosts, violations)) = notes {
+            if !hosts.is_empty() {
+                self.append_log(id, "system", &blocked_hosts_note(&hosts));
+            }
+            if !violations.is_empty() {
+                self.append_log(id, "system", &crate::sandbox::sandbox_violation_note(&violations));
+            }
         }
         self.finish_exit(id, code);
     }

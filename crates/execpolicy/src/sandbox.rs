@@ -116,6 +116,8 @@ pub fn uses_native_spawn(spec: Option<&SandboxSpec>) -> bool {
 pub struct SandboxSession {
     #[cfg(windows)]
     job: std::sync::Arc<crate::windows_sandbox::JobObject>,
+    #[cfg(windows)]
+    guard: std::sync::Arc<crate::windows_sandbox::guard::MetadataGuard>,
     proxy: Option<NetworkProxy>,
 }
 
@@ -127,10 +129,26 @@ impl SandboxSession {
     }
 
     /// The root exited on its own: let background descendants keep running
-    /// after the session is dropped (Codex `preserve_descendants`).
-    pub fn release_descendants(&self) {
+    /// after the session is dropped (Codex `preserve_descendants`), then
+    /// check the protected workspace metadata (see
+    /// [`crate::windows_sandbox::guard`]). Returns the repairs made.
+    pub fn finish_natural_exit(&self) -> Vec<String> {
         #[cfg(windows)]
-        let _ = self.job.preserve_descendants();
+        {
+            let _ = self.job.preserve_descendants();
+            crate::windows_sandbox::guard::check_after_exit(&self.guard, &self.job)
+        }
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
+    /// Final check (and repair) of the protected workspace metadata after
+    /// the tree was killed. Returns the repairs made.
+    pub fn check_metadata(&self) -> Vec<String> {
+        #[cfg(windows)]
+        return crate::windows_sandbox::guard::check_after_kill(&self.guard);
+        #[cfg(not(windows))]
+        Vec::new()
     }
 
     /// Hosts the network proxy refused so far.
@@ -186,6 +204,7 @@ pub fn spawn_native(
     let child = crate::windows_sandbox::spawn_sandboxed(spec, &request)?;
     let session = SandboxSession {
         job: std::sync::Arc::clone(&child.job),
+        guard: std::sync::Arc::clone(&child.guard),
         proxy,
     };
     Ok(NativeChild { child, session })
@@ -199,6 +218,9 @@ pub struct CapturedOutput {
     pub stderr: Vec<u8>,
     /// Hosts the network proxy refused (Windows sandbox only).
     pub blocked_hosts: Vec<String>,
+    /// Repairs of protected workspace metadata the command had replaced
+    /// (Windows sandbox only); see [`sandbox_violation_note`].
+    pub sandbox_violations: Vec<String>,
 }
 
 impl CapturedOutput {
@@ -241,6 +263,7 @@ pub async fn run_captured(
         stdout: output.stdout,
         stderr: output.stderr,
         blocked_hosts: Vec::new(),
+        sandbox_violations: Vec::new(),
     })
 }
 
@@ -282,7 +305,7 @@ async fn run_captured_native(
     let NativeChild { child, session } =
         spawn_native(spec, program, args, cwd, env, false).map_err(std::io::Error::other)?;
     let waiter = child.waiter()?;
-    let crate::windows_sandbox::SandboxedChild { mut stdout, mut stderr, .. } = child;
+    let crate::windows_sandbox::SandboxedChild { mut stdout, mut stderr, earlier_violations, .. } = child;
     let read_stdout = tokio::task::spawn_blocking(move || {
         let mut buffer = Vec::new();
         let _ = stdout.read_to_end(&mut buffer);
@@ -304,18 +327,57 @@ async fn run_captured_native(
     match finished {
         Ok(result) => {
             let (code, stdout, stderr) = result?;
-            session.release_descendants();
+            let mut sandbox_violations = earlier_violations;
+            sandbox_violations.extend(session.finish_natural_exit());
             Ok(CapturedOutput {
                 exit_code: Some(code),
                 stdout,
                 stderr,
                 blocked_hosts: session.blocked_hosts(),
+                sandbox_violations,
             })
         }
         Err(_) => {
             session.terminate();
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))
+            let mut violations = earlier_violations;
+            violations.extend(session.check_metadata());
+            let mut message = "command timed out".to_string();
+            if !violations.is_empty() {
+                message.push_str(&format!("\n\n{}", sandbox_violation_note(&violations)));
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
         }
+    }
+}
+
+/// The loud note a tool result carries when the sandbox had to repair
+/// protected workspace metadata (`.git`, `.git/hooks`, `.git/config`,
+/// `.locagens`) that a command replaced.
+pub fn sandbox_violation_note(reports: &[String]) -> String {
+    let mut note = String::from(
+        "SANDBOX VIOLATION: a sandboxed command replaced protected workspace metadata; Locagens repaired it. \
+         Treat that command as hostile and review the workspace before running git or trusting .locagens rules:",
+    );
+    for report in reports {
+        note.push_str("\n- ");
+        note.push_str(report);
+    }
+    note
+}
+
+/// Repairs protected metadata of `project_path` that a sandboxed command
+/// still running there (or its background descendants) replaced, and
+/// returns the repairs (they are also reported by the next sandboxed
+/// command). Call it before running git unsandboxed in the workspace.
+/// Windows only: Bubblewrap pins these entries as mount points and
+/// Seatbelt's path rules deny recreating them.
+pub fn repair_workspace_metadata(project_path: &Path) -> Vec<String> {
+    #[cfg(windows)]
+    return crate::windows_sandbox::guard::repair_active(&crate::windows_sandbox::plan::normalize_path(project_path));
+    #[cfg(not(windows))]
+    {
+        let _ = project_path;
+        Vec::new()
     }
 }
 
@@ -442,11 +504,24 @@ pub fn build_linux_bwrap_args(
         for extra in existing_roots(&spec.writable_roots) {
             out.extend(["--bind".to_string(), extra.clone(), extra]);
         }
+        // `.git` becomes a mount point of its own (bound onto itself, still
+        // writable): rename(2) refuses to move a mount point (EBUSY), so the
+        // command cannot swap in a fresh `.git` with planted hooks/config.
+        if Path::new(&root).join(".git").exists() {
+            let git_dir = format!("{root}/.git");
+            out.extend(["--bind".to_string(), git_dir.clone(), git_dir]);
+        }
         // Carve-outs stay read-only so hooks/config/tool state cannot be
-        // rewritten by sandboxed commands.
+        // rewritten by sandboxed commands; as mount points they cannot be
+        // renamed or deleted either. `.locagens` is created first (as on
+        // Windows) so the command cannot create and own it.
         for entry in crate::protected_paths::SANDBOX_PROTECTED_PATHS {
             let path = format!("{root}/{}", entry.relative);
-            if Path::new(&path).exists() {
+            let on_disk = entry.under(Path::new(&root));
+            if entry.pre_create {
+                let _ = std::fs::create_dir_all(&on_disk);
+            }
+            if on_disk.exists() {
                 out.push("--ro-bind".to_string());
                 out.push(path.clone());
                 out.push(path);
@@ -660,6 +735,28 @@ mod tests {
         let (_, out) =
             wrap_with_backend(SandboxBackend::LinuxBubblewrap, Some(bwrap), "sh", &args, Some(&spec)).unwrap();
         assert!(!out.contains(&"--unshare-net".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `.git` is bound onto itself (a mount point cannot be renamed) before
+    /// the read-only carve-outs, and `.locagens` is pre-created and bound.
+    #[test]
+    fn bwrap_pins_git_and_protected_paths_as_mount_points() {
+        let (root, spec) = temp_spec("bwrap-git");
+        std::fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
+        std::fs::write(root.join(".git").join("config"), "[core]\n").unwrap();
+        let (_, out) = build_linux_bwrap_args(Path::new("/usr/bin/bwrap"), &spec, "sh", &[]);
+        let canonical = canonical_or(&root);
+        let bind_of = |flag: &str, relative: &str| {
+            let path = format!("{canonical}/{relative}");
+            out.windows(3).position(|w| w[0] == flag && w[1] == path && w[2] == path)
+        };
+        let git = bind_of("--bind", ".git").expect("`.git` is bound onto itself");
+        let hooks = bind_of("--ro-bind", ".git/hooks").expect("hooks stay read-only");
+        assert!(git < hooks, "the .git mount comes before the carve-outs inside it");
+        assert!(bind_of("--ro-bind", ".git/config").is_some());
+        assert!(bind_of("--ro-bind", ".locagens").is_some(), "{out:?}");
+        assert!(root.join(".locagens").is_dir(), ".locagens is pre-created");
         let _ = std::fs::remove_dir_all(&root);
     }
 
