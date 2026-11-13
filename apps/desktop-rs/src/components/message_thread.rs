@@ -4,6 +4,7 @@
 use super::icons::*;
 use super::*;
 use crate::markdown::{parse_diff, render_markdown, summarize_args, DiffLine};
+use crate::i18n::{self, Lang};
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 use locagens_core::db::RunMessage;
@@ -120,8 +121,8 @@ pub fn MessageThread() -> Element {
         .and_then(|path| std::path::Path::new(path).file_name())
         .map(|name| name.to_string_lossy().to_string());
     let empty_title = match project_name {
-        Some(name) => format!("What should we build in {name}?"),
-        None => "What should we build?".to_string(),
+        Some(name) => store.tf("empty.title_in", &[&name]),
+        None => store.t("empty.title").to_string(),
     };
 
     rsx! {
@@ -132,7 +133,7 @@ pub fn MessageThread() -> Element {
                     class: "msg-empty",
                     {logo_mark()}
                     div { class: "big", "{empty_title}" }
-                    div { "Ask the agent to explore, plan, or make changes." }
+                    div { "{store.t(\"empty.subtitle\")}" }
                     { starter_cards(&store) }
                 }
             }
@@ -143,7 +144,7 @@ pub fn MessageThread() -> Element {
                 div {
                     class: "msg-meta",
                     {status_dot("generating")}
-                    "Working…"
+                    "{store.t(\"thread.working\")}"
                 }
             }
         }
@@ -193,11 +194,12 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
 /// Hero empty state: headline, subtitle and clickable starter cards that
 /// pre-fill the composer prompt.
 fn starter_cards(store: &UiStore) -> Element {
+    let t = |key| store.t(key);
     let starters = [
-        ("Explore codebase architecture", "Map the main modules, entry points and how data flows through the project."),
-        ("Review uncommitted git changes", "Run `git status` / `git diff` and review the pending changes for issues."),
-        ("Run and fix failing tests", "Run the test suite, diagnose failures and fix them."),
-        ("Draft a step-by-step plan", "Turn my task into an ordered, checkable plan before making changes."),
+        (t("starter.explore.title"), t("starter.explore.prompt")),
+        (t("starter.review.title"), t("starter.review.prompt")),
+        (t("starter.tests.title"), t("starter.tests.prompt")),
+        (t("starter.plan.title"), t("starter.plan.prompt")),
     ];
     rsx! {
         div {
@@ -223,6 +225,7 @@ fn starter_cards(store: &UiStore) -> Element {
 /// Collapsible reasoning panel shown above the assistant answer.
 #[component]
 fn ReasoningPanel(reasoning: String) -> Element {
+    let store: UiStore = use_context();
     let open = use_signal(|| false);
     rsx! {
         div {
@@ -235,7 +238,7 @@ fn ReasoningPanel(reasoning: String) -> Element {
                     open.set(!is_open);
                 },
                 {chevron(*open.read())}
-                span { "Thought · {reasoning.split_whitespace().count()} words" }
+                span { "{store.tf(\"thread.thought\", &[&reasoning.split_whitespace().count().to_string()])}" }
             }
             if *open.read() {
                 div {
@@ -251,15 +254,16 @@ fn ReasoningPanel(reasoning: String) -> Element {
 /// quiet until the message is hovered.
 #[component]
 fn MessageFooter(text: String, created_at: String) -> Element {
+    let store: UiStore = use_context();
     let mut copied = use_signal(|| false);
-    let age = super::sidebar::relative_age(&created_at);
+    let age = super::sidebar::relative_age(&created_at, store.lang());
     rsx! {
         div {
             class: "msg-footer",
             span { class: "msg-time", "{age}" }
             button {
                 class: "icon-btn",
-                title: "Copy message",
+                title: store.t("thread.copy"),
                 onclick: move |_| {
                     // The text travels as a JSON string literal, never concatenated raw.
                     let literal = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string());
@@ -284,43 +288,43 @@ fn chevron(open: bool) -> Element {
 }
 
 /// One-line summary of a turn's tool calls ("Ran 3 commands, edited 2 files").
-fn activity_summary(calls: &[ToolCallView]) -> String {
+fn activity_summary(calls: &[ToolCallView], lang: Lang) -> String {
     let count = |names: &[&str]| calls.iter().filter(|call| names.contains(&call.name.as_str())).count();
     let commands = count(&["run_command", "exec_command", "write_stdin"]);
     let edits = count(&["write_file", "edit_file", "apply_patch", "delete_file", "move_file"]);
     let other = calls.len() - commands - edits;
-    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let phrase = |n: usize, one: &'static str, many: &'static str, template: &'static str| {
+        let noun = i18n::t(lang, if n == 1 { one } else { many });
+        i18n::tf(lang, template, &[&n.to_string(), noun])
+    };
     let mut parts = Vec::new();
     if commands > 0 {
-        parts.push(("Ran", plural(commands, "command", "commands")));
+        parts.push(phrase(commands, "act.command", "act.commands", "act.ran"));
     }
     if edits > 0 {
-        parts.push(("Edited", plural(edits, "file", "files")));
+        parts.push(phrase(edits, "act.file", "act.files", "act.edited"));
     }
     if other > 0 {
-        parts.push(("Used", plural(other, "tool", "tools")));
+        parts.push(phrase(other, "act.tool", "act.tools", "act.used"));
     }
-    let mut text = String::new();
-    for (index, (verb, what)) in parts.iter().enumerate() {
-        if index > 0 {
-            text.push_str(", ");
-            text.push_str(&verb.to_lowercase());
-        } else {
-            text.push_str(verb);
+    // Only the first clause keeps its capital ("Ran 3 commands, edited 2 files").
+    for part in parts.iter_mut().skip(1) {
+        if let Some(first) = part.chars().next() {
+            let lower: String = first.to_lowercase().collect();
+            part.replace_range(..first.len_utf8(), &lower);
         }
-        text.push(' ');
-        text.push_str(what);
     }
-    text
+    parts.join(", ")
 }
 
 /// Agent activity of one assistant turn, collapsed into a muted one-line row
 /// that expands into the individual tool cards.
 #[component]
 fn ToolActivity(calls: Vec<ToolCallView>, depth: u8) -> Element {
+    let store: UiStore = use_context();
     let running = calls.iter().any(|call| call.response.is_none());
     let mut open = use_signal(|| running);
-    let summary = activity_summary(&calls);
+    let summary = activity_summary(&calls, store.lang());
     rsx! {
         div {
             class: "tool-group",
@@ -345,9 +349,10 @@ fn ToolActivity(calls: Vec<ToolCallView>, depth: u8) -> Element {
 /// One tool call: name, summarized args, status badge and collapsible output.
 #[component]
 fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
+    let store: UiStore = use_context();
     let open = use_signal(|| false);
     let done = call.response.is_some();
-    let status_text = if done { "done" } else { "running" };
+    let status_text = if done { store.t("tool.done") } else { store.t("tool.running") };
     let args_summary = summarize_args(&call.arguments);
     let response_text = call
         .response
@@ -403,7 +408,7 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
                     if !response_text.is_empty() {
                         div { class: "tool-output", "{response_text}" }
                     } else if done {
-                        div { class: "tool-output", "(no output)" }
+                        div { class: "tool-output", "{store.t(\"tool.no_output\")}" }
                     }
                 }
             }

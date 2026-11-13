@@ -3,6 +3,8 @@
 //! process live run-event streams.
 
 use dioxus::prelude::*;
+use crate::i18n::{self, Lang};
+use crate::prefs::{self, Appearance, ThemeChoice};
 use locagens_core::api::{self, EventRx};
 use locagens_core::db::{Plan, Project, Run, RunMessage};
 use locagens_core::pi_providers::ProviderMetadata;
@@ -44,10 +46,11 @@ pub enum SettingsTab {
     Mcp,
     Plugins,
     Security,
+    Appearance,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 8] = [
+    pub const ALL: [SettingsTab; 9] = [
         SettingsTab::Providers,
         SettingsTab::Auth,
         SettingsTab::Permissions,
@@ -56,18 +59,21 @@ impl SettingsTab {
         SettingsTab::Mcp,
         SettingsTab::Plugins,
         SettingsTab::Security,
+        SettingsTab::Appearance,
     ];
 
-    pub fn label(self) -> &'static str {
+    /// i18n key of the tab's label (see `crate::i18n`).
+    pub fn label_key(self) -> &'static str {
         match self {
-            SettingsTab::Providers => "Providers",
-            SettingsTab::Auth => "pi Auth",
-            SettingsTab::Permissions => "Permissions",
-            SettingsTab::Memory => "Memory",
-            SettingsTab::Skills => "Skills",
-            SettingsTab::Mcp => "MCP",
-            SettingsTab::Plugins => "Plugins",
-            SettingsTab::Security => "Security",
+            SettingsTab::Providers => "tab.providers",
+            SettingsTab::Auth => "tab.auth",
+            SettingsTab::Permissions => "tab.permissions",
+            SettingsTab::Memory => "tab.memory",
+            SettingsTab::Skills => "tab.skills",
+            SettingsTab::Mcp => "tab.mcp",
+            SettingsTab::Plugins => "tab.plugins",
+            SettingsTab::Security => "tab.security",
+            SettingsTab::Appearance => "tab.appearance",
         }
     }
 }
@@ -89,12 +95,13 @@ impl RightPanelTab {
         RightPanelTab::Terminal,
     ];
 
-    pub fn label(self) -> &'static str {
+    /// i18n key of the tab's label.
+    pub fn label_key(self) -> &'static str {
         match self {
-            RightPanelTab::Plan => "Plan",
-            RightPanelTab::Agents => "Agents",
-            RightPanelTab::Git => "Git",
-            RightPanelTab::Terminal => "Terminal",
+            RightPanelTab::Plan => "inspector.plan",
+            RightPanelTab::Agents => "inspector.agents",
+            RightPanelTab::Git => "inspector.git",
+            RightPanelTab::Terminal => "inspector.terminal",
         }
     }
 }
@@ -103,7 +110,10 @@ impl RightPanelTab {
 /// `Copy` so event-handler closures can capture it freely.
 #[derive(Clone, Copy)]
 pub struct UiStore {
-    pub dark_mode: Signal<bool>,
+    /// Persisted appearance preferences (language, theme, fonts, size).
+    pub appearance: Signal<Appearance>,
+    /// Live OS dark-mode state (only consulted for `ThemeChoice::System`).
+    pub system_dark: Signal<bool>,
     pub page: Signal<AppPage>,
     pub projects: Signal<Vec<Project>>,
     pub selected_project: Signal<Option<String>>,
@@ -133,6 +143,45 @@ pub struct UiStore {
 }
 
 impl UiStore {
+    /// The UI language (subscribes the calling component to changes).
+    pub fn lang(&self) -> Lang {
+        self.appearance.read().language
+    }
+
+    /// Translated static string for `key`.
+    pub fn t(&self, key: &'static str) -> &'static str {
+        i18n::t(self.lang(), key)
+    }
+
+    /// Translated string with `{0}`, `{1}`… replaced by `args`.
+    pub fn tf(&self, key: &'static str, args: &[&str]) -> String {
+        i18n::tf(self.lang(), key, args)
+    }
+
+    /// Whether the effective theme is dark (resolves `System`).
+    pub fn is_dark(&self) -> bool {
+        match self.appearance.read().theme {
+            ThemeChoice::Dark => true,
+            ThemeChoice::Light => false,
+            ThemeChoice::System => *self.system_dark.read(),
+        }
+    }
+
+    /// Applies and persists new appearance settings.
+    pub fn set_appearance(&self, next: Appearance) {
+        let mut store = *self;
+        prefs::save(&next);
+        store.appearance.set(next);
+    }
+
+    /// Header toggle: flips to the opposite of the effective theme, keeping
+    /// the Appearance setting in sync (System becomes an explicit choice).
+    pub fn toggle_theme(&self) {
+        let mut next = self.appearance.read().clone();
+        next.theme = if self.is_dark() { ThemeChoice::Light } else { ThemeChoice::Dark };
+        self.set_appearance(next);
+    }
+
     /// Initial load: projects, runs and the provider catalog (picking the
     /// first configured provider + its first model as defaults), then select
     /// the most recent project and its most recent run.
@@ -331,7 +380,7 @@ impl UiStore {
             "context_compacted" => {
                 let before = event.get("messagesBefore").and_then(Value::as_u64).unwrap_or(0);
                 let after = event.get("messagesAfter").and_then(Value::as_u64).unwrap_or(0);
-                store.toast(format!("Context compacted ({before} → {after} messages)"));
+                store.toast(store.tf("toast.compacted", &[&before.to_string(), &after.to_string()]));
             }
             "agent_spawned" => {
                 let agent_id = event.get("agentId").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -385,7 +434,7 @@ impl UiStore {
                 store.pending_permission.set(None);
                 store.pending_question.set(None);
                 if let Some(message) = event.get("errorMessage").and_then(Value::as_str) {
-                    store.toast(format!("Run failed: {message}"));
+                    store.toast(store.tf("toast.run_failed", &[message]));
                 }
             }
             // `round_started`, `run_started`, unknown event types — ignored.

@@ -26,6 +26,7 @@ struct SkillEditor {
 #[component]
 pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
     let mut tab = use_signal(|| initial_tab);
+    let store: UiStore = use_context();
 
     rsx! {
         div {
@@ -37,7 +38,7 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
-            h2 { "Settings" }
+            h2 { "{store.t(\"settings.title\")}" }
             button {
                 class: "subtle icon-btn",
                 // Clicks on the button must not start a window drag.
@@ -46,7 +47,7 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
                     let mut store: UiStore = use_context();
                     store.page.set(crate::state_ui::AppPage::Chat);
                 },
-                "← Back to Chat"
+                "← {store.t(\"common.back_to_chat\")}"
             }
         }
         div {
@@ -55,10 +56,10 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
                 class: "settings-nav",
                 for tab_item in crate::state_ui::SettingsTab::ALL.iter() {
                     button {
-                        key: "{tab_item.label()}",
+                        key: "{tab_item.label_key()}",
                         class: if *tab_item == *tab.read() { "active" } else { "" },
                         onclick: move |_| tab.set(*tab_item),
-                        "{tab_item.label()}"
+                        "{store.t(tab_item.label_key())}"
                     }
                 }
             }
@@ -73,6 +74,7 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
                     crate::state_ui::SettingsTab::Mcp => rsx! { McpTab {} },
                     crate::state_ui::SettingsTab::Plugins => rsx! { PluginsTab {} },
                     crate::state_ui::SettingsTab::Security => rsx! { SecurityTab {} },
+                    crate::state_ui::SettingsTab::Appearance => rsx! { super::appearance::AppearanceTab {} },
                 }
             }
         }
@@ -88,13 +90,13 @@ fn ProvidersTab() -> Element {
 
     if providers.is_empty() {
         return rsx! {
-            div { class: "settings-empty", "No providers configured. Add one via `lcgn auth login` or the provider config file (~/.locagens/auth.json, Codex-compatible with ~/.codex/auth.json)." }
+            div { class: "settings-empty", "{store.t(\"providers.none\")}" }
         };
     }
     rsx! {
         div {
             class: "panel-section-title",
-            "Providers ({providers.len()})"
+            "{store.t(\"tab.providers\")} ({providers.len()})"
         }
         for provider in providers.iter() {
             ProviderRow { provider: provider.clone(), selected: provider.id == selected_provider }
@@ -113,13 +115,13 @@ fn ProviderRow(provider: ProviderMetadata, selected: bool) -> Element {
                 div {
                     style: "font-weight:600",
                     "{provider.display_name} "
-                    if selected { span { class: "badge accent", "default" } }
+                    if selected { span { class: "badge accent", "{store.t(\"providers.default\")}" } }
                 }
                 div { class: "mono", style: "font-size:11px", "{provider.id} · {provider.kind}" }
             }
             div {
                 class: "badge",
-                "{provider.models.len()} models"
+                "{provider.models.len()} {store.t(\"providers.models\")}"
             }
             button {
                 onclick: move |_| {
@@ -129,7 +131,7 @@ fn ProviderRow(provider: ProviderMetadata, selected: bool) -> Element {
                         store.selected_model.set(model.clone());
                     }
                 },
-                "Use"
+                "{store.t(\"providers.use\")}"
             }
         }
     }
@@ -287,7 +289,7 @@ fn PermissionsTab() -> Element {
     let data = rules.read().clone();
     if data.is_empty() {
         return rsx! {
-            div { class: "settings-empty", "No standing permission grants yet. Approve with \"Always Allow\" / \"Allow in Project\" to create them." }
+            div { class: "settings-empty", "{store.t(\"perms.none\")}" }
         };
     }
     rsx! {
@@ -316,12 +318,12 @@ fn PermissionsTab() -> Element {
                                     if let Err(err) =
                                         locagens_core::api::permissions::delete_permission(&state, id).await
                                     {
-                                        store.toast(format!("Failed to delete rule: {err}"));
+                                        store.toast(store.tf("toast.delete_rule_failed", &[&err.to_string()]));
                                     }
                                     rules.set(locagens_core::api::permissions::list_permissions(&state).await.unwrap_or_default());
                                 });
                             },
-                            "Delete"
+                            "{store.t(\"common.delete\")}"
                         }
                     }
                 }
@@ -353,7 +355,7 @@ fn MemoryTab() -> Element {
         div {
             class: "composer-row-top",
             input {
-                placeholder: "Remember… (a fact the agent should always know)",
+                placeholder: store.t("memory.placeholder"),
                 value: "{new_memory.read()}",
                 oninput: move |event| new_memory.set(event.value()),
                 onkeydown: move |event: KeyboardEvent| {
@@ -373,7 +375,7 @@ fn MemoryTab() -> Element {
                                     },
                                 )
                                 .await {
-                                    store.toast(format!("Failed to save memory: {err}"));
+                                    store.toast(store.tf("toast.save_memory_failed", &[&err.to_string()]));
                                 }
                                 new_memory.set(String::new());
                                 memories.set(locagens_core::api::memory::list_memories(&state).await.unwrap_or_default());
@@ -384,7 +386,7 @@ fn MemoryTab() -> Element {
             }
         }
         if data.is_empty() {
-            div { class: "settings-empty", "No memories stored yet." }
+            div { class: "settings-empty", "{store.t(\"memory.none\")}" }
         }
         for memory in data.iter() {
             {
@@ -412,17 +414,17 @@ fn MemoryTab() -> Element {
                                         if let Err(err) =
                                             locagens_core::api::memory::update_memory(&state, id, &content).await
                                         {
-                                            store.toast(format!("Failed to update memory: {err}"));
+                                            store.toast(store.tf("toast.update_memory_failed", &[&err.to_string()]));
                                         }
                                         editing.set(None);
                                         memories.set(locagens_core::api::memory::list_memories(&state).await.unwrap_or_default());
                                     });
                                 },
-                                "Save"
+                                "{store.t(\"common.save\")}"
                             }
                             button {
                                 onclick: move |_| editing.set(None),
-                                "Cancel"
+                                "{store.t(\"common.cancel\")}"
                             }
                         } else {
                             div {
@@ -435,7 +437,7 @@ fn MemoryTab() -> Element {
                                     edit_text.set(memory_content.clone());
                                     editing.set(Some(id));
                                 },
-                                "Edit"
+                                "{store.t(\"common.edit\")}"
                             }
                             button {
                                 class: "danger",
@@ -444,12 +446,12 @@ fn MemoryTab() -> Element {
                                     spawn(async move {
                                         let state = core();
                                         if let Err(err) = locagens_core::api::memory::delete_memory(&state, id).await {
-                                            store.toast(format!("Failed to delete memory: {err}"));
+                                            store.toast(store.tf("toast.delete_memory_failed", &[&err.to_string()]));
                                         }
                                         memories.set(locagens_core::api::memory::list_memories(&state).await.unwrap_or_default());
                                     });
                                 },
-                                "Delete"
+                                "{store.t(\"common.delete\")}"
                             }
                         }
                     }
@@ -483,11 +485,11 @@ fn SkillsTab() -> Element {
     let selected_project = store.selected_project.read().clone();
     let project_label = selected_project
         .clone()
-        .unwrap_or_else(|| "no project selected".to_string());
+        .unwrap_or_else(|| store.t("skills.no_project").to_string());
 
     rsx! {
         div {
-            class: "panel-section-title", "Skills"
+            class: "panel-section-title", "{store.t(\"tab.skills\")}"
             span { style: "flex:1" }
             button {
                 class: "subtle",
@@ -498,7 +500,7 @@ fn SkillsTab() -> Element {
                         content: NEW_SKILL_TEMPLATE.to_string(),
                     }));
                 },
-                "+ New skill"
+                "+ {store.t(\"skills.new\")}"
             }
         }
         if let Some(edit_state) = editor_state {
@@ -506,7 +508,7 @@ fn SkillsTab() -> Element {
                 class: "panel-card",
                 div {
                     class: "panel-section-title",
-                    if let Some(name) = &edit_state.name { "Edit skill · {name}" } else { "New skill (SKILL.md)" }
+                    if let Some(name) = &edit_state.name { "{store.t(\"skills.edit\")} · {name}" } else { "{store.t(\"skills.new_md\")}" }
                 }
                 div {
                     class: "composer-row-top",
@@ -520,8 +522,8 @@ fn SkillsTab() -> Element {
                                 }
                             });
                         },
-                        option { value: "user", "user scope" }
-                        option { value: "project", "project scope" }
+                        option { value: "user", "{store.t(\"skills.user_scope\")}" }
+                        option { value: "project", "{store.t(\"skills.project_scope\")}" }
                     }
                     if edit_state.target == "project" {
                         span {
@@ -554,7 +556,7 @@ fn SkillsTab() -> Element {
                             spawn(async move {
                                 let state = core();
                                 if edit_state.target == "project" && project.is_none() {
-                                    store.toast("Select a project for project-scope skills.".to_string());
+                                    store.toast(store.t("skills.need_project").to_string());
                                     return;
                                 }
                                 let result = locagens_core::api::skills::install_skill(
@@ -568,27 +570,27 @@ fn SkillsTab() -> Element {
                                 .await;
                                 match result {
                                     Ok(skill) => {
-                                        store.toast(format!("Skill \"{}\" saved.", skill.name));
+                                        store.toast(store.tf("toast.skill_saved", &[&skill.name]));
                                         editor.set(None);
                                     }
-                                    Err(err) => store.toast(format!("Failed to save skill: {err}")),
+                                    Err(err) => store.toast(store.tf("toast.save_skill_failed", &[&err.to_string()])),
                                 }
                                 if let Ok(response) = locagens_core::api::skills::list_skills(&state, project.as_deref()).await {
                                     skills.set(response.skills);
                                 }
                             });
                         },
-                        "Save"
+                        "{store.t(\"common.save\")}"
                     }
                     button {
                         onclick: move |_| editor.set(None),
-                        "Cancel"
+                        "{store.t(\"common.cancel\")}"
                     }
                 }
             }
         }
         if data.is_empty() {
-            div { class: "settings-empty", "No skills found in the user or project skills directories." }
+            div { class: "settings-empty", "{store.t(\"skills.none\")}" }
         }
         for skill in data.iter() {
             {
@@ -625,7 +627,7 @@ fn SkillsTab() -> Element {
                                     content: edit_body.clone(),
                                 }));
                             },
-                            "Edit"
+                            "{store.t(\"common.edit\")}"
                         }
                         button {
                             class: "danger",
@@ -643,14 +645,14 @@ fn SkillsTab() -> Element {
                                         project.as_deref(),
                                     )
                                     .await {
-                                        store.toast(format!("Failed to delete skill: {err}"));
+                                        store.toast(store.tf("toast.delete_skill_failed", &[&err.to_string()]));
                                     }
                                     if let Ok(response) = locagens_core::api::skills::list_skills(&state, project.as_deref()).await {
                                         skills.set(response.skills);
                                     }
                                 });
                             },
-                            "Delete"
+                            "{store.t(\"common.delete\")}"
                         }
                     }
                 }
@@ -684,15 +686,15 @@ fn McpTab() -> Element {
     let transport_value = new_transport.read().clone();
     rsx! {
         div {
-            class: "panel-section-title", "MCP servers"
+            class: "panel-section-title", "{store.t(\"mcp.servers\")}"
         }
         div {
             class: "panel-card",
-            div { class: "panel-section-title", "Add server" }
+            div { class: "panel-section-title", "{store.t(\"mcp.add\")}" }
             div {
                 class: "composer-row-top",
                 input {
-                    placeholder: "name (lowercase-dash)",
+                    placeholder: store.t("mcp.name"),
                     value: "{new_name.read()}",
                     oninput: move |event| new_name.set(event.value()),
                 }
@@ -707,13 +709,13 @@ fn McpTab() -> Element {
                 class: "composer-row-top",
                 if transport_value == "stdio" {
                     input {
-                        placeholder: "command, e.g. npx some-mcp-server",
+                        placeholder: store.t("mcp.command"),
                         value: "{new_command.read()}",
                         oninput: move |event| new_command.set(event.value()),
                     }
                 } else {
                     input {
-                        placeholder: "https://… (SSE endpoint)",
+                        placeholder: store.t("mcp.url"),
                         value: "{new_url.read()}",
                         oninput: move |event| new_url.set(event.value()),
                     }
@@ -758,7 +760,7 @@ fn McpTab() -> Element {
                             }
                         });
                     },
-                    "Save server"
+                    "{store.t(\"mcp.save\")}"
                 }
             }
             if !error.read().is_empty() {
@@ -766,7 +768,7 @@ fn McpTab() -> Element {
             }
         }
         if data.is_empty() {
-            div { class: "settings-empty", "No MCP servers configured. Add one above or edit mcp.json directly." }
+            div { class: "settings-empty", "{store.t(\"mcp.none\")}" }
         }
         for server in data.iter() {
             {
@@ -789,10 +791,10 @@ fn McpTab() -> Element {
                             div {
                                 style: "font-weight:600",
                                 "{name} "
-                                span { class: if enabled { "badge ok" } else { "badge" }, if enabled { "enabled" } else { "disabled" } }
+                                span { class: if enabled { "badge ok" } else { "badge" }, if enabled { "{store.t(\"common.enabled\")}" } else { "{store.t(\"common.disabled\")}" } }
                                 span { class: "badge", "{transport} · {scope}" }
                             }
-                            div { class: "mono", style: "font-size:11px", "{detail} · {tool_count} tools" }
+                            div { class: "mono", style: "font-size:11px", "{detail} · {tool_count} {store.t(\"mcp.tools\")}" }
                             if let Some(err) = server.error.clone() {
                                 div { class: "badge err", "{err}" }
                             }
@@ -807,14 +809,14 @@ fn McpTab() -> Element {
                                     if let Err(err) =
                                         locagens_core::api::mcp::toggle_mcp_server(&state, &toggle_name, toggle_enabled, None).await
                                     {
-                                        store.toast(format!("Toggle failed: {err}"));
+                                        store.toast(store.tf("toast.toggle_failed", &[&err.to_string()]));
                                     }
                                     if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
                                         servers.set(response.servers);
                                     }
                                 });
                             },
-                            if enabled { "Disable" } else { "Enable" }
+                            if enabled { "{store.t(\"common.disable\")}" } else { "{store.t(\"common.enable\")}" }
                         }
                         button {
                             class: "danger",
@@ -826,14 +828,14 @@ fn McpTab() -> Element {
                                     if let Err(err) =
                                         locagens_core::api::mcp::delete_mcp_server(&state, &delete_name, None).await
                                     {
-                                        store.toast(format!("Delete failed: {err}"));
+                                        store.toast(store.tf("toast.delete_failed", &[&err.to_string()]));
                                     }
                                     if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
                                         servers.set(response.servers);
                                     }
                                 });
                             },
-                            "Delete"
+                            "{store.t(\"common.delete\")}"
                         }
                     }
                 }
@@ -864,17 +866,17 @@ fn PluginsTab() -> Element {
     let selected_template_value = selected_template.read().clone();
     rsx! {
         div {
-            class: "panel-section-title", "Plugins"
+            class: "panel-section-title", "{store.t(\"tab.plugins\")}"
         }
         div {
             class: "panel-card",
-            div { class: "panel-section-title", "Install" }
+            div { class: "panel-section-title", "{store.t(\"plugins.install\")}" }
             div {
                 class: "composer-row-top",
                 select {
                     value: "{selected_template_value}",
                     onchange: move |event| selected_template.set(event.value()),
-                    option { value: "", "Choose a template…" }
+                    option { value: "", "{store.t(\"plugins.choose\")}" }
                     for template in templates.iter() {
                         {
                             let template_id = template.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -908,21 +910,21 @@ fn PluginsTab() -> Element {
                             )
                             .await;
                             match result {
-                                Ok(plugin) => store.toast(format!("Installed \"{}\".", plugin.get("name").and_then(Value::as_str).unwrap_or("plugin"))),
-                                Err(err) => store.toast(format!("Install failed: {err}")),
+                                Ok(plugin) => store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or("plugin")])),
+                                Err(err) => store.toast(store.tf("toast.install_failed", &[&err.to_string()])),
                             }
                             if let Ok(response) = locagens_core::api::plugins::list_plugins(&state, None).await {
                                 data.set((response.plugins, response.templates));
                             }
                         });
                     },
-                    "Install template"
+                    "{store.t(\"plugins.install_template\")}"
                 }
             }
             div {
                 class: "composer-row-top",
                 input {
-                    placeholder: "Local plugin folder (absolute path)…",
+                    placeholder: store.t("plugins.local_path"),
                     value: "{local_path.read()}",
                     oninput: move |event| local_path.set(event.value()),
                 }
@@ -945,22 +947,22 @@ fn PluginsTab() -> Element {
                             .await;
                             match result {
                                 Ok(plugin) => {
-                                    store.toast(format!("Installed \"{}\".", plugin.get("name").and_then(Value::as_str).unwrap_or("plugin")));
+                                    store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or("plugin")]));
                                     local_path.set(String::new());
                                 }
-                                Err(err) => store.toast(format!("Install failed: {err}")),
+                                Err(err) => store.toast(store.tf("toast.install_failed", &[&err.to_string()])),
                             }
                             if let Ok(response) = locagens_core::api::plugins::list_plugins(&state, None).await {
                                 data.set((response.plugins, response.templates));
                             }
                         });
                     },
-                    "Install local"
+                    "{store.t(\"plugins.install_local\")}"
                 }
             }
         }
         if plugins.is_empty() {
-            div { class: "settings-empty", "No plugins installed. Install a template above." }
+            div { class: "settings-empty", "{store.t(\"plugins.none\")}" }
         }
         for plugin in plugins.iter() {
             {
@@ -979,7 +981,7 @@ fn PluginsTab() -> Element {
                             div {
                                 style: "font-weight:600",
                                 "{name} "
-                                span { class: if enabled { "badge ok" } else { "badge" }, if enabled { "enabled" } else { "disabled" } }
+                                span { class: if enabled { "badge ok" } else { "badge" }, if enabled { "{store.t(\"common.enabled\")}" } else { "{store.t(\"common.disabled\")}" } }
                                 span { class: "badge", "{scope}" }
                             }
                             div { class: "mono", style: "font-size:11px", "{id}" }
@@ -1001,14 +1003,14 @@ fn PluginsTab() -> Element {
                                         },
                                     )
                                     .await {
-                                        store.toast(format!("Toggle failed: {err}"));
+                                        store.toast(store.tf("toast.toggle_failed", &[&err.to_string()]));
                                     }
                                     if let Ok(response) = locagens_core::api::plugins::list_plugins(&state, None).await {
                                         data.set((response.plugins, response.templates));
                                     }
                                 });
                             },
-                            if enabled { "Disable" } else { "Enable" }
+                            if enabled { "{store.t(\"common.disable\")}" } else { "{store.t(\"common.enable\")}" }
                         }
                         button {
                             class: "danger",
@@ -1018,14 +1020,14 @@ fn PluginsTab() -> Element {
                                 spawn(async move {
                                     let state = core();
                                     if let Err(err) = locagens_core::api::plugins::delete_plugin(&state, &delete_id, Some("user"), None).await {
-                                        store.toast(format!("Uninstall failed: {err}"));
+                                        store.toast(store.tf("toast.uninstall_failed", &[&err.to_string()]));
                                     }
                                     if let Ok(response) = locagens_core::api::plugins::list_plugins(&state, None).await {
                                         data.set((response.plugins, response.templates));
                                     }
                                 });
                             },
-                            "Uninstall"
+                            "{store.t(\"plugins.uninstall\")}"
                         }
                     }
                 }
@@ -1051,18 +1053,18 @@ fn SecurityTab() -> Element {
     let data = status.read().clone();
     rsx! {
         div {
-            class: "panel-section-title", "Security"
+            class: "panel-section-title", "{store.t(\"tab.security\")}"
         }
         match data {
             Some(security) => rsx! {
                 div {
                     class: "panel-card",
                     div {
-                        class: "panel-section-title", "Command sandbox"
+                        class: "panel-section-title", "{store.t(\"security.sandbox\")}"
                     }
                     div {
-                        "Platform: " span { class: "mono", "{security.sandbox.platform}" }
-                        " · Status: "
+                        "{store.t(\"security.platform\")}: " span { class: "mono", "{security.sandbox.platform}" }
+                        " · {store.t(\"security.status\")}: "
                         span {
                             class: if security.sandbox.status == "ready" { "badge ok" } else { "badge warn" },
                             "{security.sandbox.status}"
@@ -1086,13 +1088,13 @@ fn SecurityTab() -> Element {
                 div {
                     class: "panel-card",
                     div {
-                        class: "panel-section-title", "Workspace policy"
+                        class: "panel-section-title", "{store.t(\"security.policy\")}"
                     }
-                    div { "Command network: " span { class: "mono", "{security.policy.command_network}" } }
-                    div { "Workspace writes only: " span { class: "mono", "{security.policy.workspace_writes_only}" } }
+                    div { "{store.t(\"security.network\")}: " span { class: "mono", "{security.policy.command_network}" } }
+                    div { "{store.t(\"security.writes_only\")}: " span { class: "mono", "{security.policy.workspace_writes_only}" } }
                     div {
-                        "API bind address: " span { class: "mono", "{security.api.bind_address}" }
-                        " · authenticated: " span { class: "mono", "{security.api.authenticated}" }
+                        "{store.t(\"security.bind\")}: " span { class: "mono", "{security.api.bind_address}" }
+                        " · {store.t(\"security.authenticated\")}: " span { class: "mono", "{security.api.authenticated}" }
                     }
                 }
                 if security.sandbox.can_install {
@@ -1103,16 +1105,16 @@ fn SecurityTab() -> Element {
                             spawn(async move {
                                 match locagens_core::api::security::setup_sandbox(true).await {
                                     Ok(updated) => status.set(Some(updated)),
-                                    Err(err) => store.toast(format!("Sandbox setup failed: {err}")),
+                                    Err(err) => store.toast(store.tf("toast.sandbox_failed", &[&err.to_string()])),
                                 }
                             });
                         },
-                        "Run Windows sandbox setup"
+                        "{store.t(\"security.setup\")}"
                     }
                 }
             },
             None => rsx! {
-                div { class: "settings-empty", "Security status unavailable." }
+                div { class: "settings-empty", "{store.t(\"security.unavailable\")}" }
             },
         }
     }

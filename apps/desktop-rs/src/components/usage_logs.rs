@@ -51,10 +51,10 @@ pub fn UsageLogsPage() -> Element {
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
-            h2 { "Usage Logs" }
+            h2 { "{store.t(\"usage.title\")}" }
             input {
                 r#type: "search",
-                placeholder: "Search provider / model / run…",
+                placeholder: store.t("usage.search"),
                 value: "{search.read()}",
                 oninput: move |event| {
                     search.set(event.value());
@@ -69,7 +69,7 @@ pub fn UsageLogsPage() -> Element {
                     let mut store = store;
                     store.page.set(crate::state_ui::AppPage::Chat);
                 },
-                {icon_arrow_left()} "Back to Chat"
+                {icon_arrow_left()} "{store.t(\"common.back_to_chat\")}"
             }
         }
         div {
@@ -79,37 +79,37 @@ pub fn UsageLogsPage() -> Element {
                 div {
                     class: "metric-card",
                     span { class: "metric-value", "{metrics.as_ref().map(|m| fmt_cost(m.total_cost)).unwrap_or_default()}" }
-                    span { class: "metric-label", "Total cost" }
+                    span { class: "metric-label", "{store.t(\"usage.total_cost\")}" }
                 }
                 div {
                     class: "metric-card",
                     span { class: "metric-value", "{metrics.as_ref().map(|m| m.total_calls.to_string()).unwrap_or_default()}" }
-                    span { class: "metric-label", "Model calls" }
+                    span { class: "metric-label", "{store.t(\"usage.model_calls\")}" }
                 }
                 div {
                     class: "metric-card",
                     span { class: "metric-value", "{metrics.as_ref().map(|m| fmt_tokens(m.total_tokens)).unwrap_or_default()}" }
-                    span { class: "metric-label", "Tokens" }
+                    span { class: "metric-label", "{store.t(\"usage.tokens\")}" }
                 }
                 div {
                     class: "metric-card",
                     span { class: "metric-value", "{cache_label}" }
-                    span { class: "metric-label", "Avg cache hit" }
+                    span { class: "metric-label", "{store.t(\"usage.avg_cache\")}" }
                 }
             }
             table {
                 class: "data-table",
                 thead {
                     tr {
-                        th { "When" }
-                        th { "Run" }
-                        th { "Role" }
-                        th { "Provider" }
-                        th { "Model" }
-                        th { "In" }
-                        th { "Out" }
-                        th { "Cache" }
-                        th { "Cost" }
+                        th { "{store.t(\"usage.when\")}" }
+                        th { "{store.t(\"usage.run\")}" }
+                        th { "{store.t(\"usage.role\")}" }
+                        th { "{store.t(\"common.provider\")}" }
+                        th { "{store.t(\"common.model\")}" }
+                        th { "{store.t(\"usage.in\")}" }
+                        th { "{store.t(\"usage.out\")}" }
+                        th { "{store.t(\"usage.cache\")}" }
+                        th { "{store.t(\"usage.cost\")}" }
                     }
                 }
                 tbody {
@@ -118,14 +118,14 @@ pub fn UsageLogsPage() -> Element {
                     }
                     if logs.is_empty() {
                         tr {
-                            td { class: "empty-cell", colspan: "9", "No usage entries yet." }
+                            td { class: "empty-cell", colspan: "9", "{store.t(\"usage.empty\")}" }
                         }
                     }
                 }
             }
             div {
                 class: "usage-toolbar",
-                span { class: "composer-hint", "{total} entries" }
+                span { class: "composer-hint", "{total} {store.t(\"usage.entries\")}" }
                 button {
                     disabled: *offset.read() <= 0,
                     onclick: move |_| {
@@ -133,7 +133,7 @@ pub fn UsageLogsPage() -> Element {
                         let current = *offset.read();
                         offset.set((current - PAGE_SIZE).max(0));
                     },
-                    {icon_arrow_left()} "Prev"
+                    {icon_arrow_left()} "{store.t(\"common.prev\")}"
                 }
                 button {
                     disabled: *offset.read() + PAGE_SIZE >= total as i64,
@@ -142,7 +142,7 @@ pub fn UsageLogsPage() -> Element {
                         let current = *offset.read();
                         offset.set(current + PAGE_SIZE);
                     },
-                    "Next" {icon_arrow_right()}
+                    "{store.t(\"common.next\")}" {icon_arrow_right()}
                 }
             }
         }

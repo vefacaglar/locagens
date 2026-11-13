@@ -1,5 +1,6 @@
 //! UI components of the desktop app.
 
+pub mod appearance;
 pub mod cards;
 pub mod chat_header;
 pub mod composer;
@@ -13,17 +14,17 @@ pub mod usage_logs;
 use dioxus::prelude::*;
 use locagens_core::db::Run;
 
-/// Human label for a run status.
-pub fn status_label(status: &str) -> &'static str {
+/// i18n key of the human label for a run status.
+pub fn status_key(status: &str) -> &'static str {
     match status {
-        "created" => "Starting",
-        "generating" => "Running",
-        "awaiting_permission" => "Awaiting approval",
-        "awaiting_input" => "Awaiting answer",
-        "done" => "Done",
-        "failed" => "Failed",
-        "cancelled" => "Cancelled",
-        _ => "Unknown",
+        "created" => "status.created",
+        "generating" => "status.generating",
+        "awaiting_permission" => "status.awaiting_permission",
+        "awaiting_input" => "status.awaiting_input",
+        "done" => "status.done",
+        "failed" => "status.failed",
+        "cancelled" => "status.cancelled",
+        _ => "status.unknown",
     }
 }
 
@@ -41,8 +42,9 @@ pub fn run_active(run: Option<&Run>) -> bool {
 /// Small status dot with the human status as tooltip; the colour comes from
 /// the `.status-dot.<status>` theme classes.
 pub fn status_dot(status: &str) -> Element {
+    let store: crate::state_ui::UiStore = use_context();
     rsx! {
-        span { class: "status-dot {status}", title: "{status_label(status)}" }
+        span { class: "status-dot {status}", title: "{store.t(status_key(status))}" }
     }
 }
 
@@ -71,6 +73,7 @@ pub fn Toast() -> Element {
 /// its native traffic lights.
 #[component]
 pub fn WindowControls() -> Element {
+    let store: crate::state_ui::UiStore = use_context();
     let window = dioxus::desktop::use_window();
     let mut maximized = use_signal(|| false);
     // The window can also be maximized by double-clicking a header strip or
@@ -96,7 +99,7 @@ pub fn WindowControls() -> Element {
             class: "window-controls",
             button {
                 class: "win-btn",
-                title: "Minimize",
+                title: store.t("window.minimize"),
                 onclick: {
                     let window = window.clone();
                     move |_| window.set_minimized(true)
@@ -105,7 +108,7 @@ pub fn WindowControls() -> Element {
             }
             button {
                 class: "win-btn",
-                title: if is_maximized { "Restore" } else { "Maximize" },
+                title: if is_maximized { store.t("window.restore") } else { store.t("window.maximize") },
                 onclick: {
                     let window = window.clone();
                     move |_| window.toggle_maximized()
@@ -114,7 +117,7 @@ pub fn WindowControls() -> Element {
             }
             button {
                 class: "win-btn win-close",
-                title: "Close",
+                title: store.t("window.close"),
                 onclick: {
                     let window = window.clone();
                     move |_| window.close()
