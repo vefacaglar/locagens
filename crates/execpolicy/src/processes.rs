@@ -2,7 +2,9 @@
 //!
 //! Spawns shell commands inside a project directory, streams stdout/stderr into
 //! a bounded in-memory log ring, tracks lifecycle state, and kills the whole
-//! process tree on shutdown requests (`taskkill /T /F` on Windows, `kill -9`).
+//! process tree on shutdown requests (`taskkill /T /F` on Windows, `SIGKILL`
+//! on the process group on Unix). Interactive exec sessions can run piped or
+//! on a real pseudo-terminal (PTY) so TTY-aware programs behave.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,6 +13,49 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
+
+/// Options controlling how a child process is spawned.
+#[derive(Clone, Debug, Default)]
+pub struct SpawnOptions {
+    /// Pipe the child's stdin so interactive sessions can feed characters.
+    pub stdin_pipe: bool,
+    /// Allocate a pseudo-terminal (Unix) instead of separate pipes.
+    pub tty: bool,
+    /// Start the child with a cleared environment (secret-stripped exec
+    /// sessions).
+    pub env_clean: bool,
+    /// Shell program to use (defaults to the platform shell).
+    pub shell: Option<String>,
+    /// Run the shell as a login shell (`-lc`).
+    pub login: bool,
+    /// Extra environment variables for the child.
+    pub env: Option<HashMap<String, String>>,
+    /// Native sandbox to wrap the child in (Seatbelt / Bubblewrap).
+    pub sandbox: Option<crate::sandbox::SandboxSpec>,
+}
+
+/// The writable stdin end of a managed child.
+enum StdinSink {
+    /// A plain piped stdin (`ChildStdin`).
+    Pipe(ChildStdin),
+    /// The PTY master, written by a dedicated writer task.
+    Pty(tokio::sync::mpsc::UnboundedSender<Vec<u8>>),
+}
+
+/// Resolves the shell program and flag used to run `command`.
+fn shell_for_options(options: &SpawnOptions, command: &str) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
+    } else {
+        let shell = options
+            .shell
+            .clone()
+            .filter(|shell| !shell.trim().is_empty())
+            .unwrap_or_else(|| "sh".to_string());
+        let flag = if options.login { "-lc" } else { "-c" };
+        (shell, vec![flag.to_string(), command.to_string()])
+    }
+}
 
 const MAX_LOGS_PER_PROCESS: usize = 2000;
 
@@ -56,14 +101,9 @@ struct Managed {
     logs: Vec<ProcessLogEntry>,
     command: String,
     project_path: PathBuf,
-    env: HashMap<String, String>,
-    /// Interactive stdin pipe (only for `spawn_with_stdin` sessions).
-    stdin: Option<ChildStdin>,
-    /// Whether this session was spawned with a piped stdin.
-    stdin_pipe: bool,
-    /// When true the child starts with a cleared environment and only the
-    /// (secret-stripped) variables supplied in `env` — used by exec sessions.
-    env_clean: bool,
+    options: SpawnOptions,
+    /// Writable stdin end (pipe or PTY writer) for interactive sessions.
+    stdin: Option<StdinSink>,
     /// Read cursor into `logs` for incremental `poll_output` calls.
     read_cursor: usize,
 }
@@ -110,36 +150,14 @@ impl ProcessManager {
         project_path: PathBuf,
         env: Option<HashMap<String, String>>,
     ) -> ProcessInfo {
-        let id = format!(
-            "proc-{}-{}",
-            chrono::Utc::now().timestamp_millis(),
-            self.counter.fetch_add(1, Ordering::Relaxed)
-        );
-        let info = ProcessInfo {
-            id: id.clone(),
-            command: command.trim().to_string(),
-            project_path: project_path.to_string_lossy().to_string(),
-            status: "running".to_string(),
-            started_at: now_iso(),
-            stopped_at: None,
-            exit_code: None,
-            pid: None,
-        };
-
-        let managed = Arc::new(Mutex::new(Managed {
-            info: info.clone(),
-            logs: Vec::new(),
-            command: command.trim().to_string(),
-            project_path: project_path.clone(),
-            env: env.unwrap_or_default(),
-            stdin: None,
-            stdin_pipe: false,
-            env_clean: false,
-            read_cursor: 0,
-        }));
-        self.lock_processes().insert(id.clone(), managed);
-        self.start_child(&id);
-        self.get(&id).unwrap_or(info)
+        self.spawn_with_options(
+            command,
+            project_path,
+            SpawnOptions {
+                env,
+                ..SpawnOptions::default()
+            },
+        )
     }
 
     /// Like [`spawn`](Self::spawn) but pipes the child's stdin so interactive
@@ -149,6 +167,26 @@ impl ProcessManager {
         command: &str,
         project_path: PathBuf,
         env: Option<HashMap<String, String>>,
+    ) -> ProcessInfo {
+        self.spawn_with_options(
+            command,
+            project_path,
+            SpawnOptions {
+                stdin_pipe: true,
+                env_clean: true,
+                env,
+                ..SpawnOptions::default()
+            },
+        )
+    }
+
+    /// Spawns a process with full control over the spawn options (piped or
+    /// TTY stdio, shell, login shell, environment, native sandbox).
+    pub fn spawn_with_options(
+        self: &Arc<Self>,
+        command: &str,
+        project_path: PathBuf,
+        options: SpawnOptions,
     ) -> ProcessInfo {
         let id = format!(
             "proc-{}-{}",
@@ -165,15 +203,14 @@ impl ProcessManager {
             exit_code: None,
             pid: None,
         };
+
         let managed = Arc::new(Mutex::new(Managed {
             info: info.clone(),
             logs: Vec::new(),
             command: command.trim().to_string(),
             project_path,
-            env: env.unwrap_or_default(),
+            options,
             stdin: None,
-            stdin_pipe: true,
-            env_clean: true,
             read_cursor: 0,
         }));
         self.lock_processes().insert(id.clone(), managed);
@@ -181,33 +218,32 @@ impl ProcessManager {
         self.get(&id).unwrap_or(info)
     }
 
-    /// Writes characters to an interactive session's stdin.
+    /// Writes characters to an interactive session's stdin (pipe or PTY).
     pub async fn write_stdin(&self, id: &str, chars: &str) -> bool {
         let Some(managed) = self.get_arc(id) else {
             return false;
         };
-        let mut pipe = {
+        let sink = {
             let mut m = managed.lock().expect("managed process poisoned");
             m.stdin.take()
         };
-        if pipe.is_none() {
+        let Some(sink) = sink else {
             return false;
-        }
-        let result = match pipe.as_mut() {
-            Some(stdin) => {
-                let write = stdin.write_all(chars.as_bytes()).await;
-                if write.is_ok() {
-                    stdin.flush().await.is_ok()
-                } else {
-                    false
-                }
-            }
-            None => false,
         };
-        // Only put the pipe back when the write succeeded (broken pipes are
+        let (result, sink) = match sink {
+            StdinSink::Pipe(mut pipe) => {
+                let ok = pipe.write_all(chars.as_bytes()).await.is_ok() && pipe.flush().await.is_ok();
+                (ok, StdinSink::Pipe(pipe))
+            }
+            StdinSink::Pty(sender) => {
+                let ok = sender.send(chars.as_bytes().to_vec()).is_ok();
+                (ok, StdinSink::Pty(sender))
+            }
+        };
+        // Only put the sink back when the write succeeded (broken pipes are
         // dropped so later writes fail fast).
         if result {
-            managed.lock().expect("managed process poisoned").stdin = pipe;
+            managed.lock().expect("managed process poisoned").stdin = Some(sink);
         }
         result
     }
@@ -245,24 +281,46 @@ impl ProcessManager {
         let Some(managed) = self.get_arc(id) else {
             return;
         };
-        let (command, project_path, env) = {
+        let (command, project_path, options) = {
             let m = managed.lock().expect("managed process poisoned");
-            (m.command.clone(), m.project_path.clone(), m.env.clone())
+            (m.command.clone(), m.project_path.clone(), m.options.clone())
         };
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = tokio::process::Command::new("cmd");
-            c.arg("/C").arg(&command);
-            c
-        } else {
-            let mut c = tokio::process::Command::new("sh");
-            c.arg("-c").arg(&command);
-            c
-        };
-        let stdin_piped = managed.lock().expect("managed process poisoned").stdin_pipe;
+        #[cfg(unix)]
+        {
+            if options.tty {
+                return self.start_pty_child(id, &command, project_path, &options);
+            }
+        }
+        self.start_pipe_child(id, &command, project_path, &options);
+    }
+
+    /// Pipe-based spawn: shell → wrapped sandbox → separate stdin/stdout/
+    /// stderr pipes.
+    fn start_pipe_child(
+        self: &Arc<Self>,
+        id: &str,
+        command: &str,
+        project_path: PathBuf,
+        options: &SpawnOptions,
+    ) {
+        let (shell_prog, shell_args) = shell_for_options(options, command);
+        let (program, prog_args) = crate::sandbox::wrap_shell_command(
+            &shell_prog,
+            &shell_args,
+            options.sandbox.as_ref(),
+        );
+
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(&prog_args);
+        #[cfg(unix)]
+        {
+            // The child leads its own process group so tree kills work.
+            cmd.process_group(0);
+        }
         cmd.current_dir(&project_path)
             .env("FORCE_COLOR", "1")
-            .stdin(if stdin_piped {
+            .stdin(if options.stdin_pipe {
                 std::process::Stdio::piped()
             } else {
                 std::process::Stdio::null()
@@ -270,13 +328,12 @@ impl ProcessManager {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(false);
-        let env_clean = managed.lock().expect("managed process poisoned").env_clean;
-        if env_clean {
+        if options.env_clean {
             // Exec sessions start from a stripped environment: secrets never
             // reach child processes.
             cmd.env_clear();
         }
-        for (key, value) in &env {
+        for (key, value) in options.env.clone().unwrap_or_default() {
             cmd.env(key, value);
         }
 
@@ -285,9 +342,16 @@ impl ProcessManager {
                 let pid = child.id();
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
-                let stdin = if stdin_piped { child.stdin.take() } else { None };
+                let stdin = if options.stdin_pipe {
+                    child.stdin.take().map(StdinSink::Pipe)
+                } else {
+                    None
+                };
                 {
-                    let mut m = managed.lock().expect("managed process poisoned");
+                    let managed_arc = self.get_arc(id).unwrap();
+                let mut m = managed_arc
+                        .lock()
+                        .expect("managed process poisoned");
                     m.info.pid = pid;
                     m.info.status = "running".to_string();
                     m.info.stopped_at = None;
@@ -316,11 +380,189 @@ impl ProcessManager {
                 });
             }
             Err(err) => {
-                let mut m = managed.lock().expect("managed process poisoned");
+                let managed_arc = self.get_arc(id).unwrap();
+                let mut m = managed_arc
+                    .lock()
+                    .expect("managed process poisoned");
                 m.info.status = "error".to_string();
                 m.info.stopped_at = Some(now_iso());
                 drop(m);
                 self.append_log(id, "system", &format!("[Failed to spawn process: {err}]"));
+            }
+        }
+    }
+
+    /// PTY spawn (Unix): the shell runs with its stdio attached to a real
+    /// pseudo-terminal so TTY-aware programs behave. Falls back gracefully
+    /// to piped stdio when `openpty` fails.
+    #[cfg(unix)]
+    fn start_pty_child(
+        self: &Arc<Self>,
+        id: &str,
+        command: &str,
+        project_path: PathBuf,
+        options: &SpawnOptions,
+    ) {
+        use std::os::unix::io::FromRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let (shell_prog, shell_args) = shell_for_options(options, command);
+        let (program, prog_args) = crate::sandbox::wrap_shell_command(
+            &shell_prog,
+            &shell_args,
+            options.sandbox.as_ref(),
+        );
+
+        let mut master_fd: libc::c_int = -1;
+        let mut slave_fd: libc::c_int = -1;
+        let mut winsize = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let opened = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut winsize,
+            )
+        };
+        if opened != 0 {
+            // Graceful fallback: no PTY available, use piped stdio.
+            return self.start_pipe_child(id, command, project_path, options);
+        }
+
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(&prog_args).current_dir(&project_path);
+        if options.env_clean {
+            cmd.env_clear();
+        }
+        for (key, value) in options.env.clone().unwrap_or_default() {
+            cmd.env(key, value);
+        }
+        unsafe {
+            // The slave end becomes the child's stdio; each dup is owned by
+            // the resulting `Stdio` from here on.
+            cmd.stdin(std::process::Stdio::from_raw_fd(libc::dup(slave_fd)));
+            cmd.stdout(std::process::Stdio::from_raw_fd(libc::dup(slave_fd)));
+            cmd.stderr(std::process::Stdio::from_raw_fd(libc::dup(slave_fd)));
+        }
+        unsafe {
+            cmd.pre_exec(|| {
+                // New session + controlling terminal so the child behaves
+                // like a foreground TTY program.
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, std::ptr::null::<libc::c_void>());
+                Ok::<(), std::io::Error>(())
+            });
+        }
+
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let pid = child.id();
+                unsafe { libc::close(slave_fd) };
+
+                // Writer task: stdin writes flow through an unbounded channel
+                // into the PTY master from a dedicated blocking thread.
+                let (stdin_tx, mut stdin_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                let writer_fd = unsafe { libc::dup(master_fd) };
+                std::thread::spawn(move || {
+                    let mut file = unsafe { std::fs::File::from_raw_fd(writer_fd) };
+                    use std::io::Write as _;
+                    while let Some(bytes) = stdin_rx.blocking_recv() {
+                        if file.write_all(&bytes).is_err() || file.flush().is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                // Reader thread: PTY master → log ring.
+                let reader_fd = unsafe { libc::dup(master_fd) };
+                let this = Arc::clone(self);
+                let id_owned = id.to_string();
+                std::thread::spawn(move || {
+                    let mut file = unsafe { std::fs::File::from_raw_fd(reader_fd) };
+                    let mut buf = [0u8; 4096];
+                    use std::io::Read as _;
+                    loop {
+                        match file.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                                this.append_log(&id_owned, "stdout", &text);
+                            }
+                        }
+                    }
+                });
+
+                {
+                    let managed_arc = self.get_arc(id).unwrap();
+                    let mut m = managed_arc
+                        .lock()
+                        .expect("managed process poisoned");
+                    m.info.pid = Some(pid);
+                    m.info.status = "running".to_string();
+                    m.info.stopped_at = None;
+                    m.info.exit_code = None;
+                    m.stdin = Some(StdinSink::Pty(stdin_tx));
+                }
+                self.append_log(
+                    id,
+                    "system",
+                    &format!("[Process started with PID {pid} (tty)]"),
+                );
+
+                // Exit monitor thread (uniform bookkeeping with pipe spawns).
+                let this = Arc::clone(self);
+                let id_owned = id.to_string();
+                std::thread::spawn(move || {
+                    let code = child.wait().ok().and_then(|status| status.code());
+                    this.finish_exit(&id_owned, code);
+                });
+
+                // The master fd is kept alive by the reader/writer threads;
+                // drop our own handle in the parent now.
+                unsafe { libc::close(master_fd) };
+            }
+            Err(err) => {
+                unsafe {
+                    libc::close(slave_fd);
+                    libc::close(master_fd);
+                }
+                let managed_arc = self.get_arc(id).unwrap();
+                let mut m = managed_arc
+                    .lock()
+                    .expect("managed process poisoned");
+                m.info.status = "error".to_string();
+                m.info.stopped_at = Some(now_iso());
+                drop(m);
+                self.append_log(id, "system", &format!("[Failed to spawn process: {err}]"));
+            }
+        }
+    }
+
+    /// Records a natural (or killed-then-waited) exit for a session.
+    fn finish_exit(self: &Arc<Self>, id: &str, code: Option<i32>) {
+        if let Some(managed) = self.get_arc(id) {
+            let mut m = managed.lock().expect("managed process poisoned");
+            if m.info.status == "running" {
+                m.info.status = "stopped".to_string();
+                m.info.exit_code = code;
+                m.info.stopped_at = Some(now_iso());
+                drop(m);
+                self.append_log(
+                    id,
+                    "system",
+                    &format!(
+                        "[Process exited with code {}]",
+                        code.map(|c| c.to_string())
+                            .unwrap_or_else(|| "null".to_string())
+                    ),
+                );
             }
         }
     }
@@ -476,11 +718,88 @@ async fn kill_tree(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        let _ = tokio::process::Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await;
+        // SIGKILL the whole process group first, then the pid itself; the
+        // children are spawned as process-group leaders (or new PTY sessions).
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spawns a TTY session whose script proves stdin is a terminal, feeds a
+    /// line via `write_stdin` and verifies the output roundtrip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_session_roundtrip_with_stdin() {
+        let manager = Arc::new(ProcessManager::new());
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), std::env::var("PATH").unwrap_or_default());
+        let info = manager.spawn_with_options(
+            "sh -c 'test -t 0 && echo TTY-OK; read line; echo GOT-$line'",
+            std::env::temp_dir(),
+            SpawnOptions {
+                stdin_pipe: true,
+                tty: true,
+                env_clean: true,
+                env: Some(env),
+                ..SpawnOptions::default()
+            },
+        );
+        assert_eq!(info.status, "running");
+
+        // Wait for the TTY check to pass.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let poll = manager
+                .poll_output(&info.id, 4000)
+                .expect("session should exist");
+            if poll.output.contains("TTY-OK") {
+                break;
+            }
+            assert!(poll.status == "running", "exited early: {poll:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for TTY-OK: {poll:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Feed a line on the PTY and read the echo back.
+        assert!(manager.write_stdin(&info.id, "hello\n").await);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let poll = manager.poll_output(&info.id, 4000).unwrap();
+            if poll.output.contains("GOT-hello") {
+                break;
+            }
+            assert!(poll.status == "running", "exited early: {poll:?}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for GOT-hello: {poll:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // The script exits on its own; verify the exit is recorded cleanly
+        // (and that the PTY session lifecycle bookkeeping is intact).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let poll = manager.poll_output(&info.id, 4000).unwrap();
+            if poll.status == "exited" {
+                assert_eq!(poll.exit_code, Some(0), "exit poll was: {poll:?}");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for exit: {poll:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        manager.drop_session(&info.id);
     }
 }

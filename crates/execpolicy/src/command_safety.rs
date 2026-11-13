@@ -84,6 +84,15 @@ const DANGEROUS_MARKERS: [&str; 24] = [
     "iex ",
 ];
 
+/// Whether the raw command text contains a known dangerous marker
+/// (privilege escalation, destructive wipe, forced kill, …).
+pub(crate) fn has_dangerous_marker(command: &str) -> bool {
+    let lowered = command.to_lowercase();
+    DANGEROUS_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(&marker.trim().to_lowercase()))
+}
+
 /// Classification result for a shell command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSafety {
@@ -101,13 +110,40 @@ pub fn classify_command(command: &str) -> CommandSafety {
     if trimmed.is_empty() {
         return CommandSafety::RequiresApproval;
     }
+    if has_dangerous_marker(trimmed) {
+        return CommandSafety::Dangerous;
+    }
+
+    // Compound commands: every segment must be classified; the strictest
+    // segment wins. Unparseable (redirection / subshell / substitution)
+    // commands always require approval.
+    match crate::rules::split_shell_commands(trimmed) {
+        Ok(segments) if !segments.is_empty() => {
+            let mut result = CommandSafety::KnownSafeReadOnly;
+            for segment in &segments {
+                match classify_single_segment(&segment.join(" ")) {
+                    CommandSafety::Dangerous => return CommandSafety::Dangerous,
+                    CommandSafety::RequiresApproval => result = CommandSafety::RequiresApproval,
+                    CommandSafety::KnownSafeReadOnly => {}
+                }
+            }
+            result
+        }
+        _ => CommandSafety::RequiresApproval,
+    }
+}
+
+/// Classifies a single (already split) command segment.
+pub(crate) fn classify_single_segment(command: &str) -> CommandSafety {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return CommandSafety::RequiresApproval;
+    }
     let lowered = trimmed.to_lowercase();
 
     // Privilege escalation and destructive markers always win.
-    for marker in DANGEROUS_MARKERS {
-        if lowered.contains(&marker.trim().to_lowercase()) {
-            return CommandSafety::Dangerous;
-        }
+    if has_dangerous_marker(trimmed) {
+        return CommandSafety::Dangerous;
     }
 
     for prefix in SAFE_READ_ONLY_PREFIXES {
@@ -128,6 +164,40 @@ pub fn is_known_safe_read_only_command(command: &str) -> bool {
 /// Whether a command is classified as actively dangerous.
 pub fn is_dangerous_command(command: &str) -> bool {
     classify_command(command) == CommandSafety::Dangerous
+}
+
+/// Whether an `exec_command`/`run_command` call can bypass the interactive
+/// permission prompt for the given run mode, consulting the loaded Starlark
+/// `.rules` policy when one is available.
+///
+/// Returns `Err(reason)` when an execpolicy rule forbids the command outright.
+pub fn command_bypasses_prompt_with_policy(
+    mode: &str,
+    command: &str,
+    policy: Option<&crate::rules::Policy>,
+) -> Result<bool, String> {
+    let Some(policy) = policy else {
+        return Ok(command_bypasses_prompt(mode, command));
+    };
+    let evaluation = policy.evaluate_command(command);
+    if evaluation.decision == crate::rules::Decision::Forbidden {
+        return Err(evaluation
+            .justification
+            .unwrap_or_else(|| "Command is forbidden by execpolicy rule.".to_string()));
+    }
+    match resolve_policy(mode) {
+        // Never prompt.
+        (ApprovalPolicy::Never, _) => Ok(true),
+        // Read-only sandbox: commands are not part of the mutation gating.
+        (_, SandboxMode::ReadOnly) => Ok(false),
+        // workspace-write + on-request: allow-listed (rule or known-safe)
+        // commands run now.
+        (ApprovalPolicy::OnRequest, SandboxMode::WorkspaceWrite) => Ok(
+            evaluation.decision == crate::rules::Decision::Allow && !is_dangerous_command(command),
+        ),
+        // untrusted / any remaining combination: everything prompts.
+        _ => Ok(false),
+    }
 }
 
 /// Whether an `exec_command`/`run_command` call can bypass the interactive
@@ -228,6 +298,40 @@ mod tests {
                 "{command} should be dangerous"
             );
         }
+    }
+
+    #[test]
+    fn compound_commands_never_bypass_when_second_segment_is_unsafe() {
+        // A safe first segment never masks an unsafe second one.
+        assert_eq!(
+            classify_command("git status && rm -rf /"),
+            CommandSafety::Dangerous
+        );
+        assert_eq!(
+            classify_command("cargo check && npm test"),
+            CommandSafety::RequiresApproval
+        );
+        assert_eq!(
+            classify_command("echo hi && git status"),
+            CommandSafety::KnownSafeReadOnly
+        );
+        // Unparseable constructs always require approval.
+        assert_eq!(classify_command("echo hi > out.txt"), CommandSafety::RequiresApproval);
+        assert_eq!(classify_command("echo $(whoami)"), CommandSafety::RequiresApproval);
+
+        // The policy-aware gate agrees.
+        assert!(!command_bypasses_prompt_with_policy(
+            "accept_edits",
+            "git status && rm -rf /",
+            None
+        )
+        .unwrap());
+        assert!(command_bypasses_prompt_with_policy(
+            "accept_edits",
+            "git status && echo hi",
+            None
+        )
+        .unwrap());
     }
 
     #[test]

@@ -4,6 +4,8 @@
 
 pub mod command_safety;
 pub mod processes;
+pub mod rules;
+pub mod sandbox;
 
 pub use command_safety::*;
 pub use processes::*;
