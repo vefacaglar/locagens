@@ -295,7 +295,7 @@ mod tests {
         secrets.extend(crate::secret_paths::credential_paths(&other_home, &[]));
         assert_eq!(secrets.len(), 3, "{secrets:?}");
 
-        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir(), &[home.clone()], &secrets).unwrap();
+        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir(), std::slice::from_ref(&home), &secrets).unwrap();
         assert_eq!(
             plan.secret_deny_write_paths,
             vec![home.join(".ssh"), home.join(".locagens").join("auth.json")]
@@ -307,7 +307,7 @@ mod tests {
         // (that would deny the workspace itself).
         let nested = home.join(".ssh").join("project");
         std::fs::create_dir_all(&nested).unwrap();
-        let plan = build_plan(SandboxMode::WorkspaceWrite, &nested, &std::env::temp_dir(), &[home.clone()], &secrets).unwrap();
+        let plan = build_plan(SandboxMode::WorkspaceWrite, &nested, &std::env::temp_dir(), std::slice::from_ref(&home), &secrets).unwrap();
         assert_eq!(plan.secret_deny_write_paths, vec![home.join(".locagens").join("auth.json")]);
         for dir in [root, home, other_home] {
             let _ = std::fs::remove_dir_all(dir);

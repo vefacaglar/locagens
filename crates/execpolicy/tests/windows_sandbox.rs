@@ -320,7 +320,7 @@ async fn credentials_inside_writable_roots_are_write_protected() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
     std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
-    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, &[agent_dir.clone()]);
+    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, std::slice::from_ref(&agent_dir));
     assert_eq!(secrets, vec![ssh.clone(), agent_dir.join("auth.json")]);
 
     let mut spec = ws.spec(SandboxMode::WorkspaceWrite, None);
@@ -341,7 +341,7 @@ async fn credentials_inside_writable_roots_are_write_protected() {
     assert!(!ssh.join("authorized_keys").exists());
     assert_eq!(std::fs::read_to_string(agent_dir.join("auth.json")).unwrap(), "{}");
 
-    let revoked = revoke_workspace_access(&ws.root, &[home.clone()], &secrets).unwrap();
+    let revoked = revoke_workspace_access(&ws.root, std::slice::from_ref(&home), &secrets).unwrap();
     assert!(revoked.contains(&ssh) && revoked.contains(&agent_dir.join("auth.json")), "{revoked:?}");
 }
 
