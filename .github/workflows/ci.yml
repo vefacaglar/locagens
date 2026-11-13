@@ -15,6 +15,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +30,20 @@ jobs:
       # app (locagens). No Node.js, pnpm, or Electron.
       # Lints are reported, not enforced (remaining warnings are style-only).
       - run: cargo clippy --workspace --all-targets
-      - run: cargo test -p locagens-cli -p locagens-desktop
-      - run: cargo build --release -p locagens-cli -p locagens-desktop
-      - run: cargo test --workspace
+      # Every failing test is also reported as an annotation (panic message
+      # and the failing test names), so failures are readable from the run
+      # summary without opening the full log.
+      - name: cargo test --workspace
+        run: |
+          set -o pipefail
+          status=0
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log || status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -E "^thread '.*' panicked at|^---- .* stdout ----|^    [a-zA-Z0-9_:]+$|^error(\[E[0-9]+\])?:" test.log \
+              | head -n 60 \
+              | while IFS= read -r line; do echo "::error::${line}"; done
+            grep -A3 -E "panicked at" test.log | grep -vE "panicked at|^--$|note: run with" | head -n 40 \
+              | while IFS= read -r line; do echo "::error::  ${line}"; done
+          fi
+          exit "$status"
       - run: cargo build --release --workspace
