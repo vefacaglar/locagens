@@ -2,10 +2,13 @@
 //!
 //! Every path argument is resolved against the run's project folder and
 //! canonicalized so nothing escapes the workspace (symlink-safe containment
-//! via `canonicalize` + `starts_with`). Dangerous tools (`run_command`,
+//! via `canonicalize` + `starts_with`), and every write, delete and move
+//! goes through `workspace_fs`, which never follows a link swapped in after
+//! that check (QA-017). Dangerous tools (`run_command`,
 //! `fetch_url`) are permission-gated by the orchestrator; `build_preview`
 //! produces the red/green diff payload the UI permission card renders.
 
+use locagens_apply_patch::workspace_fs;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -523,10 +526,7 @@ fn write_file(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("write_file: {err}"))?;
     let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("write_file: {err}"))?;
-    }
-    std::fs::write(&path, content).map_err(|err| format!("write_file: {err}"))?;
+    workspace_fs::write(project, &path, content.as_bytes()).map_err(|err| format!("write_file: {err}"))?;
     Ok(format!("Wrote {} ({} bytes).", path.display(), content.len()))
 }
 
@@ -543,7 +543,7 @@ fn edit_file(project: &Path, args: &Value) -> Result<String, String> {
     match content.find(old_text) {
         Some(_) => {
             let updated = content.replacen(old_text, new_text, 1);
-            std::fs::write(&path, &updated).map_err(|err| format!("edit_file: {err}"))?;
+            workspace_fs::write(project, &path, updated.as_bytes()).map_err(|err| format!("edit_file: {err}"))?;
             Ok(format!("Edited {}.", path.display()))
         }
         None => Err("edit_file: old_text was not found in the file.".to_string()),
@@ -556,7 +556,7 @@ fn delete_file(project: &Path, args: &Value) -> Result<String, String> {
     if path.is_dir() {
         return Err("delete_file: refusing to delete a directory; use a shell command instead.".to_string());
     }
-    std::fs::remove_file(&path).map_err(|err| format!("delete_file: {err}"))?;
+    workspace_fs::remove_file(project, &path).map_err(|err| format!("delete_file: {err}"))?;
     Ok(format!("Deleted {}.", path.display()))
 }
 
@@ -587,7 +587,7 @@ fn list_directory(project: &Path, args: &Value) -> Result<String, String> {
 fn create_directory(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("create_directory: {err}"))?;
-    std::fs::create_dir_all(&path).map_err(|err| format!("create_directory: {err}"))?;
+    workspace_fs::create_dir_all(project, &path).map_err(|err| format!("create_directory: {err}"))?;
     Ok(format!("Created {}.", path.display()))
 }
 
@@ -599,10 +599,7 @@ fn move_file(project: &Path, args: &Value) -> Result<String, String> {
     if !from.exists() {
         return Err("move_file: source does not exist.".to_string());
     }
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("move_file: {err}"))?;
-    }
-    std::fs::rename(&from, &to).map_err(|err| format!("move_file: {err}"))?;
+    workspace_fs::rename(project, &from, &to).map_err(|err| format!("move_file: {err}"))?;
     Ok(format!("Moved {} → {}.", from.display(), to.display()))
 }
 

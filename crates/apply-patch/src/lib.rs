@@ -22,10 +22,12 @@
 //! The parser is lenient like Codex's default: heredoc wrappers
 //! (`<<'EOF' ... EOF`) are stripped and marker lines tolerate surrounding
 //! whitespace. All target/move paths are validated through `safe_path`
-//! (symlink-safe workspace containment), so a patch can never escape the
-//! project folder.
+//! (symlink-safe workspace containment) and written through
+//! [`workspace_fs`] (no link is followed at write time), so a patch can never
+//! escape the project folder.
 
 pub mod streaming;
+pub mod workspace_fs;
 
 use serde_json::{json, Value};
 use std::fmt;
@@ -667,11 +669,7 @@ pub fn apply_parsed(project: &Path, patch: &ParsedPatch) -> Result<(String, Stri
         match hunk {
             Hunk::AddFile { path, .. } => {
                 diff.push_str(&unified_diff("/dev/null", &format!("b/{}", rel_display(path)), "", &contents));
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|err| format!("apply_patch: cannot create parent directory: {err}"))?;
-                }
-                std::fs::write(&target, contents)
+                workspace_fs::write(project, &target, contents.as_bytes())
                     .map_err(|err| format!("apply_patch: cannot write {}: {err}", rel_display(path)))?;
                 summary_lines.push(format!("A {}", rel_display(path)));
             }
@@ -684,7 +682,7 @@ pub fn apply_parsed(project: &Path, patch: &ParsedPatch) -> Result<(String, Stri
                     &original,
                     "",
                 ));
-                std::fs::remove_file(&target)
+                workspace_fs::remove_file(project, &target)
                     .map_err(|err| format!("apply_patch: cannot delete {}: {err}", rel_display(path)))?;
                 summary_lines.push(format!("D {}", rel_display(path)));
             }
@@ -701,14 +699,10 @@ pub fn apply_parsed(project: &Path, patch: &ParsedPatch) -> Result<(String, Stri
                     &original,
                     &contents,
                 ));
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|err| format!("apply_patch: cannot create parent directory: {err}"))?;
-                }
-                std::fs::write(&target, &contents)
+                workspace_fs::write(project, &target, contents.as_bytes())
                     .map_err(|err| format!("apply_patch: cannot write {}: {err}", rel_display(path)))?;
                 if move_path.is_some() {
-                    std::fs::remove_file(&resolve(project, path)?)
+                    workspace_fs::remove_file(project, &resolve(project, path)?)
                         .map_err(|err| format!("apply_patch: cannot remove moved source: {err}"))?;
                 }
                 let display = match move_path {
