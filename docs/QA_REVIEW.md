@@ -23,7 +23,7 @@ This review covers the whole workspace at `e70d4f2` (plus the uncommitted `.loca
 
 ## Fix status (2026-11-14)
 
-All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; the "Notes" column says what is left. Each fix comes with regression tests, and the whole workspace passes `cargo test --workspace --no-fail-fast`.
+All 73 findings, plus QA-074 found during the fixes, are fixed on `main`; the "Notes" column says what each fix does and its documented limits. Each fix comes with regression tests, and the whole workspace passes `cargo test --workspace --no-fail-fast`.
 
 | ID | Status | Notes |
 | --- | --- | --- |
@@ -46,7 +46,8 @@ All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; t
 | 017 | fixed | `apply_patch::workspace_fs`: Unix walks from a root handle with `openat(O_NOFOLLOW)`; Windows opens with `FILE_FLAG_OPEN_REPARSE_POINT` and re-checks the handle's final path before writing. No check-then-open window. |
 | 018 | fixed | Markers match tokens, not substrings. |
 | 019 | fixed | Dangerous commands always prompt outside Full Access; no grant covers them. |
-| 020 | partial | Windows cannot restrict reads in Build mode with a restricted token; the UI and docs warn about it. |
+| 020 | fixed | Windows Build mode runs at Low integrity: no writes, deletes, renames or ACL changes outside the workspace; known credential files get a Medium no-read-up label (unreadable). Other user files stay readable, as on Codex's non-elevated backend (documented). |
+| 074 | fixed | (Found while fixing 020.) The write-restricted token did not check DELETE or reads, so a Windows Build-mode command could delete files outside the workspace, read secrets, or swap `.git` / `.locagens` and plant hooks or config. Now: Low integrity (deletes/writes outside blocked), credential labels, and a portable metadata guard that quarantines replaced `.git`, `.git/hooks`, `.git/config`, `.locagens`, and created `.git/commondir` / `.git/config.worktree`, restores the original and reports `SANDBOX VIOLATION` (checked at command exit, after background processes exit, before the next command and before Locagens' own git). On Linux `.git` is a mount point (cannot be renamed); macOS Seatbelt denies writes to these paths. |
 | 021 | fixed | `locagens_protocol::text` char-boundary helpers are used at every byte-budget cut. |
 | 022 | fixed | One drive per run (`prepare_drive`); `continue_run` returns Conflict while a run is generating. |
 | 023 | fixed | Cancel is final and awaited; LLM calls and compaction race the stop signal. |

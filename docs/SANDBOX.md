@@ -265,6 +265,33 @@ All of these point at `http://127.0.0.1:<port>`: `HTTP_PROXY`, `HTTPS_PROXY`,
 `BUNDLE_NO_PROXY`) is `localhost,127.0.0.1,::1`. `NODE_USE_ENV_PROXY=1`,
 `ELECTRON_GET_USE_PROXY=true` and `LOCAGENS_NETWORK_PROXY_ACTIVE=1` are set.
 
+## Metadata guard (`.git` / `.locagens` swaps)
+
+A sandboxed command may rename the writable parent entries, so on Windows (and
+for absent paths on Linux) a command could move `.git` or `.locagens` aside and
+recreate it with a planted `config`, hook or rules file that the user's own,
+unsandboxed git would then run. `execpolicy::metadata_guard` closes this:
+
+- Before each sandboxed command it records the identity (volume + file index on
+  Windows, device + inode on Unix) of `.git`, `.git/hooks`, `.git/config` and
+  `.locagens`, and which of `.git/commondir` / `.git/config.worktree` exist
+  (git honours `commondir` in a main repository, so it can redirect config).
+- It checks again when the command exits (also after a kill or timeout), once
+  the command's background processes are gone, before the next sandboxed
+  command in that workspace, and before Locagens runs git itself.
+- A replaced or newly created entry is moved to
+  `<name>.locagens-quarantine-<timestamp>`; on Windows the original is found by
+  its file ID and renamed back. A `SANDBOX VIOLATION` note goes into the tool
+  result, the session log and the next command's result.
+- On Linux `.git` is additionally bind-mounted onto itself (a mount point
+  cannot be renamed) and `.locagens` is pre-created; on macOS Seatbelt path
+  rules already deny writes to these paths, including absent ones.
+
+Limits: for absent paths this is detection, not prevention — git run by
+another program while the command (or a process it left running) is alive can
+still see a planted file. Replacing `.git` yourself while a sandboxed command
+runs (e.g. re-cloning) is quarantined too (renamed, never deleted).
+
 ## Protected paths and command approval
 
 `execpolicy::protected_paths` is the one definition used by every sandbox
