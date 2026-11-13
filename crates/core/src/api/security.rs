@@ -79,7 +79,11 @@ fn sandbox_status() -> SecuritySandbox {
             backend: "linux-bwrap".to_string(),
             status: "ready".to_string(),
             errors: Vec::new(),
-            warnings: vec![unix_network_note.to_string()],
+            warnings: vec![
+                unix_network_note.to_string(),
+                "Bubblewrap cannot block creating .git/commondir or .git/config.worktree (which redirect git to planted config) while they do not exist; Locagens quarantines them and flags the command when it (and its background processes) end or before it runs git itself. Your own git runs in between are not covered."
+                    .to_string(),
+            ],
             can_install: false,
         },
         SandboxBackend::WindowsRestrictedToken => SecuritySandbox {
@@ -94,7 +98,7 @@ fn sandbox_status() -> SecuritySandbox {
                     .to_string(),
                 "Windows Build mode blocks writes and deletes outside the workspace, except in low-integrity folders: a sandboxed command can still delete (not modify) files in other workspaces you used with the sandbox and in folders such as AppData\\LocalLow."
                     .to_string(),
-                "Windows cannot stop a sandboxed command from renaming .git, .git/hooks, .git/config or .locagens and creating a replacement; Locagens detects this when the command (and its background processes) end or before it runs git itself, moves the replacement to a *.locagens-quarantine-* folder, restores the original and flags the command. Your own git runs in between are not covered."
+                "Windows cannot stop a sandboxed command from renaming .git, .git/hooks, .git/config or .locagens and creating a replacement, or from creating .git/commondir or .git/config.worktree (which redirect git to planted config); Locagens detects this when the command (and its background processes) end or before it runs git itself, moves the planted entry to a *.locagens-quarantine-* name, restores the original and flags the command. Your own git runs in between are not covered."
                     .to_string(),
             ],
             can_install: false,

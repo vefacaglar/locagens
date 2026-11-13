@@ -5,6 +5,7 @@
 
 pub mod command_safety;
 pub mod env_policy;
+pub mod metadata_guard;
 pub mod network_proxy;
 pub mod processes;
 pub mod protected_paths;

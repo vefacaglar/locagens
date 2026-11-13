@@ -232,6 +232,39 @@ async fn replaced_locagens_hooks_and_config_do_not_survive() {
     assert_eq!(quarantined.len(), 1, "{quarantined:?}");
 }
 
+/// `.git/commondir` points git at another directory's config and hooks
+/// (git honours it in a main repository), and `config.worktree` is extra
+/// config: neither may be planted. They usually do not exist, so no ACE can
+/// protect them; the guard quarantines them after the command.
+#[tokio::test]
+async fn planted_commondir_and_config_worktree_are_quarantined() {
+    let ws = git_workspace("commondir");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    std::fs::create_dir_all(ws.outside.join("evil")).unwrap();
+    let attack = format!(
+        "echo {}> .git\\commondir && (echo [alias]& echo x = !evil) > .git\\config.worktree && echo planted",
+        ws.outside.join("evil").display()
+    );
+    let output = run(&ws, &spec, &attack).await;
+    assert!(String::from_utf8_lossy(&output.stdout).contains("planted"), "the files were written: {}", text(&output));
+    for name in ["commondir", "config.worktree"] {
+        assert!(
+            output.sandbox_violations.iter().any(|report| report.contains("created") && report.contains(name)),
+            "{name}: {:?}",
+            output.sandbox_violations
+        );
+        assert!(!ws.root.join(".git").join(name).exists(), "{name} was quarantined");
+        assert_eq!(entries_starting_with(&ws.root.join(".git"), &format!("{name}.locagens-quarantine-")).len(), 1);
+    }
+    assert_original_git(&ws);
+
+    // An existing one is write-protected like `.git/config`.
+    std::fs::write(ws.root.join(".git").join("commondir"), ".").unwrap();
+    let overwrite = run(&ws, &spec, "echo elsewhere> .git\\commondir").await;
+    assert!(!overwrite.success(), "{}", text(&overwrite));
+    assert_eq!(std::fs::read_to_string(ws.root.join(".git").join("commondir")).unwrap(), ".");
+}
+
 /// While a sandboxed session still runs, Locagens repairs a swapped `.git`
 /// before it runs git itself (`repair_workspace_metadata`).
 #[tokio::test]
