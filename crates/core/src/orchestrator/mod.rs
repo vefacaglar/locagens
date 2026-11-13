@@ -20,6 +20,7 @@ pub mod command_safety;
 pub mod compact;
 pub mod env_context;
 pub mod llm;
+pub mod network_access;
 pub mod tools;
 pub mod turn_diff_tracker;
 
@@ -1016,6 +1017,10 @@ impl AgentLoop {
     async fn execute_tool(&self, name: &str, args: &Value) -> Result<String, String> {
         match name {
             "exec_command" => self.exec_session(args).await,
+            "run_command" => {
+                let (network, _approval_window) = self.command_network_policy(args);
+                tools::run_command_with_network(&self.project_path, &self.mode, args, Some(network)).await
+            }
             "apply_patch" => self.apply_patch_tool(args).await,
             name if name.starts_with("mcp__") => {
                 let (server_key, tool_name) = crate::services::mcp::parse_qualified_mcp_tool(name)
@@ -1138,6 +1143,8 @@ impl AgentLoop {
             .filter(|shell| !shell.is_empty())
             .map(str::to_string);
         let login = args.get("login").and_then(Value::as_bool).unwrap_or(false);
+        // Unknown hosts may prompt only while this call waits (see network_access).
+        let (network, _approval_window) = self.command_network_policy(args);
         let options = locagens_execpolicy::processes::SpawnOptions {
             stdin_pipe: true,
             tty,
@@ -1149,6 +1156,7 @@ impl AgentLoop {
                 mode: locagens_protocol::from_run_mode(&self.mode).1,
                 project_path: self.project_path.clone(),
                 allow_network: self.mode == "auto",
+                network: Some(network),
             }),
         };
         let info = self
@@ -1746,6 +1754,14 @@ impl AgentLoop {
 
     // -- Permission gating -------------------------------------------------
 
+    /// Network allowlist + live domain approval for a sandboxed command.
+    fn command_network_policy(
+        &self,
+        args: &Value,
+    ) -> (locagens_execpolicy::network_proxy::NetworkPolicy, network_access::ApprovalWindow) {
+        network_access::command_network_policy(&self.state, &self.handle, &self.run_id, &self.project_path, args)
+    }
+
     fn standing_grant(&self, name: &str, args: &Value) -> bool {
         let project_path = self.project_path.display().to_string();
         let command = extract_command_str(args);
@@ -1760,13 +1776,18 @@ impl AgentLoop {
     async fn gated_execute(&self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
         // Codex command safety + Starlark `.rules` execpolicy: under
         // accept_edits (on-request + workspace-write) allow-listed commands
-        // run without a prompt; forbidden rules block outright.
+        // run without a prompt; forbidden rules block outright. Requested
+        // network domains are only granted through a prompt (or a matching
+        // standing grant), never by the known-safe bypass.
         if name == "run_command" || name == "exec_command" {
             let cmd_str = command_safety::command_from_args(args);
             let policy = self.load_exec_policy();
+            let requests_network = !sorted_domains(args).is_empty();
             match command_safety::command_bypasses_prompt_with_policy(&self.mode, &cmd_str, Some(&policy)) {
-                Ok(true) => return self.execute_tool(name, args).await.map_err(AgentError::Failed),
-                Ok(false) => {}
+                Ok(true) if !requests_network => {
+                    return self.execute_tool(name, args).await.map_err(AgentError::Failed)
+                }
+                Ok(_) => {}
                 Err(reason) => {
                     return Ok(json!({
                         "ok": false,

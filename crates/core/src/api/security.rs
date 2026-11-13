@@ -16,8 +16,8 @@ pub struct SecurityApi {
 #[serde(rename_all = "camelCase")]
 pub struct SecuritySandbox {
     pub platform: String,
-    /// Detected sandbox backend (`macos-seatbelt`, `linux-bwrap` or
-    /// `host-env-only`).
+    /// Detected sandbox backend (`macos-seatbelt`, `linux-bwrap`,
+    /// `windows-restricted-token` or `host-env-only`).
     #[serde(default)]
     pub backend: String,
     pub status: String,
@@ -79,6 +79,17 @@ fn sandbox_status() -> SecuritySandbox {
             status: "ready".to_string(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            can_install: false,
+        },
+        SandboxBackend::WindowsRestrictedToken => SecuritySandbox {
+            platform,
+            backend: "windows-restricted-token".to_string(),
+            status: "ready".to_string(),
+            errors: Vec::new(),
+            warnings: vec![
+                "Network isolation is proxy-based: sandboxed commands get HTTP(S)_PROXY pointing at a per-domain allowlist proxy, but programs that ignore proxy variables are not blocked (firewall rules would need admin rights)."
+                    .to_string(),
+            ],
             can_install: false,
         },
         SandboxBackend::HostEnvOnly => SecuritySandbox {
