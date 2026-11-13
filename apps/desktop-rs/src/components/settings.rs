@@ -169,10 +169,10 @@ fn AuthTab() -> Element {
                 div {
                     class: "grow",
                     if let Some(code) = start.user_code.clone() {
-                        div { "Enter this code on the sign-in page:" }
+                        div { {store.t("auth.enter_code")} }
                         div { class: "mono", style: "font-size:20px;font-weight:600", "{code}" }
                     } else {
-                        div { "Complete the sign-in in your browser. It returns here automatically." }
+                        div { {store.t("auth.finish_in_browser")} }
                     }
                     div { class: "mono", style: "font-size:11px", "{start.url_to_open()}" }
                 }
@@ -185,7 +185,7 @@ fn AuthTab() -> Element {
                             }
                         }
                     },
-                    "Open browser"
+                    {store.t("auth.open_browser")}
                 }
                 button {
                     class: "danger",
@@ -197,7 +197,7 @@ fn AuthTab() -> Element {
                         }
                         pending.set(None);
                     },
-                    "Cancel"
+                    {store.t("common.cancel")}
                 }
             }
             if start.auth_url.is_some() {
@@ -205,7 +205,7 @@ fn AuthTab() -> Element {
                     class: "settings-row",
                     input {
                         class: "grow",
-                        placeholder: "Browser on another machine? Paste the final redirect URL here…",
+                        placeholder: store.t("auth.paste_placeholder"),
                         value: "{pasted_redirect.read()}",
                         oninput: move |event| pasted_redirect.set(event.value()),
                     }
@@ -215,13 +215,13 @@ fn AuthTab() -> Element {
                             let start = start.clone();
                             move |_| submit_pasted_redirect(start.clone(), pasted_redirect, accounts, pending, login_task, store)
                         },
-                        "Submit"
+                        {store.t("auth.submit")}
                     }
                 }
             }
         }
         if data.is_empty() {
-            div { class: "settings-empty", "No auth accounts found. Sign in above or run `lcgn auth login` in a terminal (reads ~/.locagens/auth.json with ~/.codex + ~/.pi fallbacks)." }
+            div { class: "settings-empty", {store.t("auth.empty")} }
         }
         for (index, account) in data.iter().enumerate() {
             div {
@@ -232,7 +232,7 @@ fn AuthTab() -> Element {
                     span { style: "font-weight:600", "{account[\"providerId\"].as_str().unwrap_or(\"?\")} " }
                     span { class: "badge", "{account[\"type\"].as_str().unwrap_or(\"unknown\")}" }
                 }
-                div { class: "mono", style: "font-size:12px", "{account_detail(account)}" }
+                div { class: "mono", style: "font-size:12px", "{account_detail(&store, account)}" }
             }
         }
     }
@@ -269,11 +269,11 @@ fn submit_pasted_redirect(
                 }
                 pending.set(None);
                 pasted_redirect.set(String::new());
-                store.toast("Signed in.".to_string());
+                store.toast(store.t("auth.signed_in").to_string());
                 store.refresh_providers();
                 reload_accounts(accounts);
             }
-            Err(err) => store.toast(format!("Sign-in failed: {err}")),
+            Err(err) => store.toast(store.tf("auth.sign_in_failed", &[&err.to_string()])),
         }
     });
 }
@@ -294,7 +294,7 @@ fn begin_oauth_login(
         let start = match locagens_core::api::providers::start_oauth_login(&state, provider_id).await {
             Ok(start) => start,
             Err(err) => {
-                store.toast(format!("Sign-in failed: {err}"));
+                store.toast(store.tf("auth.sign_in_failed", &[&err.to_string()]));
                 return;
             }
         };
@@ -303,10 +303,10 @@ fn begin_oauth_login(
             let state = core();
             match locagens_core::api::providers::finish_oauth_login(&state, &start).await {
                 Ok(()) => {
-                    store.toast("Signed in.".to_string());
+                    store.toast(store.t("auth.signed_in").to_string());
                     store.refresh_providers();
                 }
-                Err(err) => store.toast(format!("Sign-in failed: {err}")),
+                Err(err) => store.toast(store.tf("auth.sign_in_failed", &[&err.to_string()])),
             }
             pending.set(None);
             login_task.set(None);
@@ -317,17 +317,18 @@ fn begin_oauth_login(
 }
 
 /// Human-readable credential detail: OAuth expiry or masked key preview.
-fn account_detail(account: &Value) -> String {
+fn account_detail(store: &UiStore, account: &Value) -> String {
     if account["type"] == "oauth" {
         let expires_at = account["expiresAt"].as_i64().unwrap_or(0);
         if account["expired"] == true {
-            return "access token expired (refreshes on next use)".to_string();
+            return store.t("auth.token_expired").to_string();
         }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as i64)
             .unwrap_or(0);
-        return format!("access token valid for ~{} min", ((expires_at - now_ms) / 60_000).max(0));
+        let minutes = ((expires_at - now_ms) / 60_000).max(0).to_string();
+        return store.tf("auth.token_valid_for", &[&minutes]);
     }
     account["keyPreview"].as_str().unwrap_or("").to_string()
 }

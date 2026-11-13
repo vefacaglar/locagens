@@ -56,10 +56,21 @@ fn lookup() -> &'static HashMap<&'static str, (&'static str, &'static str)> {
 
 /// `(key, English, Turkish)`.
 const TABLE: &[(&str, &str, &str)] = &[
+    // --- settings: accounts / sign-in ---
+    ("auth.enter_code", "Enter this code on the sign-in page:", "Bu kodu giriş sayfasına gir:"),
+    ("auth.finish_in_browser", "Complete the sign-in in your browser. It returns here automatically.", "Girişi tarayıcında tamamla; bitince otomatik olarak buraya dönülür."),
+    ("auth.open_browser", "Open browser", "Tarayıcıyı aç"),
+    ("auth.paste_placeholder", "Browser on another machine? Paste the final redirect URL here…", "Tarayıcı başka bir makinede mi? Son yönlendirme adresini buraya yapıştır…"),
+    ("auth.submit", "Submit", "Gönder"),
+    ("auth.empty", "No accounts yet. Sign in above or run `lcgn auth login` in a terminal (reads ~/.locagens/auth.json with ~/.codex and ~/.pi fallbacks).", "Henüz hesap yok. Yukarıdan giriş yap ya da terminalde `lcgn auth login` çalıştır (~/.locagens/auth.json, yedek olarak ~/.codex ve ~/.pi okunur)."),
+    ("auth.signed_in", "Signed in.", "Giriş yapıldı."),
+    ("auth.sign_in_failed", "Sign-in failed: {0}", "Giriş başarısız: {0}"),
+    ("auth.token_expired", "access token expired (refreshes on next use)", "erişim anahtarının süresi doldu (ilk kullanımda yenilenir)"),
+    ("auth.token_valid_for", "access token valid for ~{0} min", "erişim anahtarı ~{0} dk daha geçerli"),
     // --- settings tabs / page ---
     ("settings.title", "Settings", "Ayarlar"),
     ("tab.providers", "Providers", "Sağlayıcılar"),
-    ("tab.auth", "pi Auth", "pi Kimlik"),
+    ("tab.auth", "Accounts", "Hesaplar"),
     ("tab.permissions", "Permissions", "İzinler"),
     ("tab.memory", "Memory", "Bellek"),
     ("tab.skills", "Skills", "Beceriler"),
