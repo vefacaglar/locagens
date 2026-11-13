@@ -98,6 +98,15 @@ pub async fn list_providers(state: &AppState) -> ApiResult<Vec<ProviderMetadata>
     Ok(state.pi.list_providers().await)
 }
 
+/// Re-fetches the `/models` list of every signed-in provider whose cached
+/// list is missing or older than [`crate::pi_providers::MODEL_LIST_MAX_AGE`]
+/// (frontends call this in the background at startup and after a sign-in).
+/// Returns how many providers got a new list; failures keep the old one.
+pub async fn refresh_model_lists(state: &AppState) -> usize {
+    let outcomes = state.pi.refresh_stale_model_lists(crate::pi_providers::MODEL_LIST_MAX_AGE).await;
+    outcomes.iter().filter(|(_, outcome)| outcome.is_ok()).count()
+}
+
 /// Returns editable provider configs with masked API keys.
 pub async fn get_provider_configs(
     state: &AppState,

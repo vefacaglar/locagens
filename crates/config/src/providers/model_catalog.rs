@@ -540,7 +540,7 @@ impl PiProviderManager {
     /// Provider ids to expose: everything the user configured, i.e. any
     /// `auth.json` entry, `models.json` / Codex `config.toml` provider, and
     /// built-ins whose own env var (or configured `envKey`) is set.
-    fn provider_ids(&self) -> Vec<String> {
+    pub(super) fn provider_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.read_auth_map().keys().cloned().collect();
         if let Value::Object(providers) = self.read_models_json().get("providers").cloned().unwrap_or(Value::Null) {
             ids.extend(providers.keys().cloned());
@@ -666,6 +666,8 @@ impl PiProviderManager {
         }
 
         let entry = self.models_json_provider(provider_id);
+        let declared: std::collections::HashSet<String> =
+            Self::models_json_models(entry.as_ref()).into_iter().map(|model| model.id).collect();
         for model in Self::models_json_models(entry.as_ref()) {
             if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
                 existing.name = model.name;
@@ -687,6 +689,8 @@ impl PiProviderManager {
             }
         }
 
+        // A fetched `/models` list decides what the provider still offers.
+        self.apply_live_list(provider_id, &mut models, &declared);
         models
     }
 

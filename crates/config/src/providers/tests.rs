@@ -1163,3 +1163,36 @@ fn auth_status_for_the_new_oauth_providers_never_contains_secrets() {
     assert!(!raw.contains("secret"), "{raw}");
     assert!(raw.contains("github-copilot") && raw.contains("kimi-coding"));
 }
+
+#[tokio::test]
+async fn a_fetched_model_list_replaces_stale_catalog_entries() {
+    let (agent, support) = temp_dirs("live-list");
+    let (base_url, log) = spawn_model_server(vec![json!({ "data": [ { "id": "remote-a" }, { "id": "remote-b" } ] })]);
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "mylive": {
+            "baseUrl": base_url, "api": "openai-compatible", "models": [ { "id": "declared-one" } ]
+        } } })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(agent.join("models-store.json"), json!({ "mylive": { "models": [ { "id": "stale-model" } ] } }).to_string())
+        .unwrap();
+    std::fs::write(agent.join("auth.json"), json!({ "mylive": { "type": "api_key", "key": "sk-live-test" } }).to_string())
+        .unwrap();
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    let ids = |manager: &PiProviderManager| manager.merged_models("mylive").into_iter().map(|m| m.id).collect::<Vec<_>>();
+    assert!(ids(&manager).contains(&"stale-model".to_string()), "no live list yet: the cache is used");
+
+    let outcomes = manager.refresh_stale_model_lists(MODEL_LIST_MAX_AGE).await;
+    assert!(outcomes.iter().any(|(id, outcome)| id == "mylive" && outcome == &Ok(2)), "{outcomes:?}");
+    assert_eq!(ids(&manager), vec!["declared-one", "remote-a", "remote-b"], "stale entry dropped, declared kept");
+
+    // A fresh list is not fetched again.
+    let again = manager.refresh_stale_model_lists(MODEL_LIST_MAX_AGE).await;
+    assert!(again.iter().all(|(id, _)| id != "mylive"));
+    assert_eq!(log.lock().unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}

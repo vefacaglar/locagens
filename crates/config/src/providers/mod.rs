@@ -7,6 +7,8 @@
 //!   (`{ "type": "api_key", "key": "..." }`, `!command`, `$ENV_VAR` or OAuth).
 //! - `models.json` — custom provider configs & model overrides.
 //! - `models-store.json` — cached dynamic model catalog.
+//! - `models-live.json` — each provider's last `GET /models` list (wins over
+//!   the catalog once fetched; see `model_refresh`).
 //!
 //! Read-only credential fallbacks: `~/.codex` (`$CODEX_HOME`: `auth.json`
 //! `OPENAI_API_KEY` and `config.toml` `[model_providers.*]`), the legacy
@@ -32,6 +34,9 @@ use std::sync::{Arc, Mutex};
 mod auth_store;
 mod model_catalog;
 mod model_fetch;
+mod model_refresh;
+
+pub use model_refresh::MODEL_LIST_MAX_AGE;
 
 pub use model_catalog::model_reasoning_efforts;
 
