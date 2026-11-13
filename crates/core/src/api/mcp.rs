@@ -18,14 +18,13 @@ fn resolve_project(state: &AppState, raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// Lists MCP server configs visible to the project (or user scope).
+/// Lists MCP servers visible to the project (or user scope) with live probe
+/// status: enabled servers get a concurrent `tools/list` probe (or their
+/// cached result), disabled servers report `disabled`.
 /// Mirrors `GET /api/mcp/servers`.
 pub async fn list_mcp_servers(state: &AppState, project_path: Option<&str>) -> ApiResult<mcp_service::McpServersResponse> {
     let project = resolve_project(state, project_path);
-    let servers: Vec<mcp_service::McpServerInfo> = mcp_service::list_configs(project.as_deref())
-        .iter()
-        .map(mcp_service::server_info)
-        .collect();
+    let servers = mcp_service::probe_all(project.as_deref()).await;
     Ok(mcp_service::McpServersResponse { servers })
 }
 
@@ -52,7 +51,9 @@ pub async fn upsert_mcp_server(state: &AppState, input: mcp_service::McpServerIn
     let config = mcp_service::validate_input(&input, registered.as_deref()).map_err(ApiError::bad_request)?;
 
     mcp_service::save_config(&config).map_err(ApiError::bad_request)?;
-    Ok(mcp_service::server_info(&config))
+    // The stored config changed: drop stale probes for this server name.
+    mcp_service::invalidate_server(&config.name);
+    Ok(mcp_service::probe_server(&config).await)
 }
 
 /// Deletes an MCP server config by name (trimmed + lowercased); returns
@@ -64,7 +65,9 @@ pub async fn delete_mcp_server(state: &AppState, name: &str, project_path: Optio
     }
     let project = resolve_project(state, project_path);
 
-    mcp_service::delete_config(&name, project.as_deref()).map_err(ApiError::bad_request)
+    let deleted = mcp_service::delete_config(&name, project.as_deref()).map_err(ApiError::bad_request)?;
+    mcp_service::invalidate_server(&name);
+    Ok(deleted)
 }
 
 /// Restarts an MCP server process and returns its info.
@@ -79,7 +82,10 @@ pub async fn restart_mcp_server(state: &AppState, name: &str, project_path: Opti
         .filter(|p| !p.is_empty())
         .and_then(|p| resolve_project(state, Some(p.as_str())));
 
-    mcp_service::restart(&name, project.as_deref()).map_err(ApiError::bad_request)
+    let config = mcp_service::find_config(&name, project.as_deref())
+        .ok_or_else(|| ApiError::bad_request(format!("MCP server \"{name}\" not found.")))?;
+    mcp_service::invalidate_server(&name);
+    Ok(mcp_service::probe_server(&config).await)
 }
 
 /// Enables/disables an MCP server and returns its info.
@@ -94,5 +100,7 @@ pub async fn toggle_mcp_server(state: &AppState, name: &str, enabled: bool, proj
         .filter(|p| !p.is_empty())
         .and_then(|p| resolve_project(state, Some(p.as_str())));
 
-    mcp_service::toggle(&name, enabled, project.as_deref()).map_err(ApiError::bad_request)
+    let info = mcp_service::toggle(&name, enabled, project.as_deref()).map_err(ApiError::bad_request)?;
+    mcp_service::invalidate_server(&name);
+    Ok(info)
 }

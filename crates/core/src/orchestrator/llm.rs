@@ -23,6 +23,7 @@
 
 use anyhow::Result;
 use serde_json::{json, Map, Value};
+use std::time::Duration;
 
 /// One chat message in provider-neutral form. Tool calls are kept in the
 /// OpenAI shape (`{ id, function: { name, arguments } }`) — the normalized
@@ -383,6 +384,107 @@ impl StreamAcc {
     }
 }
 
+// ----------------------------------------------------------------------
+// Request transport: shared headers + transient-error retry
+// ----------------------------------------------------------------------
+
+/// Attaches the provider auth/routing headers every attempt needs: Anthropic
+/// gets `x-api-key` + `anthropic-version`, OpenAI-compatible endpoints get a
+/// bearer token, OpenRouter gets `X-Title` and OpenCode Zen a
+/// `x-opencode-session` routing header.
+fn apply_provider_headers(
+    mut request: reqwest::RequestBuilder,
+    endpoint: &Endpoint,
+    base_url: &str,
+) -> reqwest::RequestBuilder {
+    if endpoint.is_anthropic() {
+        request = request
+            .header("x-api-key", &endpoint.api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        if !endpoint.api_key.is_empty() {
+            request = request.bearer_auth(&endpoint.api_key);
+        }
+        if base_url.contains("openrouter") {
+            request = request.header("X-Title", "Locagens");
+        }
+        // OpenCode Zen requires a per-conversation routing header.
+        if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
+            request = request.header("x-opencode-session", &endpoint.session_id);
+        }
+    }
+    request
+}
+
+/// Total send attempts per request (1 initial call + 3 retries).
+const MAX_SEND_ATTEMPTS: usize = 4;
+
+/// Exponential backoff between retries: `500ms * 2^attempt` with a little
+/// jitter, capped at 10 s.
+fn backoff_delay(attempt: usize) -> Duration {
+    let base = Duration::from_millis(500).saturating_mul(1 << attempt.min(8) as u32);
+    let jitter = Duration::from_millis((std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis() as u64)
+        .unwrap_or(0))
+        % 100);
+    base.saturating_add(jitter).min(Duration::from_secs(10))
+}
+
+/// Whether an HTTP status is transient and worth retrying.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// Whether a transport error is transient (timeout / connect / request).
+fn is_retryable_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+/// Sends a provider request with exponential backoff on transient failures
+/// (HTTP 429/5xx or timeouts/connect errors): up to 3 retries after the
+/// initial attempt. Headers & auth are re-attached on every attempt because
+/// `make_request` rebuilds the request each time. Returns the final response
+/// (success or non-retryable error status) so the caller can inspect it.
+async fn send_with_retry(
+    mut make_request: impl FnMut() -> reqwest::RequestBuilder,
+) -> anyhow::Result<reqwest::Response> {
+    let mut attempt = 0usize;
+    loop {
+        match make_request().send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success()
+                    || attempt + 1 >= MAX_SEND_ATTEMPTS
+                    || !is_retryable_status(status)
+                {
+                    return Ok(response);
+                }
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|raw| raw.trim().parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| backoff_delay(attempt))
+                    .min(Duration::from_secs(10));
+                tracing::warn!("Provider returned {status}; retrying in {retry_after:?}");
+                tokio::time::sleep(retry_after).await;
+                attempt += 1;
+            }
+            Err(err) => {
+                if attempt + 1 >= MAX_SEND_ATTEMPTS || !is_retryable_error(&err) {
+                    return Err(anyhow::anyhow!("Provider request failed: {err}"));
+                }
+                let delay = backoff_delay(attempt);
+                tracing::warn!("Provider request failed ({err}); retrying in {delay:?}");
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Streams one completion, forwarding `(content_delta, reasoning_delta)`
 /// through `on_delta`. `should_stop` is polled between events so the caller
 /// can abort mid-stream (cancellation); the returned error is `"cancelled"`
@@ -416,28 +518,11 @@ pub async fn stream_chat(
         request_body["stream_options"] = json!({ "include_usage": true });
     }
 
-    let mut request = http.post(&url);
-    if endpoint.is_anthropic() {
-        request = request
-            .header("x-api-key", &endpoint.api_key)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        if !endpoint.api_key.is_empty() {
-            request = request.bearer_auth(&endpoint.api_key);
-        }
-        if base_url.contains("openrouter") {
-            request = request.header("X-Title", "Locagens");
-        }
-        // OpenCode Zen requires a per-conversation routing header.
-        if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
-            request = request.header("x-opencode-session", &endpoint.session_id);
-        }
-    }
-    let response = request
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|err| anyhow::anyhow!("Provider request failed: {err}"))?;
+    let response = send_with_retry(|| {
+        let request = http.post(&url);
+        apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+    })
+    .await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -445,12 +530,11 @@ pub async fn stream_chat(
         // Retry once without `stream_options` when the provider rejects it.
         if with_stream_options && body.contains("stream_options") {
             request_body.as_object_mut().unwrap().remove("stream_options");
-            let retry = http
-                .post(&url)
-                .json(&request_body)
-                .send()
-                .await
-                .map_err(|err| anyhow::anyhow!("Provider request failed: {err}"))?;
+            let retry = send_with_retry(|| {
+                let request = http.post(&url);
+                apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+            })
+            .await?;
             let retry_status = retry.status();
             if !retry_status.is_success() {
                 let retry_body = retry.text().await.unwrap_or_default();
@@ -659,6 +743,31 @@ fn responses_url(base_url: &str) -> String {
     }
 }
 
+/// Extracts a base64 image attached by the `view_image` tool from a tool
+/// response: `(compact_json, path, mime_type, data_base64)` where
+/// `compact_json` is the response with `data_base64`/`data_url` stripped
+/// (the raw base64 blob is delivered as a real image part instead of text).
+fn extract_tool_image(content: &str) -> Option<(String, String, String, String)> {
+    let value: Value = serde_json::from_str(content).ok()?;
+    let object = value.as_object()?;
+    let b64 = object.get("data_base64").and_then(Value::as_str)?;
+    let mime = object.get("mime_type").and_then(Value::as_str)?;
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut compact = object.clone();
+    compact.remove("data_base64");
+    compact.remove("data_url");
+    Some((
+        Value::Object(compact).to_string(),
+        path,
+        mime.to_string(),
+        b64.to_string(),
+    ))
+}
+
 /// Builds a Codex OpenAI `/v1/responses` (Responses WireAPI) request body:
 /// system prompt becomes `instructions`, the conversation becomes `input`
 /// items (`message`, `function_call`, `function_call_output`) and tools are
@@ -700,11 +809,27 @@ fn build_responses_body(
                 }
             }
             "tool" => {
-                input.push(json!({
-                    "type": "function_call_output",
-                    "call_id": message.tool_call_id.clone().unwrap_or_default(),
-                    "output": message.content,
-                }));
+                match extract_tool_image(&message.content) {
+                    Some((compact_json, _path, mime, b64)) => {
+                        // Real multimodal tool result: compact JSON text plus
+                        // the image as a native `input_image` part.
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": message.tool_call_id.clone().unwrap_or_default(),
+                            "output": [
+                                { "type": "input_text", "text": compact_json },
+                                { "type": "input_image", "image_url": format!("data:{mime};base64,{b64}") },
+                            ],
+                        }));
+                    }
+                    None => {
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": message.tool_call_id.clone().unwrap_or_default(),
+                            "output": message.content,
+                        }));
+                    }
+                }
             }
             role => {
                 input.push(json!({
@@ -777,22 +902,11 @@ pub async fn stream_openai_responses(
 
     let url = responses_url(&base_url);
     let request_body = build_responses_body(endpoint, system, messages, tools);
-    let mut request = http.post(&url);
-    if !endpoint.api_key.is_empty() {
-        request = request.bearer_auth(&endpoint.api_key);
-    }
-    if base_url.contains("openrouter") {
-        request = request.header("X-Title", "Locagens");
-    }
-    // OpenCode Zen requires a per-conversation routing header.
-    if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
-        request = request.header("x-opencode-session", &endpoint.session_id);
-    }
-    let response = request
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|err| anyhow::anyhow!("Provider request failed: {err}"))?;
+    let response = send_with_retry(|| {
+        let request = http.post(&url);
+        apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+    })
+    .await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -839,11 +953,32 @@ fn openai_body(endpoint: &Endpoint, system: &str, messages: &[LlmMessage], tools
                 chat.push(Value::Object(entry));
             }
             "tool" => {
-                chat.push(json!({
-                    "role": "tool",
-                    "tool_call_id": message.tool_call_id.clone().unwrap_or_default(),
-                    "content": message.content,
-                }));
+                match extract_tool_image(&message.content) {
+                    Some((compact_json, path, mime, b64)) => {
+                        // Chat Completions has no native tool-image channel:
+                        // the compact JSON goes into the tool message and the
+                        // image rides along in a synthetic user message.
+                        chat.push(json!({
+                            "role": "tool",
+                            "tool_call_id": message.tool_call_id.clone().unwrap_or_default(),
+                            "content": compact_json,
+                        }));
+                        chat.push(json!({
+                            "role": "user",
+                            "content": [
+                                { "type": "text", "text": format!("Attached image from view_image ({path}):") },
+                                { "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{b64}") } },
+                            ],
+                        }));
+                    }
+                    None => {
+                        chat.push(json!({
+                            "role": "tool",
+                            "tool_call_id": message.tool_call_id.clone().unwrap_or_default(),
+                            "content": message.content,
+                        }));
+                    }
+                }
             }
             role => {
                 chat.push(json!({ "role": role, "content": message.content }));
@@ -902,11 +1037,25 @@ fn anthropic_body(endpoint: &Endpoint, system: &str, messages: &[LlmMessage], to
                 chat.push(json!({ "role": "assistant", "content": blocks }));
             }
             "tool" => {
-                let tool_result = json!({
-                    "type": "tool_result",
-                    "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
-                    "content": message.content,
-                });
+                let tool_result = match extract_tool_image(&message.content) {
+                    Some((compact_json, _path, mime, b64)) => {
+                        // Native Anthropic multimodal tool_result: a text
+                        // block plus a base64 image block.
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
+                            "content": [
+                                { "type": "text", "text": compact_json },
+                                { "type": "image", "source": { "type": "base64", "media_type": mime, "data": b64 } },
+                            ],
+                        })
+                    }
+                    None => json!({
+                        "type": "tool_result",
+                        "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
+                        "content": message.content,
+                    }),
+                };
                 // Tool results must live in the following user message;
                 // consecutive tool messages merge into one.
                 let merge = match chat.last_mut() {
@@ -1273,6 +1422,128 @@ mod tests {
         assert_eq!(acc.deltas[0], ("Hello".to_string(), String::new()));
         assert_eq!(acc.deltas[1], (String::new(), "thinking...".to_string()));
         assert_eq!(acc.deltas[2], (String::new(), " more".to_string()));
+    }
+
+    /// A `view_image` tool output as produced by the tool harness: metadata
+    /// plus base64 image data.
+    fn view_image_message() -> LlmMessage {
+        LlmMessage {
+            role: "tool".into(),
+            content: json!({
+                "ok": true,
+                "path": "assets/logo.png",
+                "mime_type": "image/png",
+                "bytes": 68,
+                "width": 1,
+                "height": 1,
+                "data_base64": "aVZFV19CQVNFNjQ=",
+                "data_url": "data:image/png;base64,aVZFV19CQVNFNjQ=",
+            })
+            .to_string(),
+            tool_call_id: Some("c1".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extract_tool_image_strips_base64_fields() {
+        let (compact, path, mime, b64) = extract_tool_image(&view_image_message().content).unwrap();
+        assert_eq!(path, "assets/logo.png");
+        assert_eq!(mime, "image/png");
+        assert_eq!(b64, "aVZFV19CQVNFNjQ=");
+        let parsed: Value = serde_json::from_str(&compact).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["mime_type"], "image/png");
+        assert!(parsed.get("data_base64").is_none());
+        assert!(parsed.get("data_url").is_none());
+        // Plain tool outputs (no JSON object with data_base64) stay untouched.
+        assert!(extract_tool_image("plain text").is_none());
+        assert!(extract_tool_image(r#"{"ok":true}"#).is_none());
+    }
+
+    #[test]
+    fn responses_body_carries_tool_image_as_input_image() {
+        let endpoint = Endpoint {
+            base_url: "https://api.openai.com/v1".into(),
+            api: "openai-responses".into(),
+            api_key: "k".into(),
+            model: "gpt-5".into(),
+            ..Default::default()
+        };
+        let messages = vec![view_image_message()];
+        let body = build_responses_body(&endpoint, "sys", &messages, &[]);
+        let item = &body["input"][0];
+        assert_eq!(item["type"], "function_call_output");
+        assert_eq!(item["call_id"], "c1");
+        let output = item["output"].as_array().unwrap();
+        assert_eq!(output[0]["type"], "input_text");
+        let compact: Value = serde_json::from_str(output[0]["text"].as_str().unwrap()).unwrap();
+        assert!(compact.get("data_base64").is_none());
+        assert_eq!(compact["mime_type"], "image/png");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(
+            output[1]["image_url"],
+            "data:image/png;base64,aVZFV19CQVNFNjQ="
+        );
+    }
+
+    #[test]
+    fn anthropic_body_carries_tool_image_as_image_block() {
+        let endpoint = Endpoint {
+            base_url: "https://api.anthropic.com".into(),
+            api: "anthropic".into(),
+            api_key: "k".into(),
+            model: "claude".into(),
+            ..Default::default()
+        };
+        let messages = vec![view_image_message()];
+        let body = anthropic_body(&endpoint, "sys", &messages, &[]);
+        let result = &body["messages"][0]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "c1");
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        let compact: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+        assert!(compact.get("data_base64").is_none());
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aVZFV19CQVNFNjQ=");
+    }
+
+    #[test]
+    fn openai_body_carries_tool_image_in_synthetic_user_message() {
+        let endpoint = Endpoint {
+            base_url: "https://example.com/v1".into(),
+            api: "openai-compatible".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            ..Default::default()
+        };
+        let messages = vec![view_image_message()];
+        let body = openai_body(&endpoint, "sys", &messages, &[]);
+        let chat = body["messages"].as_array().unwrap();
+        // system message + tool message + synthetic user message.
+        assert_eq!(chat.len(), 3);
+        // The tool message carries only the compact JSON.
+        assert_eq!(chat[1]["role"], "tool");
+        assert_eq!(chat[1]["tool_call_id"], "c1");
+        let compact: Value = serde_json::from_str(chat[1]["content"].as_str().unwrap()).unwrap();
+        assert!(compact.get("data_base64").is_none());
+        assert_eq!(compact["path"], "assets/logo.png");
+        // Followed by a synthetic user message with the image part.
+        assert_eq!(chat[2]["role"], "user");
+        let content = chat[2]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("view_image (assets/logo.png)"));
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,aVZFV19CQVNFNjQ="
+        );
     }
 
     #[test]

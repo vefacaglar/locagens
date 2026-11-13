@@ -16,6 +16,10 @@ pub struct SecurityApi {
 #[serde(rename_all = "camelCase")]
 pub struct SecuritySandbox {
     pub platform: String,
+    /// Detected sandbox backend (`macos-seatbelt`, `linux-bwrap` or
+    /// `host-env-only`).
+    #[serde(default)]
+    pub backend: String,
     pub status: String,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
@@ -48,8 +52,38 @@ async fn status_value() -> SecurityStatus {
             bind_address: "127.0.0.1".to_string(),
             authenticated: true,
         },
-        sandbox: SecuritySandbox {
-            platform: std::env::consts::OS.to_string(),
+        sandbox: sandbox_status(),
+        policy: SecurityPolicy {
+            command_network: "deny_by_default".to_string(),
+            workspace_writes_only: true,
+        },
+    }
+}
+
+/// Builds the sandbox part of the status from the detected native backend.
+fn sandbox_status() -> SecuritySandbox {
+    use locagens_execpolicy::sandbox::{detect_backend, SandboxBackend};
+    let platform = std::env::consts::OS.to_string();
+    match detect_backend() {
+        SandboxBackend::MacosSeatbelt => SecuritySandbox {
+            platform,
+            backend: "macos-seatbelt".to_string(),
+            status: "ready".to_string(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            can_install: false,
+        },
+        SandboxBackend::LinuxBubblewrap => SecuritySandbox {
+            platform,
+            backend: "linux-bwrap".to_string(),
+            status: "ready".to_string(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            can_install: false,
+        },
+        SandboxBackend::HostEnvOnly => SecuritySandbox {
+            platform,
+            backend: "host-env-only".to_string(),
             status: "ready".to_string(),
             errors: Vec::new(),
             warnings: vec![
@@ -57,10 +91,6 @@ async fn status_value() -> SecurityStatus {
                     .to_string(),
             ],
             can_install: false,
-        },
-        policy: SecurityPolicy {
-            command_network: "deny_by_default".to_string(),
-            workspace_writes_only: true,
         },
     }
 }

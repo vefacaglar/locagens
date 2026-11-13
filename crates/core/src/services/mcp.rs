@@ -1,16 +1,33 @@
-//! MCP server configuration store — port of `McpConfigStore.ts`.
+//! MCP server configuration store + live MCP client — port of
+//! `McpConfigStore.ts` plus the Codex-style JSON-RPC 2.0 client.
 //!
 //! Reads and writes `{ "mcpServers": { name: entry } }` JSON files: one
 //! user-level file (`mcp_servers.json` in app support) and one project-level
 //! file (`<project>/.locagens/mcp.json`). Project entries override same-named
-//! user entries. Live connections arrive in a later phase; until then the
-//! reported status is `disabled` or `disconnected`.
+//! user entries. Live connections use the JSON-RPC client below: `stdio`
+//! servers are spawned as child processes, `http`/`sse`/`streamable-http`
+//! servers get JSON-RPC POSTs, and discovered tools are cached in memory.
 
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::BTreeMap;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::process::Command;
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_CLIENT_NAME: &str = "locagens";
+const MCP_CLIENT_VERSION: &str = "0.1.0";
+/// Bound for the whole stdio roundtrip (initialize + target call).
+const STDIO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound for one HTTP JSON-RPC POST.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum characters returned by a single MCP tool call.
+const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
 
 /// Serializable shape of one server config (camelCase for the frontend).
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -131,6 +148,103 @@ pub fn list_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
     }
 
     configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    configs
+}
+
+// ----------------------------------------------------------------------
+// Qualified tool names (Codex-compatible `mcp__<server>__<tool>`)
+// ----------------------------------------------------------------------
+
+/// Sanitized server prefix: every char that is not ASCII-alphanumeric, `_`
+/// or `-` becomes `_`; the result is wrapped as `mcp__<clean>__`.
+pub fn sanitized_server_prefix(server_name: &str) -> String {
+    let clean: String = server_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    format!("mcp__{clean}__")
+}
+
+/// Splits a qualified `mcp__<server>__<tool>` name into its parts.
+pub fn parse_qualified_mcp_tool(tool_name: &str) -> Option<(String, String)> {
+    let rest = tool_name.strip_prefix("mcp__")?;
+    let (server_key, raw_tool) = match rest.split_once("__") {
+        Some((server, tool)) => (server, tool),
+        // Degraded form `mcp__<name>`: treat the remainder as the tool name
+        // with an empty server key (rare, but keeps the parse total).
+        None => ("", rest),
+    };
+    Some((server_key.to_string(), raw_tool.to_string()))
+}
+
+// ----------------------------------------------------------------------
+// Effective configs (explicit files + enabled plugin manifests)
+// ----------------------------------------------------------------------
+
+/// Builds a config from a plugin-manifest `mcpServers` entry.
+fn config_from_plugin_entry(
+    name: &str,
+    entry: &Value,
+    project_path: Option<&str>,
+) -> Option<McpServerConfig> {
+    let obj = entry.as_object()?;
+    let transport = obj
+        .get("transport")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if obj.contains_key("url") {
+                "sse".to_string()
+            } else {
+                "stdio".to_string()
+            }
+        });
+    let command = obj.get("command").and_then(Value::as_str).map(str::to_string);
+    let args = obj
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect());
+    let env = obj.get("env").and_then(Value::as_object).map(|map| {
+        map.iter()
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+            .collect::<BTreeMap<String, String>>()
+    });
+    let url = obj.get("url").and_then(Value::as_str).map(str::to_string);
+    let enabled = obj
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        && !obj.get("disabled").and_then(Value::as_bool).unwrap_or(false);
+    Some(McpServerConfig {
+        name: name.to_string(),
+        scope: "plugin".to_string(),
+        transport,
+        command,
+        args,
+        env,
+        url,
+        enabled,
+        project_path: project_path.map(|p| p.to_string()),
+    })
+}
+
+/// Explicit MCP configs (user + project files) merged with the `mcpServers`
+/// entries of every enabled plugin manifest. Explicit config entries win;
+/// plugin entries are only appended when the name is not taken.
+pub fn effective_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
+    let mut configs = list_configs(project_path);
+    for manifest in crate::services::plugins::enabled_manifests(project_path) {
+        let servers = manifest.get("mcpServers").and_then(Value::as_object);
+        let Some(servers) = servers else { continue };
+        for (name, entry) in servers {
+            if configs.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            if let Some(config) = config_from_plugin_entry(name, entry, project_path) {
+                configs.push(config);
+            }
+        }
+    }
     configs
 }
 
@@ -294,5 +408,513 @@ pub fn validate_input(input: &McpServerInput, registered_project: Option<&str>) 
         enabled: input.enabled.unwrap_or(true),
         project_path,
     })
+}
+
+// ----------------------------------------------------------------------
+// In-memory cache of probed server info
+// ----------------------------------------------------------------------
+
+fn cache() -> &'static Mutex<HashMap<String, McpServerInfo>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, McpServerInfo>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key(project_path: Option<&str>, name: &str) -> String {
+    format!("{}::{name}", project_path.unwrap_or(""))
+}
+
+fn cache_get(project_path: Option<&str>, name: &str) -> Option<McpServerInfo> {
+    let key = cache_key(project_path, name);
+    cache().lock().ok()?.get(&key).cloned()
+}
+
+fn cache_put(project_path: Option<&str>, info: &McpServerInfo) {
+    let key = cache_key(project_path, &info.config.name);
+    if let Ok(mut cache) = cache().lock() {
+        cache.insert(key, info.clone());
+    }
+}
+
+/// Drops every cached probe for a server name (any project scope). Used by
+/// the Settings facade on upsert/delete/toggle/restart.
+pub fn invalidate_server(name: &str) {
+    let suffix = format!("::{name}");
+    if let Ok(mut cache) = cache().lock() {
+        let stale: Vec<String> = cache
+            .keys()
+            .filter(|key| key.ends_with(&suffix))
+            .cloned()
+            .collect();
+        for key in stale {
+            cache.remove(&key);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// JSON-RPC 2.0 client (stdio + HTTP/SSE)
+// ----------------------------------------------------------------------
+
+async fn rpc_call(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
+    match config.transport.as_str() {
+        "http" | "sse" | "streamable-http" => rpc_http(config, method, params).await,
+        _ => rpc_stdio(config, method, params).await,
+    }
+}
+
+async fn write_rpc_line<W>(stdin: &mut W, value: &Value) -> Result<(), String>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut line = serde_json::to_string(value).map_err(|err| err.to_string())?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await.map_err(|err| err.to_string())?;
+    stdin.flush().await.map_err(|err| err.to_string())
+}
+
+/// Reads JSON-RPC response lines until one matches `id`, then unwraps
+/// `result` (or maps `error` into a string error).
+async fn read_rpc_response<R>(reader: &mut R, id: u64) -> Result<Value, String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line).await.map_err(|err| err.to_string())?;
+        if bytes == 0 {
+            return Err("MCP server closed stdout before responding.".to_string());
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            // Non-JSON log output from the server process is ignored.
+            continue;
+        };
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            return Err(format!("MCP server error: {error}"));
+        }
+        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+    }
+}
+
+async fn rpc_stdio(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
+    let command = config
+        .command
+        .clone()
+        .filter(|command| !command.trim().is_empty())
+        .ok_or_else(|| format!("MCP server '{}' has no command.", config.name))?;
+    let mut cmd = Command::new(&command);
+    if let Some(args) = &config.args {
+        cmd.args(args);
+    }
+    if let Some(env) = &config.env {
+        cmd.envs(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to start MCP server '{}': {err}", config.name))?;
+
+    let roundtrip = async {
+        let mut stdin = child.stdin.take().ok_or("MCP server stdin unavailable.")?;
+        let stdout = child.stdout.take().ok_or("MCP server stdout unavailable.")?;
+        let mut reader = tokio::io::BufReader::new(stdout);
+
+        write_rpc_line(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": MCP_CLIENT_NAME, "version": MCP_CLIENT_VERSION }
+                }
+            }),
+        )
+        .await?;
+        let _init = read_rpc_response(&mut reader, 1).await?;
+        write_rpc_line(
+            &mut stdin,
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        )
+        .await?;
+        write_rpc_line(
+            &mut stdin,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+        )
+        .await?;
+        read_rpc_response(&mut reader, 2).await
+    };
+
+    let result = tokio::time::timeout(STDIO_TIMEOUT, roundtrip)
+        .await
+        .map_err(|_| format!("MCP server '{}' timed out after 10s.", config.name))??;
+    Ok(result)
+}
+
+fn unwrap_rpc_response(value: Value) -> Result<Value, String> {
+    if let Some(error) = value.get("error") {
+        return Err(format!("MCP server error: {error}"));
+    }
+    Ok(value.get("result").cloned().unwrap_or(Value::Null))
+}
+
+async fn rpc_http(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
+    let url = config
+        .url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| format!("MCP server '{}' has no url.", config.name))?;
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|err| format!("Failed to build HTTP client: {err}"))?;
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let response = client
+        .post(&url)
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| format!("MCP HTTP request to '{url}' failed: {err}"))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        return Err(format!("MCP HTTP endpoint returned {status}: {}", truncate_chars(&text, 400)));
+    }
+    // Direct JSON response first…
+    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if value.get("jsonrpc").is_some() || value.get("result").is_some() || value.get("error").is_some() {
+            return unwrap_rpc_response(value);
+        }
+    }
+    // …otherwise parse SSE `data: {...}` lines.
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else { continue };
+        if value.get("id").and_then(Value::as_u64) == Some(1) {
+            return unwrap_rpc_response(value);
+        }
+    }
+    Err(format!("MCP HTTP endpoint '{url}' returned no JSON-RPC response."))
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(max).collect();
+        format!("{head}…")
+    }
+}
+
+// ----------------------------------------------------------------------
+// Probe / discover / call
+// ----------------------------------------------------------------------
+
+/// Probes one server: spawns/requests `tools/list` and caches the result.
+/// Disabled servers report `disabled` without being spawned.
+pub async fn probe_server(config: &McpServerConfig) -> McpServerInfo {
+    if !config.enabled {
+        return McpServerInfo {
+            config: config.clone(),
+            status: "disabled".to_string(),
+            error: None,
+            tools: Vec::new(),
+        };
+    }
+    match rpc_call(config, "tools/list", &json!({})).await {
+        Ok(result) => {
+            let tools = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let info = McpServerInfo {
+                config: config.clone(),
+                status: "connected".to_string(),
+                error: None,
+                tools,
+            };
+            cache_put(config.project_path.as_deref(), &info);
+            info
+        }
+        Err(error) => McpServerInfo {
+            config: config.clone(),
+            status: "error".to_string(),
+            error: Some(error),
+            tools: Vec::new(),
+        },
+    }
+}
+
+/// Probes every effective config concurrently (disabled servers return
+/// their `disabled` status without spawning).
+pub async fn probe_all(project_path: Option<&str>) -> Vec<McpServerInfo> {
+    let configs = effective_configs(project_path);
+    futures::future::join_all(configs.iter().map(probe_server)).await
+}
+
+/// Discovers MCP tools and converts them into OpenAI function-tool defs with
+/// qualified names (`mcp__<server>__<tool>`). Cached tools are reused;
+/// servers not yet probed are probed on demand.
+pub async fn discover_tool_defs(project_path: Option<&str>) -> Vec<Value> {
+    let mut defs = Vec::new();
+    for config in effective_configs(project_path).iter().filter(|c| c.enabled) {
+        let tools = match cache_get(project_path, &config.name) {
+            Some(info) if info.status == "connected" && !info.tools.is_empty() => info.tools,
+            _ => {
+                let probed = probe_server(config).await;
+                if probed.status == "connected" { probed.tools } else { Vec::new() }
+            }
+        };
+        let prefix = sanitized_server_prefix(&config.name);
+        for tool in tools {
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            defs.push(json!({
+                "type": "function",
+                "function": {
+                    "name": format!("{prefix}{name}"),
+                    "description": tool
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("MCP tool")
+                        .to_string(),
+                    "parameters": tool
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "type": "object" })),
+                }
+            }));
+        }
+    }
+    defs
+}
+
+/// Finds an enabled server by exact name, sanitized name or prefix form.
+fn find_enabled_server(server_key: &str, project_path: Option<&str>) -> Result<McpServerConfig, String> {
+    let key = server_key.trim();
+    if key.is_empty() {
+        return Err("MCP server key is empty.".to_string());
+    }
+    for config in effective_configs(project_path) {
+        if !config.enabled {
+            continue;
+        }
+        let sanitized = sanitized_server_prefix(&config.name);
+        if config.name == key
+            || sanitized.trim_start_matches("mcp__").trim_end_matches("__") == key
+            || sanitized == key
+            || format!("mcp__{}", config.name) == key
+        {
+            return Ok(config);
+        }
+    }
+    Err(format!("MCP server '{server_key}' not found or disabled."))
+}
+
+fn extract_content_text(result: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(content) = result.get("content").and_then(Value::as_array) {
+        for item in content {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                parts.push(text.to_string());
+            } else if item.get("type").and_then(Value::as_str) == Some("resource") {
+                if let Some(text) = item.pointer("/resource/text").and_then(Value::as_str) {
+                    parts.push(text.to_string());
+                } else if let Ok(json) = serde_json::to_string(item) {
+                    parts.push(json);
+                }
+            } else if let Ok(json) = serde_json::to_string(item) {
+                parts.push(json);
+            }
+        }
+    }
+    if parts.is_empty() {
+        // Fall back to the raw result so the model still sees something.
+        serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string())
+    } else {
+        parts.join("\n")
+    }
+}
+
+/// Calls `tools/call` on a matching enabled server and extracts the text or
+/// JSON content from `result.content` (or returns the `isError` reason).
+pub async fn call_mcp_tool(
+    project_path: Option<&str>,
+    server_key: &str,
+    tool_name: &str,
+    arguments: &Value,
+) -> Result<String, String> {
+    let server = find_enabled_server(server_key, project_path)?;
+    let result = rpc_call(&server, "tools/call", &json!({ "name": tool_name, "arguments": arguments })).await?;
+    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        let text = extract_content_text(&result);
+        return Err(if text.trim().is_empty() {
+            format!("MCP tool '{tool_name}' failed.")
+        } else {
+            text
+        });
+    }
+    Ok(truncate_chars(&extract_content_text(&result), MAX_TOOL_OUTPUT_CHARS))
+}
+
+/// Calls `resources/list` on matching enabled servers and returns pretty
+/// JSON `{ "resources": [...] }`.
+pub async fn list_resources(
+    project_path: Option<&str>,
+    server_filter: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<String, String> {
+    let mut resources: Vec<Value> = Vec::new();
+    for config in effective_configs(project_path).iter().filter(|c| c.enabled) {
+        if let Some(filter) = server_filter.map(str::trim).filter(|f| !f.is_empty()) {
+            if config.name != filter
+                && sanitized_server_prefix(&config.name).trim_start_matches("mcp__").trim_end_matches("__") != filter
+            {
+                continue;
+            }
+        }
+        let mut params = json!({});
+        if let Some(cursor) = cursor {
+            params["cursor"] = json!(cursor);
+        }
+        if let Ok(result) = rpc_call(config, "resources/list", &params).await {
+            if let Some(list) = result.get("resources").and_then(Value::as_array) {
+                resources.extend(list.clone());
+            }
+        }
+    }
+    serde_json::to_string_pretty(&json!({ "resources": resources })).map_err(|err| err.to_string())
+}
+
+/// Calls `resources/read` on one server and returns the JSON contents.
+pub async fn read_resource(project_path: Option<&str>, server_name: &str, uri: &str) -> Result<String, String> {
+    let server = find_enabled_server(server_name, project_path)?;
+    let result = rpc_call(&server, "resources/read", &json!({ "uri": uri })).await?;
+    serde_json::to_string_pretty(&result).map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pure-POSIX MCP stdio mock: reads JSON-RPC lines and answers with
+    /// canned responses keyed by method name (no external tooling needed).
+    const MOCK_SERVER_SCRIPT: &str = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"mock","version":"0.1.0"}}}';;
+    *'"tools/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo back a message","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}}]}}';;
+    *'"tools/call"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"hello from mock"}]}}';;
+    *'"resources/list"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"mock://doc","name":"Doc","mimeType":"text/plain"}]}}';;
+    *'"resources/read"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"mock://doc","text":"resource body"}]}}';;
+  esac
+done"#;
+
+    fn mock_config() -> McpServerConfig {
+        McpServerConfig {
+            name: "mock".to_string(),
+            scope: "user".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("sh".to_string()),
+            args: Some(vec!["-c".to_string(), MOCK_SERVER_SCRIPT.to_string()]),
+            env: None,
+            url: None,
+            enabled: true,
+            project_path: None,
+        }
+    }
+
+    #[test]
+    fn qualified_mcp_tool_names_parse() {
+        assert_eq!(sanitized_server_prefix("github"), "mcp__github__");
+        assert_eq!(sanitized_server_prefix("my weird server!"), "mcp__my_weird_server___");
+        assert_eq!(parse_qualified_mcp_tool("mcp__github__list_issues"),
+            Some(("github".to_string(), "list_issues".to_string())));
+        assert_eq!(parse_qualified_mcp_tool("mcp__srv__plain_tool_name"),
+            Some(("srv".to_string(), "plain_tool_name".to_string())));
+        assert_eq!(parse_qualified_mcp_tool("read_file"), None);
+    }
+
+    #[tokio::test]
+    async fn qualified_mcp_tool_names_and_stdio_roundtrip() {
+        // Register the mock server in a hermetic project-level config.
+        let project = std::env::temp_dir().join(format!(
+            "locagens-mcp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(project.join(".locagens")).unwrap();
+        let mut config = mock_config();
+        config.scope = "project".to_string();
+        config.project_path = Some(project.display().to_string());
+        std::fs::write(
+            project.join(".locagens").join("mcp.json"),
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "mock": {
+                        "command": config.command,
+                        "args": config.args,
+                        "transport": "stdio"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let project_str = project.display().to_string();
+
+        // probe_server → connected with discovered tools.
+        let info = probe_server(&config).await;
+        assert_eq!(info.status, "connected", "error: {:?}", info.error);
+        assert_eq!(info.tools.len(), 1);
+        assert_eq!(info.tools[0]["name"], "echo");
+
+        // Disabled servers are never spawned.
+        let mut disabled = config.clone();
+        disabled.enabled = false;
+        let info = probe_server(&disabled).await;
+        assert_eq!(info.status, "disabled");
+
+        // call_mcp_tool → text content extracted from result.content.
+        let output = call_mcp_tool(Some(&project_str), "mock", "echo", &json!({ "message": "hi" }))
+            .await
+            .expect("tools/call should succeed");
+        assert_eq!(output, "hello from mock");
+
+        // Qualified name lookup: sanitized prefix form also resolves.
+        let output = call_mcp_tool(Some(&project_str), &sanitized_server_prefix("mock"), "echo", &json!({}))
+            .await
+            .expect("qualified prefix should resolve");
+        assert_eq!(output, "hello from mock");
+
+        // Unknown server key fails cleanly.
+        assert!(call_mcp_tool(Some(&project_str), "missing", "echo", &json!({})).await.is_err());
+
+        // Resources list/read roundtrip.
+        let list = list_resources(Some(&project_str), Some("mock"), None).await.expect("resources/list");
+        let parsed: Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(parsed["resources"][0]["uri"], "mock://doc");
+        let read = read_resource(Some(&project_str), "mock", "mock://doc").await.expect("resources/read");
+        let parsed: Value = serde_json::from_str(&read).unwrap();
+        assert_eq!(parsed["contents"][0]["text"], "resource body");
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
 }
 

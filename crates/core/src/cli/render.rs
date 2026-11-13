@@ -77,8 +77,9 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
         }
     }
 
-    /// Renders one run event. Only `message_*`, `round_started`,
-    /// `run_title_changed` and `plan_updated` produce output.
+    /// Renders one run event. `message_*`, `round_started`,
+    /// `run_title_changed`, `plan_updated`, `turn_diff_updated`,
+    /// `context_compacted` and `agent_spawned` produce output.
     pub fn on_event(&mut self, event: &Value) {
         match event.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_created" | "message_updated" => {
@@ -117,6 +118,41 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
                     self.err,
                     "{}",
                     self.paint(DIM, &format!("· plan updated: {title}"))
+                );
+                let _ = self.err.flush();
+            }
+            "turn_diff_updated" => {
+                let files_changed = event
+                    .get("filesChanged")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if files_changed > 0 {
+                    let _ = writeln!(
+                        self.err,
+                        "{}",
+                        self.paint(DIM, &format!("· turn diff: {files_changed} file(s) changed"))
+                    );
+                    let _ = self.err.flush();
+                }
+            }
+            "context_compacted" => {
+                let before = event.get("messagesBefore").and_then(Value::as_u64).unwrap_or(0);
+                let after = event.get("messagesAfter").and_then(Value::as_u64).unwrap_or(0);
+                let _ = writeln!(
+                    self.err,
+                    "{}",
+                    self.paint(DIM, &format!("· context compacted ({before} → {after} msgs)"))
+                );
+                let _ = self.err.flush();
+            }
+            "agent_spawned" => {
+                let agent_id = event.get("agentId").and_then(Value::as_str).unwrap_or("");
+                let name = event.get("name").and_then(Value::as_str).unwrap_or("");
+                let role = event.get("role").and_then(Value::as_str).unwrap_or("explorer");
+                let _ = writeln!(
+                    self.err,
+                    "{}",
+                    self.paint(DIM, &format!("· spawned {role} agent \"{name}\" ({agent_id})"))
                 );
                 let _ = self.err.flush();
             }

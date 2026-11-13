@@ -340,6 +340,103 @@ pub fn validate_project_path(raw: &str) -> Option<String> {
     canonical_project_path(raw).ok().map(|p| p.to_string_lossy().to_string())
 }
 
+// ----------------------------------------------------------------------
+// `$skill` mention extraction
+// ----------------------------------------------------------------------
+
+/// Common shell/env variable names that must never be treated as `$skill`
+/// mentions.
+const SKIPPED_ENV_NAMES: &[&str] = &[
+    "HOME", "PATH", "USER", "SHELL", "PWD", "TMP", "TEMP", "TMPDIR",
+    "TERM", "EDITOR", "LANG", "LC_ALL", "LOCAGENS_HOME", "CODEX_HOME",
+    "PI_HOME", "CARGO_HOME", "RUSTUP_HOME", "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "API_KEY", "TOKEN",
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+];
+
+/// Extracts `$name` skill mentions from free text, normalized via
+/// `normalize_name`, deduplicated case-insensitively, in first-appearance
+/// order. Skips shell/env variables (known names, positional parameters and
+/// ALL_CAPS identifiers containing `_`).
+pub fn extract_skill_mentions(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut mentions: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch != '$' {
+            continue;
+        }
+        // A mention must not be glued to a previous identifier or another `$`.
+        if index > 0 {
+            let previous = chars[index - 1];
+            if previous.is_alphanumeric() || previous == '$' || previous == '_' {
+                continue;
+            }
+        }
+        // Collect the token: `[A-Za-z0-9][A-Za-z0-9_-]*`.
+        let mut token = String::new();
+        let mut cursor = index + 1;
+        while cursor < chars.len() {
+            let c = chars[cursor];
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                token.push(c);
+                cursor += 1;
+            } else {
+                break;
+            }
+        }
+        if token.is_empty() {
+            continue;
+        }
+        let upper = token.to_uppercase();
+        if SKIPPED_ENV_NAMES.contains(&upper.as_str()) {
+            continue;
+        }
+        // ALL_CAPS identifiers with an underscore look like env variables
+        // (`$MY_ENV_VAR`) rather than skills.
+        if token.contains('_')
+            && token
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
+            continue;
+        }
+        let Some(normalized) = normalize_name(&token) else {
+            continue;
+        };
+        if seen.insert(normalized.clone()) {
+            mentions.push(normalized);
+        }
+    }
+    mentions
+}
+
+/// Resolves `$name` mentions in `text` against the discovered skills for
+/// `project_path`, returning full skill summaries (including the body) in
+/// mention order. Unknown names are silently skipped.
+pub fn resolve_mentioned_skills(project_path: &str, text: &str) -> Vec<SkillSummary> {
+    let mentions = extract_skill_mentions(text);
+    if mentions.is_empty() {
+        return Vec::new();
+    }
+    let project = if project_path.trim().is_empty() {
+        None
+    } else {
+        Some(project_path)
+    };
+    let skills = list(project);
+    mentions
+        .into_iter()
+        .filter_map(|mention| {
+            skills
+                .iter()
+                .find(|skill| skill.name == mention)
+                .cloned()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +460,55 @@ mod tests {
     fn rejects_bad_names() {
         let raw = "---\nname: ../evil\ndescription: x\n---\nbody";
         assert!(parse_skill_md(raw).is_none());
+    }
+
+    #[test]
+    fn extracts_dollar_skill_mentions_and_skips_env_vars() {
+        let mentions = extract_skill_mentions("run $review then $foo-bar, also $RustAnalyzer and $re_view");
+        assert_eq!(mentions, vec!["review", "foo-bar", "rustanalyzer", "re_view"]);
+
+        // Deduplicated case-insensitively, first appearance order.
+        assert_eq!(extract_skill_mentions("$Review $review $REVIEW"), vec!["review"]);
+
+        // Shell/env variables are skipped.
+        assert!(extract_skill_mentions("$HOME $PATH $USER $SHELL $PWD $TMP $TMPDIR $TERM $EDITOR $LANG $LC_ALL").is_empty());
+        assert!(extract_skill_mentions("$OPENAI_API_KEY $MY_ENV_VAR $API_KEY $TOKEN $1").is_empty());
+
+        // Not a mention when glued to an identifier or another `$`.
+        assert!(extract_skill_mentions("abc$def a$b $$x").is_empty());
+
+        // Punctuation and whitespace boundaries work.
+        assert_eq!(extract_skill_mentions("($test)"), vec!["test"]);
+
+        // Names violating the slug rules are dropped (`.`/`..` terminate the
+        // token; a leading `-` fails normalize_name).
+        assert!(extract_skill_mentions("$-bad").is_empty());
+        assert_eq!(extract_skill_mentions("$Bad..Name"), vec!["bad"]);
+    }
+
+    #[test]
+    fn resolves_mentioned_skills_from_discovered_list() {
+        let dir = std::env::temp_dir().join(format!("locagens-skill-{}", uuid::Uuid::new_v4()));
+        let project = dir.join("proj");
+        let skill_dir = project.join(".locagens").join("skills").join("review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: review\ndescription: Reviews code\n---\nReview body here",
+        )
+        .unwrap();
+
+        let resolved = resolve_mentioned_skills(
+            project.to_string_lossy().as_ref(),
+            "please run $review on $HOME files",
+        );
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "review");
+        assert_eq!(resolved[0].source, "project");
+        assert_eq!(resolved[0].body.as_deref(), Some("Review body here"));
+
+        // Unknown mentions resolve to nothing.
+        assert!(resolve_mentioned_skills(project.to_string_lossy().as_ref(), "$nope").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -30,7 +30,7 @@ use crate::pi_providers::PiProviderManager;
 use crate::AppState;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -66,6 +66,40 @@ fn worker_tool_defs() -> Vec<Value> {
     let mut names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
     names.extend_from_slice(&["apply_patch", "exec_command", "write_stdin"]);
     tools::filter_tool_defs(&names)
+}
+
+/// Main-agent tool names for the run's mode: `chat` exposes only read-only
+/// bookkeeping tools, `plan` adds planning/research/delegation tools, and
+/// every other mode gets the full toolset.
+fn tool_names_for_mode(mode: &str) -> Vec<&'static str> {
+    let chat_tools: &[&str] = &[
+        "read_file", "list_directory", "search_files", "view_image",
+        "set_chat_title", "remember", "load_skill", "compact_context",
+        "ask_user_question", "request_user_input",
+        "list_mcp_resources", "read_mcp_resource",
+    ];
+    match mode {
+        "chat" => chat_tools.to_vec(),
+        "plan" => {
+            let mut names: Vec<&str> = chat_tools.to_vec();
+            names.extend_from_slice(&[
+                "update_plan", "fetch_url", "spawn_agent", "send_input", "wait_agent",
+                "close_agent", "list_agents", "spawn_agents",
+            ]);
+            names
+        }
+        _ => {
+            let mut names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
+            names.extend_from_slice(&[
+                "set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question",
+                "apply_patch", "exec_command", "write_stdin", "view_image", "request_user_input",
+                "compact_context", "spawn_agent", "send_input", "wait_agent", "close_agent",
+                "list_agents", "list_mcp_resources", "read_mcp_resource",
+            ]);
+            names.push("spawn_agents");
+            names
+        }
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -434,7 +468,7 @@ fn mode_rules(mode: &str) -> String {
 fn system_prompt(state: &AppState, run: &crate::db::Run) -> String {
     // `--system-prompt` replaces the base prompt; `--append-system-prompt`
     // appends to whatever base ends up being used.
-    if run.system_prompt.as_deref().map(str::trim).map(str::is_empty) == Some(false)
+    let mut prompt = if run.system_prompt.as_deref().map(str::trim).map(str::is_empty) == Some(false)
         || run.append_system_prompt.is_some()
     {
         let mut prompt = match run.system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -445,9 +479,24 @@ fn system_prompt(state: &AppState, run: &crate::db::Run) -> String {
             prompt.push_str("\n\n");
             prompt.push_str(append);
         }
-        return prompt;
+        prompt
+    } else {
+        base_system_prompt(state, run)
+    };
+    append_plugin_prompts(&mut prompt, &run.project_path);
+    prompt
+}
+
+/// Appends the `systemPrompt` sections of every enabled plugin.
+fn append_plugin_prompts(prompt: &mut String, project_path: &str) {
+    let prompts = crate::services::plugins::enabled_system_prompts(Some(project_path));
+    if prompts.is_empty() {
+        return;
     }
-    base_system_prompt(state, run)
+    prompt.push_str("\n\n## Active plugins\n");
+    for (name, text) in prompts {
+        prompt.push_str(&format!("\n### {name}\n{text}\n"));
+    }
 }
 
 fn base_system_prompt(state: &AppState, run: &crate::db::Run) -> String {
@@ -693,7 +742,10 @@ impl AgentLoop {
             }
 
             if tool_calls.is_empty() {
-                // Final answer.
+                // Final answer. Main agent runs the Stop hook once.
+                if self.agent_role.is_none() {
+                    self.run_stop_hook().await;
+                }
                 return Ok(message.content.clone());
             }
             last_assistant_content = message.content.clone();
@@ -712,11 +764,29 @@ impl AgentLoop {
                 let arguments = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
                 let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
 
-                let result = match self.dispatch_tool(&call_id, &name, &args).await {
-                    Ok(result) => result,
-                    Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
-                    Err(AgentError::Failed(err)) => format!("Tool error: {err}"),
+                // Lifecycle hooks: PreToolUse may block the call or rewrite
+                // its input before anything executes.
+                let pre = self.run_pre_tool_hook(&call_id, &name, &args).await;
+                let result = if pre.blocked {
+                    json!({
+                        "ok": false,
+                        "error": format!(
+                            "Blocked by PreToolUse hook: {}",
+                            pre.reason.unwrap_or_else(|| "blocked".to_string())
+                        ),
+                    })
+                    .to_string()
+                } else {
+                    let hook_args = pre.updated_input.clone().unwrap_or_else(|| args.clone());
+                    match self.dispatch_tool(&call_id, &name, &hook_args).await {
+                        Ok(result) => result,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(AgentError::Failed(err)) => format!("Tool error: {err}"),
+                    }
                 };
+
+                // PostToolUse may append context to the tool response.
+                let result = self.run_post_tool_hook(&call_id, &name, &args, result).await;
 
                 let mut tool_message = self.new_message("tool", &result);
                 tool_message.raw_response = Some(call_id.clone());
@@ -755,9 +825,78 @@ impl AgentLoop {
         Ok(last_assistant_content)
     }
 
+    // ------------------------------------------------------------------
+    // Lifecycle hooks (PreToolUse / PostToolUse / Stop)
+    // ------------------------------------------------------------------
+
+    fn hook_payload(&self, event: &str, extra: Value) -> Value {
+        let mut payload = json!({
+            "session_id": self.run_id,
+            "cwd": self.project_path.display().to_string(),
+            "hook_event_name": event,
+        });
+        if let (Some(obj), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+        payload
+    }
+
+    /// Runs `PreToolUse` hooks; a blocked outcome suppresses the tool call.
+    async fn run_pre_tool_hook(&self, call_id: &str, name: &str, args: &Value) -> crate::services::hooks::HookOutcome {
+        let payload = self.hook_payload(
+            "PreToolUse",
+            json!({
+                "tool_name": name,
+                "tool_input": args,
+                "tool_use_id": call_id,
+            }),
+        );
+        crate::services::hooks::run_hook_event("PreToolUse", &self.project_path, &payload).await
+    }
+
+    /// Runs `PostToolUse` hooks and appends any additional context to the
+    /// tool response.
+    async fn run_post_tool_hook(&self, call_id: &str, name: &str, args: &Value, mut result: String) -> String {
+        let payload = self.hook_payload(
+            "PostToolUse",
+            json!({
+                "tool_name": name,
+                "tool_input": args,
+                "tool_response": result,
+                "tool_use_id": call_id,
+            }),
+        );
+        let outcome = crate::services::hooks::run_hook_event("PostToolUse", &self.project_path, &payload).await;
+        if let Some(context) = outcome.context_joined() {
+            result.push_str(&format!("\n[hook context]: {context}"));
+        }
+        result
+    }
+
+    /// Runs the `Stop` hook once when the main agent produces its final
+    /// answer.
+    async fn run_stop_hook(&self) {
+        let payload = self.hook_payload("Stop", json!({}));
+        let outcome = crate::services::hooks::run_hook_event("Stop", &self.project_path, &payload).await;
+        if outcome.blocked {
+            if let Some(reason) = outcome.reason {
+                tracing::debug!("Stop hook requested continuation: {reason}");
+            }
+        }
+    }
+
     /// Executes one tool call, routing interactive/delegation tools to the
     /// orchestrator and workspace tools through permission gating.
     async fn dispatch_tool(&mut self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
+        if tools::is_forbidden_in_readonly_mode(&self.mode, name) {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "error": format!("Tool '{name}' is not allowed in '{}' mode.", self.mode),
+            })
+            .to_string());
+        }
         match name {
             "set_chat_title" => {
                 let title = args.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_string();
@@ -809,6 +948,45 @@ impl AgentLoop {
             "view_image" => tools::execute(&self.project_path, "view_image", args)
                 .await
                 .map_err(AgentError::Failed),
+            "list_mcp_resources" => {
+                let server = str_arg(args, "server").or_else(|| str_arg(args, "server_filter"));
+                let cursor = str_arg(args, "cursor");
+                crate::services::mcp::list_resources(
+                    Some(&self.project_path.display().to_string()),
+                    server,
+                    cursor,
+                )
+                .await
+                .map_err(AgentError::Failed)
+            }
+            "read_mcp_resource" => {
+                let server = str_arg(args, "server").unwrap_or_default();
+                let uri = str_arg(args, "uri").unwrap_or_default();
+                if server.trim().is_empty() || uri.trim().is_empty() {
+                    return Err(AgentError::Failed("read_mcp_resource: server and uri are required.".into()));
+                }
+                crate::services::mcp::read_resource(
+                    Some(&self.project_path.display().to_string()),
+                    server,
+                    uri,
+                )
+                .await
+                .map_err(AgentError::Failed)
+            }
+            name if name.starts_with("mcp__") => {
+                // Qualified MCP tools are blocked in read-only modes; they
+                // route through the gated executor elsewhere (permission is
+                // required in ask_permissions mode via needs_permission).
+                if self.mode == "chat" || self.mode == "plan" {
+                    Ok(json!({
+                        "ok": false,
+                        "error": format!("MCP tools are not available in '{}' mode.", self.mode),
+                    })
+                    .to_string())
+                } else {
+                    self.gated_execute(call_id, name, args).await
+                }
+            }
             "exec_command" | "apply_patch" => self.gated_execute(call_id, name, args).await,
             "write_stdin" => self.write_stdin_tool(args).await,
             name if WORKSPACE_TOOLS.contains(&name) => self.gated_execute(call_id, name, args).await,
@@ -816,12 +994,35 @@ impl AgentLoop {
         }
     }
 
+    /// Loads the merged Starlark `.rules` exec policy for this run: every
+    /// agent-directory `rules` folder plus the project-local
+    /// `<project>/.locagens/rules`.
+    fn load_exec_policy(&self) -> locagens_execpolicy::rules::Policy {
+        let mut dirs: Vec<PathBuf> = locagens_config::paths::agent_dir_chain()
+            .into_iter()
+            .map(|dir| dir.join("rules"))
+            .collect();
+        dirs.push(self.project_path.join(".locagens").join("rules"));
+        locagens_execpolicy::rules::Policy::load_from_dirs(&dirs)
+    }
+
     /// Executes one gated tool after permission decisions have been made.
     async fn execute_tool(&self, name: &str, args: &Value) -> Result<String, String> {
         match name {
             "exec_command" => self.exec_session(args).await,
             "apply_patch" => self.apply_patch_tool(args).await,
-            _ => tools::execute(&self.project_path, name, args).await,
+            name if name.starts_with("mcp__") => {
+                let (server_key, tool_name) = crate::services::mcp::parse_qualified_mcp_tool(name)
+                    .ok_or_else(|| format!("Invalid qualified MCP tool name: {name}"))?;
+                crate::services::mcp::call_mcp_tool(
+                    Some(&self.project_path.display().to_string()),
+                    &server_key,
+                    &tool_name,
+                    args,
+                )
+                .await
+            }
+            _ => tools::execute_with_mode(&self.project_path, &self.mode, name, args).await,
         }
     }
 
@@ -925,10 +1126,29 @@ impl AgentLoop {
             .unwrap_or(20_000)
             .clamp(1_000, 200_000) as usize * 4;
 
+        let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
+        let shell = str_arg(args, "shell")
+            .map(str::trim)
+            .filter(|shell| !shell.is_empty())
+            .map(str::to_string);
+        let login = args.get("login").and_then(Value::as_bool).unwrap_or(false);
+        let options = locagens_execpolicy::processes::SpawnOptions {
+            stdin_pipe: true,
+            tty,
+            env_clean: true,
+            shell,
+            login,
+            env: Some(tools::exec_session_env()),
+            sandbox: Some(locagens_execpolicy::sandbox::SandboxSpec {
+                mode: locagens_protocol::from_run_mode(&self.mode).1,
+                project_path: self.project_path.clone(),
+                allow_network: self.mode == "auto",
+            }),
+        };
         let info = self
             .state
             .processes
-            .spawn_with_stdin(&command, workdir, Some(tools::exec_session_env()));
+            .spawn_with_options(&command, workdir, options);
         let started = std::time::Instant::now();
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1091,10 +1311,7 @@ impl AgentLoop {
         if task.is_empty() {
             return Err(AgentError::Failed("spawn_agent: task is empty.".into()));
         }
-        let (role, readonly) = match str_arg(args, "role") {
-            Some("worker") => ("worker", false),
-            _ => ("explorer", true),
-        };
+        let (role, readonly) = sub_agent_role(args, &self.mode);
         let fallback_name = task.chars().take(40).collect::<String>().trim().to_string();
         let name = str_arg(args, "name")
             .map(str::trim)
@@ -1200,7 +1417,14 @@ impl AgentLoop {
         // previous output plus the new instruction.
         let previous = entry.output.clone().unwrap_or_default();
         let name = entry.name.clone();
-        let role_static: &'static str = if entry.role == "worker" { "worker" } else { "explorer" };
+        // Read-only modes force explorers, even when continuing a worker.
+        let role_static: &'static str = if self.mode == "plan" || self.mode == "chat" {
+            "explorer"
+        } else if entry.role == "worker" {
+            "worker"
+        } else {
+            "explorer"
+        };
         let readonly = role_static == "explorer";
         let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
         let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
@@ -1469,18 +1693,42 @@ impl AgentLoop {
         if agents.is_empty() {
             return Err(AgentError::Failed("spawn_agents: agents must be a non-empty array.".into()));
         }
+        // Validate up front (forcing read-only roles in plan/chat), then run
+        // everything concurrently.
+        let specs: Vec<(&'static str, String)> = agents
+            .iter()
+            .filter_map(|agent| {
+                let task = agent.get("task").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                if task.is_empty() {
+                    return None;
+                }
+                let role = agent.get("role").and_then(Value::as_str).unwrap_or("explorer");
+                Some((sub_agent_role_static(role, &self.mode), task))
+            })
+            .take(MAX_SUB_AGENTS)
+            .collect();
+        if specs.is_empty() {
+            return Err(AgentError::Failed("spawn_agents: no agent carried a non-empty task.".into()));
+        }
+
+        let outcomes = futures::future::join_all(specs.into_iter().map(|(agent_role, task)| async move {
+            let outcome = self
+                .run_sub_agent(
+                    agent_role,
+                    &task,
+                    &self.provider_id,
+                    &self.model,
+                    self.reasoning_effort.as_deref(),
+                    &task,
+                    agent_role == "explorer",
+                )
+                .await;
+            (task, agent_role, outcome)
+        }))
+        .await;
+
         let mut results = Vec::new();
-        for agent in agents.iter().take(MAX_SUB_AGENTS) {
-            let role = agent.get("role").and_then(Value::as_str).unwrap_or("explorer");
-            let task = agent.get("task").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-            if task.is_empty() {
-                continue;
-            }
-            let (agent_role, readonly) = match role {
-                "worker" => ("worker", false),
-                _ => ("explorer", true),
-            };
-            let outcome = self.run_sub_agent(agent_role, &task, &self.provider_id, &self.model, self.reasoning_effort.as_deref(), &task, readonly).await;
+        for (task, agent_role, outcome) in outcomes {
             match outcome {
                 Ok(answer) => results.push(format!("## {agent_role}: {task}\n{answer}")),
                 Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
@@ -1494,7 +1742,7 @@ impl AgentLoop {
 
     fn standing_grant(&self, name: &str, args: &Value) -> bool {
         let project_path = self.project_path.display().to_string();
-        let command = args.get("command").and_then(Value::as_str).unwrap_or_default();
+        let command = extract_command_str(args);
         let domains = sorted_domains(args);
         self.state
             .db
@@ -1504,12 +1752,23 @@ impl AgentLoop {
     }
 
     async fn gated_execute(&self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
-        // Codex command safety: under accept_edits (on-request +
-        // workspace-write) known-safe read-only commands run without a prompt.
-        if (name == "run_command" || name == "exec_command")
-            && command_safety::command_bypasses_prompt(&self.mode, &command_safety::command_from_args(args))
-        {
-            return self.execute_tool(name, args).await.map_err(AgentError::Failed);
+        // Codex command safety + Starlark `.rules` execpolicy: under
+        // accept_edits (on-request + workspace-write) allow-listed commands
+        // run without a prompt; forbidden rules block outright.
+        if name == "run_command" || name == "exec_command" {
+            let cmd_str = command_safety::command_from_args(args);
+            let policy = self.load_exec_policy();
+            match command_safety::command_bypasses_prompt_with_policy(&self.mode, &cmd_str, Some(&policy)) {
+                Ok(true) => return self.execute_tool(name, args).await.map_err(AgentError::Failed),
+                Ok(false) => {}
+                Err(reason) => {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("Command blocked by execpolicy rule: {reason}")
+                    })
+                    .to_string());
+                }
+            }
         }
         if !tools::needs_permission(&self.mode, name) || self.handle.allow_run.load(Ordering::SeqCst) || self.standing_grant(name, args) {
             return self.execute_with_turn_diff(name, args).await;
@@ -1564,7 +1823,7 @@ impl AgentLoop {
                 self.execute_with_turn_diff(name, args).await
             }
             "allow_project" | "allow_always" => {
-                let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
+                let command = extract_command_str(args).to_string();
                 let domains = args
                     .get("network_domains")
                     .or_else(|| args.get("networkDomains"))
@@ -1579,6 +1838,18 @@ impl AgentLoop {
                     domains,
                     &decision,
                 );
+                // Amend the Starlark `.rules` policy so the standing grant
+                // survives restarts and applies without the permission table.
+                if (name == "run_command" || name == "exec_command") && !command.is_empty() {
+                    let rules_file = if decision == "allow_project" {
+                        self.project_path.join(".locagens").join("rules").join("default.rules")
+                    } else {
+                        locagens_config::paths::locagens_home()
+                            .join("rules")
+                            .join("default.rules")
+                    };
+                    let _ = locagens_execpolicy::rules::append_allow_prefix_rule(&rules_file, &command);
+                }
                 self.execute_with_turn_diff(name, args).await
             }
             // allow_once and unknown decisions just proceed once.
@@ -1718,6 +1989,32 @@ fn normalize_request_user_input(args: &Value) -> Value {
     json!({ "questions": normalized })
 }
 
+/// Resolves the (role, readonly) pair of a sub-agent from tool args: workers
+/// get full tools, everything else is a read-only explorer — and `plan` /
+/// `chat` mode always forces the explorer role, even when a worker was
+/// requested.
+fn sub_agent_role(args: &Value, mode: &str) -> (&'static str, bool) {
+    let role = str_arg(args, "role").unwrap_or("explorer");
+    let role = sub_agent_role_static(role, mode);
+    (role, role == "explorer")
+}
+
+fn sub_agent_role_static(role: &str, mode: &str) -> &'static str {
+    if mode == "plan" || mode == "chat" {
+        return "explorer";
+    }
+    if role == "worker" { "worker" } else { "explorer" }
+}
+
+/// The command string of a `run_command`/`exec_command` call: `command`
+/// first, Codex's `cmd` as fallback.
+fn extract_command_str(args: &Value) -> &str {
+    args.get("command")
+        .or_else(|| args.get("cmd"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
 fn sorted_domains(args: &Value) -> Vec<String> {
     args.get("network_domains")
         .or_else(|| args.get("networkDomains"))
@@ -1745,8 +2042,10 @@ fn standing_grant_matches(
     if !scope_ok {
         return false;
     }
-    if tool == "run_command" {
-        if !rule.command.is_empty() && rule.command != command {
+    if tool == "run_command" || tool == "exec_command" {
+        // An empty rule command used to be saved for exec_command (its args
+        // use `cmd`); never let it act as a wildcard.
+        if rule.command.is_empty() || command.is_empty() || rule.command != command {
             return false;
         }
         if !rule.network_domains.is_empty() {
@@ -1862,15 +2161,37 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
 
     let mut history = seed_history(&state.db.list_messages(&run_id));
     let providers = state.pi.list_providers().await;
+    let mut session_start_context: Option<String> = None;
 
     let run_full = state.db.get_run_full(&run_id).unwrap_or_else(|| run.clone());
-    let mut tool_names: Vec<&str> = WORKSPACE_TOOLS.to_vec();
-    tool_names.extend_from_slice(&[
-        "set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question",
-        "apply_patch", "exec_command", "write_stdin", "view_image", "request_user_input",
-        "compact_context", "spawn_agent", "send_input", "wait_agent", "close_agent", "list_agents",
-    ]);
-    tool_names.push("spawn_agents");
+    let tool_names = tool_names_for_mode(&run_full.mode);
+
+    // Live MCP tools (qualified `mcp__<server>__<tool>` defs) are exposed in
+    // every non-readonly mode.
+    let mut tools = tools::filter_tool_defs(&tool_names);
+    if run_full.mode != "chat" && run_full.mode != "plan" && !run_full.project_path.is_empty() {
+        tools.extend(crate::services::mcp::discover_tool_defs(Some(&run_full.project_path)).await);
+    }
+
+    // SessionStart lifecycle hook: additional context is appended to the
+    // system prompt after the agent is constructed.
+    if !run_full.project_path.is_empty() {
+        let session_start = crate::services::hooks::run_hook_event(
+            "SessionStart",
+            Path::new(&run_full.project_path),
+            &json!({
+                "session_id": run_id,
+                "cwd": run_full.project_path,
+                "hook_event_name": "SessionStart",
+                "model": run_full.model,
+                "permission_mode": run_full.mode,
+            }),
+        )
+        .await;
+        if let Some(context) = session_start.context_joined() {
+            session_start_context = Some(context);
+        }
+    }
 
     // Codex-style <environment_context> block as the leading user message.
     if !run_full.project_path.is_empty() && !history.is_empty() {
@@ -1897,13 +2218,71 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         agent_role: None,
         agent_name: None,
         history,
-        tools: tools::filter_tool_defs(&tool_names),
+        tools,
         system: system_prompt(&state, &run_full),
         depth_left: 1,
         state: state.clone(),
         turn_diff: Arc::new(TurnDiffTracker::new()),
         agent_inbox: None,
     };
+    if let Some(context) = session_start_context {
+        agent.system.push_str("\n\n");
+        agent.system.push_str(&context);
+    }
+
+    // `$skill` mentions from the latest user prompt inject the full skill
+    // bodies as context (budgeted so a pile of mentions can't blow context).
+    let latest_user_prompt = state
+        .db
+        .list_messages(&run_id)
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content)
+        .unwrap_or_else(|| run_full.task.clone());
+    let mentioned =
+        crate::services::skills::resolve_mentioned_skills(&run_full.project_path, &latest_user_prompt);
+    let mut skill_budget: usize = 16 * 1024;
+    let mut skill_context = String::new();
+    for skill in mentioned {
+        let Some(body) = skill.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+            continue;
+        };
+        let mut take = body.len().min(skill_budget);
+        while take > 0 && !body.is_char_boundary(take) {
+            take -= 1;
+        }
+        if take == 0 {
+            break;
+        }
+        skill_context.push_str(&format!(
+            "\n<skill_context name=\"{}\">\n",
+            skill.name
+        ));
+        skill_context.push_str(&body[..take]);
+        if take < body.len() {
+            skill_context.push_str("\n[skill body truncated]");
+        }
+        skill_context.push_str("\n</skill_context>");
+        skill_budget -= take;
+        if skill_budget == 0 {
+            break;
+        }
+    }
+    if !skill_context.is_empty() {
+        agent.system.push_str("\n\n## Mentioned skills\n");
+        agent.system.push_str(&skill_context);
+    }
+
+    // Pre-turn git baseline (best-effort): lets `/undo` restore the exact
+    // pre-turn state. Never fails a non-git run.
+    if run_full.mode != "plan" && run_full.mode != "chat" && !run_full.project_path.is_empty() {
+        let _ = crate::api::projects::create_git_snapshot_for_path(
+            Path::new(&run_full.project_path),
+            &run_id,
+        )
+        .await;
+    }
 
     let result = agent.run(MAX_ROUNDS).await;
 
@@ -2001,6 +2380,89 @@ mod tests {
         assert!(standing_grant_matches(&global, "fetch_url", "", &[], "C:/anywhere"));
         let denied = PermissionRule { status: "deny".into(), ..global };
         assert!(!standing_grant_matches(&denied, "fetch_url", "", &[], "C:/anywhere"));
+    }
+
+    #[test]
+    fn standing_grants_match_exec_command_by_cmd() {
+        let rule = PermissionRule {
+            id: 2,
+            scope: "global".into(),
+            project_path: String::new(),
+            tool: "exec_command".into(),
+            command: "cargo test".into(),
+            network_domains: vec![],
+            status: "allow_always".into(),
+        };
+        // `cmd` argument form matches the saved command.
+        assert!(standing_grant_matches(&rule, "exec_command", "cargo test", &[], "C:/ws"));
+        assert!(!standing_grant_matches(&rule, "exec_command", "cargo publish", &[], "C:/ws"));
+        // A different tool never inherits a command rule.
+        assert!(!standing_grant_matches(&rule, "run_command", "cargo test", &[], "C:/ws"));
+
+        // Empty saved command must NOT act as a wildcard for exec_command
+        // (the historical bug: exec_command saved `command: ""`).
+        let wildcard = PermissionRule { command: String::new(), ..rule.clone() };
+        assert!(!standing_grant_matches(&wildcard, "exec_command", "anything", &[], "C:/ws"));
+        // And an empty live command never matches either.
+        let live = PermissionRule { command: "cargo test".into(), ..rule };
+        assert!(!standing_grant_matches(&live, "exec_command", "", &[], "C:/ws"));
+    }
+
+    #[test]
+    fn extract_command_reads_command_then_cmd() {
+        assert_eq!(extract_command_str(&json!({ "command": "npm test" })), "npm test");
+        assert_eq!(extract_command_str(&json!({ "cmd": "cargo check" })), "cargo check");
+        assert_eq!(extract_command_str(&json!({})), "");
+    }
+
+    #[test]
+    fn tool_names_follow_mode() {
+        let chat = tool_names_for_mode("chat");
+        assert!(chat.contains(&"read_file"));
+        assert!(chat.contains(&"compact_context"));
+        assert!(!chat.contains(&"update_plan"));
+        assert!(!chat.contains(&"fetch_url"));
+        assert!(!chat.contains(&"spawn_agent"));
+        assert!(!chat.contains(&"write_file"));
+        assert!(!chat.contains(&"run_command"));
+        assert!(!chat.contains(&"exec_command"));
+        assert!(!chat.contains(&"write_stdin"));
+        assert!(!chat.contains(&"apply_patch"));
+
+        let plan = tool_names_for_mode("plan");
+        for chat_tool in chat {
+            assert!(plan.contains(&chat_tool), "plan must keep chat tool {chat_tool}");
+        }
+        assert!(plan.contains(&"update_plan"));
+        assert!(plan.contains(&"fetch_url"));
+        assert!(plan.contains(&"spawn_agent"));
+        assert!(plan.contains(&"spawn_agents"));
+        assert!(!plan.contains(&"write_file"));
+        assert!(!plan.contains(&"apply_patch"));
+        assert!(!plan.contains(&"run_command"));
+        assert!(!plan.contains(&"exec_command"));
+        assert!(!plan.contains(&"write_stdin"));
+
+        let full = tool_names_for_mode("accept_edits");
+        assert!(full.contains(&"write_file"));
+        assert!(full.contains(&"exec_command"));
+        assert!(full.contains(&"write_stdin"));
+        assert!(full.contains(&"apply_patch"));
+        assert!(full.contains(&"spawn_agents"));
+        let auto = tool_names_for_mode("auto");
+        assert!(auto.contains(&"run_command"));
+    }
+
+    #[test]
+    fn sub_agent_roles_force_explorer_in_readonly_modes() {
+        let worker_args = json!({ "role": "worker" });
+        assert_eq!(sub_agent_role(&worker_args, "accept_edits"), ("worker", false));
+        assert_eq!(sub_agent_role(&worker_args, "auto"), ("worker", false));
+        assert_eq!(sub_agent_role(&worker_args, "plan"), ("explorer", true));
+        assert_eq!(sub_agent_role(&worker_args, "chat"), ("explorer", true));
+        assert_eq!(sub_agent_role(&json!({}), "auto"), ("explorer", true));
+        assert_eq!(sub_agent_role_static("worker", "plan"), "explorer");
+        assert_eq!(sub_agent_role_static("nonsense", "auto"), "explorer");
     }
 
     #[test]

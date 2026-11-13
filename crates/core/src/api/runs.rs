@@ -330,7 +330,14 @@ pub async fn create_run(
     state.db.append_message(message.clone());
 
     let handle = state.orchestrator.ensure_handle(&run_id);
+    // Subscribe before spawning and replay the initial user message so the
+    // caller's receiver sees it immediately (the drive task emits nothing
+    // for it).
     let events = handle.events.subscribe();
+    handle.emit(json!({
+        "type": "message_created",
+        "message": serde_json::to_value(&message).unwrap_or(Value::Null),
+    }));
     state.orchestrator.spawn(state_for_spawn(state), &run_id);
 
     Ok(StartedRun { run, handle, events })
@@ -397,15 +404,41 @@ pub async fn continue_run(
         .orchestrator
         .handle(run_id)
         .unwrap_or_else(|| state.orchestrator.ensure_handle(run_id));
+    // Subscribe before emitting so the caller's receiver gets the
+    // message_created and status events (ordering would otherwise race).
+    let events = handle.events.subscribe();
     handle.emit(json!({
         "type": "message_created",
         "message": serde_json::to_value(&message).unwrap_or(Value::Null),
     }));
     state.orchestrator.emit_status(run_id, "generating");
-    let events = handle.events.subscribe();
     state.orchestrator.spawn(state_for_spawn(state), run_id);
 
     Ok(ContinuedRun { handle, events })
+}
+
+// ----------------------------------------------------------------------
+// POST /api/runs/:id/fork
+// ----------------------------------------------------------------------
+
+/// Forks a run (optionally cut at `up_to_message_id`) into a new independent
+/// run with cloned messages + plan. Used by the sidebar fork button and the
+/// `lcgn` `/fork` command.
+pub async fn fork_run(
+    state: &AppState,
+    run_id: &str,
+    up_to_message_id: Option<&str>,
+) -> ApiResult<Run> {
+    if state.db.get_run_full(run_id).is_none() {
+        return Err(ApiError::not_found("Run not found."));
+    }
+    let forked = state
+        .db
+        .fork_run(run_id, up_to_message_id)
+        .ok_or_else(|| {
+            ApiError::bad_request("Fork point message not found in the source run.")
+        })?;
+    Ok(forked)
 }
 
 // ----------------------------------------------------------------------

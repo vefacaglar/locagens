@@ -21,16 +21,25 @@ const SEARCH_SKIP_DIRS: [&str; 8] =
 const MAX_SEARCH_DEPTH: usize = 14;
 
 /// Tools that mutate the workspace (permission-gated in `ask_permissions`).
-pub const MUTATION_TOOLS: [&str; 5] = ["write_file", "edit_file", "delete_file", "move_file", "apply_patch"];
+pub const MUTATION_TOOLS: [&str; 6] = ["write_file", "edit_file", "delete_file", "move_file", "create_directory", "apply_patch"];
 
 /// Whether a tool call needs interactive permission approval under `mode`.
 pub fn needs_permission(mode: &str, tool: &str) -> bool {
     if mode == "auto" {
         return false;
     }
-    let dangerous = tool == "run_command" || tool == "fetch_url";
+    let dangerous = matches!(tool, "run_command" | "exec_command" | "write_stdin" | "fetch_url");
     let mutation = MUTATION_TOOLS.contains(&tool);
-    (dangerous && mode != "plan" && mode != "chat") || (mutation && mode == "ask_permissions")
+    let mcp = tool.starts_with("mcp__") && mode == "ask_permissions";
+    (dangerous && mode != "plan" && mode != "chat") || (mutation && mode == "ask_permissions") || mcp
+}
+
+/// Whether a tool is flat-out forbidden in read-only (`plan` / `chat`) mode:
+/// nothing that mutates the workspace or executes commands gets through.
+pub fn is_forbidden_in_readonly_mode(mode: &str, tool: &str) -> bool {
+    (mode == "plan" || mode == "chat")
+        && (MUTATION_TOOLS.contains(&tool)
+            || matches!(tool, "run_command" | "exec_command" | "write_stdin"))
 }
 
 // ----------------------------------------------------------------------
@@ -112,8 +121,9 @@ pub fn all_tool_defs() -> Vec<Value> {
                 "workdir": json!({ "type": "string", "description": "Optional working directory inside the workspace." }),
                 "yield_time_ms": json!({ "type": "integer", "description": "Wait up to this long for completion (default 10000, clamped 500..60000)." }),
                 "max_output_tokens": json!({ "type": "integer", "description": "Rough bound on returned output (default 20000 tokens ~ 80k chars)." }),
-                "shell": json!({ "type": "string", "description": "Ignored shell hint (Codex compatibility)." }),
-                "login": json!({ "type": "boolean", "description": "Ignored login-shell hint (Codex compatibility)." }),
+                "shell": json!({ "type": "string", "description": "Optional shell program for the session (e.g. `bash`, `zsh`); defaults to the platform shell." }),
+                "login": json!({ "type": "boolean", "description": "Run the shell as a login shell (-lc) so profile/rc files load." }),
+                "tty": json!({ "type": "boolean", "description": "Allocate a pseudo-terminal for the session (enables TTY-aware programs like progress bars and editors)." }),
                 "justification": json!({ "type": "string", "description": "Short reason shown on the permission card." })
             }), &["cmd"]),
         def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll.",
@@ -237,6 +247,16 @@ pub fn all_tool_defs() -> Vec<Value> {
                     }
                 })
             }), &["agents"]),
+        def("list_mcp_resources", "List resources exposed by connected MCP servers (cursors paginate). Returns pretty JSON with a 'resources' array.",
+            json!({
+                "server": json!({ "type": "string", "description": "Optional MCP server name filter; lists all servers when omitted." }),
+                "cursor": json!({ "type": "string", "description": "Optional pagination cursor from a previous list." })
+            }), &[]),
+        def("read_mcp_resource", "Read a resource from an MCP server by URI and return its JSON contents.",
+            json!({
+                "server": json!({ "type": "string", "description": "MCP server name." }),
+                "uri": json!({ "type": "string", "description": "Resource URI as returned by list_mcp_resources." })
+            }), &["server", "uri"]),
     ]
 }
 
@@ -324,6 +344,17 @@ fn truncate_output(mut text: String) -> String {
 /// Interactive orchestrator tools (plan/title/memory/skills/questions) and
 /// delegation tools are handled by the orchestrator itself.
 pub async fn execute(project_path: &Path, name: &str, args: &Value) -> Result<String, String> {
+    execute_with_mode(project_path, "accept_edits", name, args).await
+}
+
+/// Executes a workspace/dangerous tool under the given run `mode` (the mode
+/// shapes the native sandbox used for `run_command`).
+pub async fn execute_with_mode(
+    project_path: &Path,
+    mode: &str,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
     match name {
         "read_file" => read_file(project_path, args),
         "write_file" => write_file(project_path, args),
@@ -333,7 +364,7 @@ pub async fn execute(project_path: &Path, name: &str, args: &Value) -> Result<St
         "create_directory" => create_directory(project_path, args),
         "move_file" => move_file(project_path, args),
         "search_files" => search_files(project_path, args),
-        "run_command" => run_command(project_path, args).await,
+        "run_command" => run_command(project_path, mode, args).await,
         "fetch_url" => fetch_url(args).await,
         "view_image" => view_image(project_path, args),
         _ => Err(format!("Unknown tool \"{name}\".")),
@@ -356,11 +387,20 @@ pub fn exec_session_env() -> std::collections::HashMap<String, String> {
             env.insert(name, value);
         }
     }
+    // Long build/tool output never blocks on a pager; keep ANSI color noise
+    // out of model-visible output.
+    env.insert("PAGER".to_string(), "cat".to_string());
+    env.insert("GIT_PAGER".to_string(), "cat".to_string());
+    env.insert("GH_PAGER".to_string(), "cat".to_string());
+    env.insert("NO_COLOR".to_string(), "1".to_string());
     env
 }
 
-/// `view_image`: reports mime type, byte size and pixel dimensions of an
-/// image inside the workspace without sending the bytes to the model.
+/// Maximum image size `view_image` will inline as base64 (10 MiB).
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// `view_image`: reports mime type, byte size, pixel dimensions and the
+/// base64-encoded image data (for real multimodal viewing by the model).
 fn view_image(project: &Path, args: &Value) -> Result<String, String> {
     let relative = str_arg(args, "path").unwrap_or_default();
     let path = safe_path(project, relative).map_err(|err| format!("view_image: {err}"))?;
@@ -387,6 +427,17 @@ fn view_image(project: &Path, args: &Value) -> Result<String, String> {
         _ => return Err(format!("view_image: unsupported image extension '{extension}'.")),
     };
     let bytes = metadata.len();
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(format!(
+            "view_image: image is {} bytes, which exceeds the {} MiB limit.",
+            bytes,
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+    let raw_bytes = std::fs::read(&path)
+        .map_err(|err| format!("view_image: cannot read {}: {err}", path.display()))?;
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
     let (width, height) = image_dimensions(&path, &extension)
         .unwrap_or_else(|| (0, 0));
     Ok(serde_json::json!({
@@ -396,6 +447,8 @@ fn view_image(project: &Path, args: &Value) -> Result<String, String> {
         "bytes": bytes,
         "width": width,
         "height": height,
+        "data_base64": b64,
+        "data_url": format!("data:{mime_type};base64,{b64}"),
     })
     .to_string())
 }
@@ -680,24 +733,41 @@ fn is_secret_env(name: &str) -> bool {
         || upper.contains("PRIVATE_KEY")
 }
 
-async fn run_command(project: &Path, args: &Value) -> Result<String, String> {
+async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String, String> {
     let command = str_arg(args, "command").unwrap_or_default();
     if command.trim().is_empty() {
         return Err("run_command: command is empty.".to_string());
     }
 
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("cmd");
-        c.args(["/C", command]);
-        c
+    let domains: Vec<String> = args
+        .get("network_domains")
+        .or_else(|| args.get("networkDomains"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let spec = locagens_execpolicy::sandbox::SandboxSpec {
+        mode: locagens_protocol::from_run_mode(mode).1,
+        project_path: project.to_path_buf(),
+        allow_network: !domains.is_empty() || mode == "auto",
     };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("sh");
-        c.args(["-c", command]);
-        c
+    let (shell_prog, shell_args): (String, Vec<String>) = if cfg!(windows) {
+        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
+    } else {
+        ("sh".to_string(), vec!["-c".to_string(), command.to_string()])
     };
+    let (program, prog_args) = locagens_execpolicy::sandbox::wrap_shell_command(
+        &shell_prog,
+        &shell_args,
+        Some(&spec),
+    );
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.args(&prog_args);
 
     // Deny-by-default network + secret-free environment.
     cmd.current_dir(project)
@@ -920,17 +990,20 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
             let patch_text = str_arg(args, "input")
                 .or_else(|| str_arg(args, "patch"))
                 .unwrap_or("");
-            let (diff, _) = crate::orchestrator::apply_patch::preview_patch(project, patch_text)
+            let (diff, affected) = crate::orchestrator::apply_patch::preview_patch(project, patch_text)
                 .unwrap_or_default();
+            let files: Vec<String> = affected.all();
+            let path_summary = files.join(", ");
             json!({
                 "tool": name,
                 "action": "patch",
-                "path": "",
+                "path": path_summary,
                 "absolutePath": project.display().to_string(),
                 "oldContent": Value::Null,
                 "newContent": Value::Null,
                 "patch": patch_text.chars().take(12_000).collect::<String>(),
                 "diff": diff.chars().take(12_000).collect::<String>(),
+                "files": files,
             })
         }
         "read_file" => json!({
@@ -985,8 +1058,15 @@ mod tests {
         assert_eq!(safe_path(&ws, "main.rs").unwrap(), ws_canonical.join("main.rs"));
         assert!(safe_path(&ws, "../escape.txt").is_err());
         assert!(safe_path(&ws, "a/../../escape.txt").is_err());
-        // Absolute paths outside the workspace are rejected.
+        // Absolute paths outside the workspace are rejected. (On non-Windows
+        // hosts `C:/...` is just a folder name and resolves inside the
+        // workspace, so the rejection only holds on Windows itself.)
+        #[cfg(windows)]
         assert!(safe_path(&ws, "C:/Windows/system32").is_err());
+        #[cfg(not(windows))]
+        assert!(safe_path(&ws, "C:/Windows/system32")
+            .unwrap()
+            .starts_with(&ws_canonical));
         // Nested non-existent path resolves inside the workspace.
         let nested = safe_path(&ws, "new/dir/file.txt").unwrap();
         assert!(nested.starts_with(&ws_canonical));
@@ -1043,15 +1123,111 @@ mod tests {
         assert!(!needs_permission("auto", "run_command"));
         assert!(!needs_permission("auto", "write_file"));
         assert!(needs_permission("accept_edits", "run_command"));
+        assert!(needs_permission("accept_edits", "exec_command"));
+        assert!(needs_permission("accept_edits", "write_stdin"));
         assert!(!needs_permission("accept_edits", "write_file"));
         assert!(!needs_permission("accept_edits", "edit_file"));
         assert!(needs_permission("ask_permissions", "write_file"));
         assert!(needs_permission("ask_permissions", "move_file"));
         assert!(needs_permission("ask_permissions", "fetch_url"));
+        assert!(needs_permission("ask_permissions", "create_directory"));
+        assert!(needs_permission("ask_permissions", "apply_patch"));
         assert!(!needs_permission("ask_permissions", "read_file"));
         assert!(!needs_permission("chat", "read_file"));
+        assert!(needs_permission("ask_permissions", "mcp__github__list_issues"));
+        assert!(!needs_permission("auto", "mcp__github__list_issues"));
+        assert!(!needs_permission("accept_edits", "mcp__github__list_issues"));
         // Plan/chat never mutate.
         assert!(!needs_permission("plan", "run_command"));
+        assert!(!needs_permission("plan", "exec_command"));
+        assert!(!needs_permission("chat", "exec_command"));
+    }
+
+    #[test]
+    fn readonly_mode_forbids_mutations_and_exec() {
+        for mode in ["plan", "chat"] {
+            for tool in [
+                "write_file",
+                "edit_file",
+                "delete_file",
+                "move_file",
+                "create_directory",
+                "apply_patch",
+                "run_command",
+                "exec_command",
+                "write_stdin",
+            ] {
+                assert!(
+                    is_forbidden_in_readonly_mode(mode, tool),
+                    "{tool} must be forbidden in {mode} mode"
+                );
+            }
+        }
+        for tool in ["read_file", "list_directory", "search_files", "view_image", "fetch_url"] {
+            assert!(!is_forbidden_in_readonly_mode("plan", tool), "{tool} stays allowed in plan");
+            assert!(!is_forbidden_in_readonly_mode("chat", tool), "{tool} stays allowed in chat");
+        }
+        // Other modes never forbid outright (they gate instead).
+        assert!(!is_forbidden_in_readonly_mode("accept_edits", "write_file"));
+        assert!(!is_forbidden_in_readonly_mode("auto", "exec_command"));
+    }
+
+    #[tokio::test]
+    async fn view_image_returns_base64_data() {
+        let ws = temp_ws("viewimage");
+        // 1x1 transparent PNG.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(ws.join("dot.png"), png).unwrap();
+        let out = execute(&ws, "view_image", &json!({ "path": "dot.png" })).await.unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["mime_type"], "image/png");
+        assert_eq!(parsed["width"], 1);
+        assert_eq!(parsed["height"], 1);
+        let b64 = parsed["data_base64"].as_str().unwrap();
+        assert!(!b64.is_empty());
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(decoded, png);
+        assert!(parsed["data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+    }
+
+    #[tokio::test]
+    async fn view_image_rejects_oversized_files() {
+        let ws = temp_ws("viewimage-big");
+        let big = vec![0u8; 10 * 1024 * 1024 + 1];
+        std::fs::write(ws.join("big.png"), &big).unwrap();
+        let err = execute(&ws, "view_image", &json!({ "path": "big.png" })).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("10 MiB"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn apply_patch_preview_lists_affected_files() {
+        let ws = temp_ws("patchpreview");
+        std::fs::write(ws.join("a.txt"), "one\ntwo\n").unwrap();
+        let preview = build_preview(&ws, "apply_patch", &json!({
+            "input": "*** Begin Patch\n*** Update File: a.txt\n@@\n-two\n+TWO\n*** Add File: new.txt\n+hello\n*** End Patch"
+        })).unwrap();
+        assert_eq!(preview["action"], "patch");
+        let files = preview["files"].as_array().unwrap();
+        assert!(files.contains(&json!("a.txt")));
+        assert!(files.contains(&json!("new.txt")));
+        let path_summary = preview["path"].as_str().unwrap();
+        // Added files list first, then modified ones.
+        assert_eq!(path_summary, "new.txt, a.txt");
+        assert!(!preview["diff"].as_str().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
@@ -1092,6 +1268,7 @@ mod tests {
             "write_stdin", "view_image", "request_user_input", "compact_context", "spawn_agent",
             "send_input", "wait_agent", "close_agent", "list_agents", "set_chat_title", "update_plan",
             "remember", "load_skill", "ask_user_question", "spawn_agents",
+            "list_mcp_resources", "read_mcp_resource",
         ]).len());
     }
 }

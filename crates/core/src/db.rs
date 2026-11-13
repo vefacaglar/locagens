@@ -559,6 +559,56 @@ impl Db {
         })
     }
 
+    /// Forks a run: clones its metadata, messages (up to and including
+    /// `up_to_message_id`; all of them when `None`) and plan into a brand-new
+    /// independent run titled `<title> (fork)` with fresh ids. Returns `None`
+    /// when the source run or the fork-point message does not exist.
+    pub fn fork_run(&self, source_run_id: &str, up_to_message_id: Option<&str>) -> Option<Run> {
+        let source = self.get_run_full(source_run_id)?;
+        let messages = self.list_messages(source_run_id);
+        let mut copied: Vec<RunMessage> = Vec::new();
+        for message in &messages {
+            copied.push(message.clone());
+            if let Some(mid) = up_to_message_id {
+                if message.id == mid {
+                    break;
+                }
+            }
+        }
+        if let Some(mid) = up_to_message_id {
+            if !copied.iter().any(|message| message.id == mid) {
+                return None;
+            }
+        }
+
+        let new_id = format!("run-{}", uuid::Uuid::new_v4());
+        let now = now_iso();
+        let mut fork = source.clone();
+        fork.id = new_id.clone();
+        fork.title = if source.title.trim().is_empty() {
+            "Fork".to_string()
+        } else {
+            format!("{} (fork)", source.title)
+        };
+        fork.status = "done".to_string();
+        fork.error_message = None;
+        fork.created_at = now.clone();
+        fork.updated_at = now.clone();
+        fork.last_active_at = Some(now);
+        self.create_run(fork.clone());
+
+        for mut message in copied {
+            message.id = format!("msg-{}", uuid::Uuid::new_v4());
+            message.run_id = new_id.clone();
+            self.append_message(message);
+        }
+        if let Some(mut plan) = self.get_plan(source_run_id) {
+            plan.run_id = new_id.clone();
+            self.set_plan(plan);
+        }
+        Some(fork)
+    }
+
     pub fn delete_run(&self, id: &str) -> bool {
         let mut state = self.write();
         let removed = state.runs.remove(id).is_some();
@@ -1053,6 +1103,94 @@ mod tests {
         assert_eq!(entry.id, 1);
         assert_eq!(db2.list_usage(Some("run-x")).len(), 1);
         assert_eq!(db2.list_usage(Some("run-y")).len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fork_run_clones_messages_and_plan_independently() {
+        let root = temp_root("fork");
+        let db = Db::open(&root).unwrap();
+        let source = db.create_run(Run {
+            id: "run-src".into(),
+            title: "Original".into(),
+            task: "do things".into(),
+            status: "done".into(),
+            provider_id: "p".into(),
+            model: "m".into(),
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            ..Default::default()
+        });
+        for (id, role, content) in [
+            ("m1", "user", "first"),
+            ("m2", "assistant", "answer"),
+            ("m3", "user", "second"),
+        ] {
+            db.append_message(RunMessage {
+                id: id.into(),
+                run_id: "run-src".into(),
+                role: role.into(),
+                content: content.into(),
+                created_at: now_iso(),
+                ..Default::default()
+            });
+        }
+        db.set_plan(Plan {
+            id: "plan-1".into(),
+            run_id: "run-src".into(),
+            title: "Plan".into(),
+            tasks: serde_json::json!([{"text": "step"}]),
+            version: 1,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            ..Default::default()
+        });
+
+        // Fork up to (and including) the middle message.
+        let fork = db.fork_run("run-src", Some("m2")).expect("fork created");
+        assert_ne!(fork.id, source.id);
+        assert_eq!(fork.title, "Original (fork)");
+        assert_eq!(fork.status, "done");
+        assert_eq!(fork.error_message, None);
+        let fork_messages = db.list_messages(&fork.id);
+        assert_eq!(fork_messages.len(), 2);
+        assert_eq!(fork_messages[0].content, "first");
+        assert_eq!(fork_messages[1].content, "answer");
+        assert!(fork_messages.iter().all(|message| message.run_id == fork.id));
+        assert!(fork_messages.iter().all(|message| message.id != "m1" && message.id != "m2"));
+        let fork_plan = db.get_plan(&fork.id).expect("plan cloned");
+        assert_eq!(fork_plan.title, "Plan");
+        assert_eq!(fork_plan.run_id, fork.id);
+
+        // Fork is fully independent: mutations on either side don't leak.
+        db.append_message(RunMessage {
+            id: "m4".into(),
+            run_id: "run-src".into(),
+            role: "user".into(),
+            content: "later".into(),
+            created_at: now_iso(),
+            ..Default::default()
+        });
+        db.append_message(RunMessage {
+            id: "mf".into(),
+            run_id: fork.id.clone(),
+            role: "user".into(),
+            content: "fork-only".into(),
+            created_at: now_iso(),
+            ..Default::default()
+        });
+        assert_eq!(db.list_messages("run-src").len(), 4);
+        assert_eq!(db.list_messages(&fork.id).len(), 3);
+        assert_eq!(db.get_plan("run-src").unwrap().run_id, "run-src");
+
+        // Unknown source or unknown fork point → None.
+        assert!(db.fork_run("nope", None).is_none());
+        assert!(db.fork_run("run-src", Some("missing")).is_none());
+
+        // Forking without a cut point copies everything.
+        let full = db.fork_run("run-src", None).unwrap();
+        assert_eq!(db.list_messages(&full.id).len(), 4);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

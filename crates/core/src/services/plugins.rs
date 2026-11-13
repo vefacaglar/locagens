@@ -339,6 +339,38 @@ pub fn delete(id: &str, scope: &str, project_path: Option<&str>) -> Result<bool,
     }
 }
 
+/// Manifests of every enabled plugin (project plugins override user ones).
+/// Used by the MCP client (`mcpServers`), the hooks engine (`hooks`) and the
+/// system-prompt builder (`systemPrompt`).
+pub fn enabled_manifests(project_path: Option<&str>) -> Vec<Value> {
+    discover(project_path)
+        .into_iter()
+        .filter(|manifest| manifest.get("enabled").and_then(Value::as_bool).unwrap_or(false))
+        .collect()
+}
+
+/// `(name, systemPrompt)` pairs from every enabled plugin with a non-empty
+/// `systemPrompt` field.
+pub fn enabled_system_prompts(project_path: Option<&str>) -> Vec<(String, String)> {
+    enabled_manifests(project_path)
+        .into_iter()
+        .filter_map(|manifest| {
+            let name = manifest
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let prompt = manifest
+                .get("systemPrompt")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|prompt| !prompt.is_empty())
+                .map(str::to_string)?;
+            Some((name, prompt))
+        })
+        .collect()
+}
+
 /// Convenience re-exports for facade consumers that need typed payloads.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]

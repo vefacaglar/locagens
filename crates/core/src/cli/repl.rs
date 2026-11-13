@@ -185,11 +185,94 @@ async fn handle_slash(
                  /plan                 switch to plan mode\n\
                  /build                switch to build mode (edits applied directly)\n\
                  /new                  start a fresh session on the next message\n\
+                 /fork                 fork the current session into an independent copy\n\
+                 /undo                 undo the last turn (git snapshot restore)\n\
+                 /diff                 show the current working-tree diff\n\
+                 /mcp                  list configured MCP servers and their status\n\
+                 /skills               list discovered $skills for this project\n\
                  /sessions             list sessions for this directory\n\
                  /usage                usage/cost of the current session\n\
                  /help                 this help\n\
                  /exit                 leave lcgn (Ctrl+D also exits)"
             );
+            SlashResult::Continue
+        }
+        ("/fork", _) => {
+            match session.as_deref() {
+                Some(run_id) => match crate::api::runs::fork_run(state, run_id, None).await {
+                    Ok(forked) => {
+                        eprintln!("lcgn: forked run {run_id} -> {}", forked.id);
+                        *session = Some(forked.id);
+                    }
+                    Err(err) => eprintln!("lcgn: fork failed: {err}"),
+                },
+                None => {
+                    eprintln!("lcgn: no active session yet — send a message first.");
+                }
+            }
+            SlashResult::Continue
+        }
+        ("/undo", _) => {
+            let project = config.project.to_string_lossy().to_string();
+            match crate::api::projects::undo_last_turn(state, &project, session.as_deref()).await {
+                Ok(snapshot) => {
+                    eprintln!(
+                        "lcgn: restored snapshot {} (HEAD {}).",
+                        snapshot.id, snapshot.head_sha
+                    );
+                }
+                Err(err) => eprintln!("lcgn: undo failed: {err}"),
+            }
+            SlashResult::Continue
+        }
+        ("/diff", _) => {
+            let project = config.project.to_string_lossy().to_string();
+            match crate::api::projects::git_diff(state, &project, false).await {
+                Ok(diff) if diff.trim().is_empty() => {
+                    eprintln!("lcgn: working tree clean.");
+                }
+                Ok(diff) => {
+                    println!("{diff}");
+                    let _ = std::io::stdout().flush();
+                }
+                Err(err) => eprintln!("lcgn: diff failed: {err}"),
+            }
+            SlashResult::Continue
+        }
+        ("/mcp", _) => {
+            let project = config.project.to_string_lossy().to_string();
+            match crate::api::mcp::list_mcp_servers(state, Some(&project)).await {
+                Ok(response) if response.servers.is_empty() => {
+                    eprintln!("lcgn: no MCP servers configured.");
+                }
+                Ok(response) => {
+                    for server in response.servers {
+                        eprintln!(
+                            "lcgn: {} — {} ({})",
+                            server.config.name, server.config.transport, server.status
+                        );
+                    }
+                }
+                Err(err) => eprintln!("lcgn: mcp list failed: {err}"),
+            }
+            SlashResult::Continue
+        }
+        ("/skills", _) => {
+            let project = config.project.to_string_lossy().to_string();
+            match crate::api::skills::list_skills(state, Some(&project)).await {
+                Ok(response) if response.skills.is_empty() => {
+                    eprintln!("lcgn: no skills discovered.");
+                }
+                Ok(response) => {
+                    for skill in response.skills {
+                        eprintln!(
+                            "lcgn: ${} — {} [{}]",
+                            skill.name, skill.description, skill.source
+                        );
+                    }
+                }
+                Err(err) => eprintln!("lcgn: skills list failed: {err}"),
+            }
             SlashResult::Continue
         }
         ("/model", []) => {
