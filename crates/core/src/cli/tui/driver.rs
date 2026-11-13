@@ -278,7 +278,6 @@ impl Driver {
             bypass_permissions: self.app.bypass,
             system_prompt: self.config.system_prompt.clone(),
             append_system_prompt: self.config.append_system_prompt.clone(),
-            ..Default::default()
         };
         match runs_api::continue_run(&self.state, id, &payload).await {
             Ok(continued) => Ok((id.to_string(), continued.events, continued.handle)),
@@ -294,12 +293,11 @@ impl Driver {
             return;
         };
         let entries = self.state.db.list_usage(Some(&run_id));
-        let total_tokens = entries.iter().map(|e| e.input_tokens + e.output_tokens).sum();
-        let cost = entries.iter().map(|e| e.cost).sum();
+        let totals = crate::api::runs::UsageTotals::of(&entries);
         let last_main = entries
             .iter()
             .rev()
-            .find(|e| e.agent_role.as_deref().is_none_or(|role| role == "planner"));
+            .find(|e| e.role() == crate::db::MAIN_AGENT_ROLE);
         let context_left = last_main.and_then(|entry| {
             let window = self
                 .state
@@ -309,8 +307,8 @@ impl Driver {
             Some(context_left_percent(entry.input_tokens, window))
         });
         self.app.set_usage(UsageInfo {
-            total_tokens,
-            cost,
+            total_tokens: totals.input_tokens + totals.output_tokens,
+            cost: totals.cost,
             context_left,
         });
     }

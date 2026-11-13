@@ -101,7 +101,7 @@ fn is_valid_role_name(name: &str) -> bool {
 
 /// Directories scanned for role files, lowest precedence first.
 fn role_dirs(project: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = locagens_config::paths::agent_dir_chain()
+    let mut dirs: Vec<PathBuf> = crate::paths::agent_dir_chain()
         .into_iter()
         .rev()
         .map(|dir| dir.join("agents"))

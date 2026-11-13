@@ -178,7 +178,8 @@ pub(crate) fn error_detail(body: &str) -> String {
     body.trim().chars().take(300).collect()
 }
 
-pub(crate) fn now_ms() -> i64 {
+/// Milliseconds since the Unix epoch (0 if the clock is before it).
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)

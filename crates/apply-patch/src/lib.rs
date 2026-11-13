@@ -550,9 +550,8 @@ fn resolve(project: &Path, path: &Path) -> Result<PathBuf, String> {
         .map_err(|err| format!("apply_patch: path {relative:?} rejected: {err}"))
 }
 
-/// Standalone workspace path containment helper (moved from
-/// `apps/backend/src/orchestrator/tools.rs::safe_path`) so this crate has
-/// zero dependency on the backend.
+/// Standalone workspace path containment helper, so this crate has no
+/// dependency on `locagens-core`.
 ///
 /// Resolves `rel` against `project_root` while rejecting anything that
 /// escapes it (traversal, absolute paths, symlinks pointing outside).

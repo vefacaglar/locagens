@@ -54,9 +54,9 @@ pub fn init_from_disk() {
     if CURRENT.read().map(|slot| slot.is_some()).unwrap_or(false) {
         return; // the host (lcgn --profile) already installed its own
     }
-    let files = Config::config_files();
+    let files = crate::paths::config_files();
     let signature = chain_signature(&files);
-    match Config::load().and_then(|config| config.with_profile(None)) {
+    match Config::load_from_files(&files).and_then(|config| config.with_profile(None)) {
         Ok(config) => {
             install(config);
             *LOADED.lock().unwrap_or_else(PoisonError::into_inner) = Some(signature);
@@ -74,7 +74,7 @@ pub fn reload_if_changed() {
     if !CURRENT.read().map(|slot| slot.is_some()).unwrap_or(false) {
         return; // no host installed a config (unit tests): stay on defaults
     }
-    let files = Config::config_files();
+    let files = crate::paths::config_files();
     let profile = current().profile.clone();
     let mut loaded = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(config) = changed_config(&files, profile.as_deref(), &mut loaded) {

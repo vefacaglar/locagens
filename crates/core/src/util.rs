@@ -7,6 +7,34 @@ pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Opens an http(s) URL in the default browser. The URL goes to the OS
+/// opener as one argument, never through a shell.
+pub fn open_browser(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|err| format!("Invalid URL: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http(s) URLs can be opened.".to_string());
+    }
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", parsed.as_str()]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(parsed.as_str());
+        command
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(parsed.as_str());
+        command
+    };
+    command.spawn().map(|_| ()).map_err(|err| format!("Could not open the browser: {err}"))
+}
+
 /// The filesystem root of a path via its last ancestor component.
 pub fn filesystem_root(path: &Path) -> PathBuf {
     path.ancestors().last().unwrap_or(path).to_path_buf()
@@ -27,8 +55,7 @@ pub fn normalize_canonical(canonical: PathBuf) -> PathBuf {
     canonical
 }
 
-/// Port of `canonicalProjectPath` from `apps/api/src/security/projectPaths.ts`:
-/// validates the directory exists, is not the filesystem root and is not the
+/// Canonical project path: validates the directory exists, is not the filesystem root and is not the
 /// user's home directory.
 pub fn canonical_project_path(input: &str) -> Result<PathBuf, String> {
     let candidate = input.trim();

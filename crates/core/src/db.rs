@@ -220,7 +220,6 @@ pub struct Run {
 }
 
 /// One chat message of a run, persisted as a `message` / `message_update` rollout line
-///
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunMessage {
@@ -259,6 +258,9 @@ pub struct Plan {
 pub struct UsageLogEntry {
     pub id: i64,
     pub run_id: String,
+    /// `main` for the main agent, else the sub-agent role. Legacy `planner`
+    /// lines read back as `main`.
+    #[serde(deserialize_with = "deserialize_usage_role")]
     pub agent_role: Option<String>,
     pub provider_id: String,
     pub model: String,
@@ -270,6 +272,23 @@ pub struct UsageLogEntry {
     pub cost: f64,
     pub created_at: String,
     pub duration_ms: Option<i64>,
+}
+
+/// Usage-log role of the main agent.
+pub const MAIN_AGENT_ROLE: &str = "main";
+/// Main-agent role written by versions before `main`.
+const LEGACY_MAIN_AGENT_ROLE: &str = "planner";
+
+impl UsageLogEntry {
+    /// The entry's role; entries without one belong to the main agent.
+    pub fn role(&self) -> &str {
+        self.agent_role.as_deref().unwrap_or(MAIN_AGENT_ROLE)
+    }
+}
+
+fn deserialize_usage_role<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let role = Option::<String>::deserialize(deserializer)?;
+    Ok(role.map(|role| if role == LEGACY_MAIN_AGENT_ROLE { MAIN_AGENT_ROLE.to_string() } else { role }))
 }
 
 /// One line of a rollout file: `{"timestamp", "type", "payload"}`.
@@ -1861,6 +1880,19 @@ pub fn resolve_data_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA-065: the main agent logs `main`; legacy `planner` lines read back
+    /// as `main`, and entries without a role belong to the main agent.
+    #[test]
+    fn legacy_planner_usage_role_reads_back_as_main() {
+        let legacy: UsageLogEntry = serde_json::from_value(serde_json::json!({ "runId": "r", "agentRole": "planner" })).unwrap();
+        assert_eq!(legacy.agent_role.as_deref(), Some(MAIN_AGENT_ROLE));
+        let explorer: UsageLogEntry = serde_json::from_value(serde_json::json!({ "agentRole": "explorer" })).unwrap();
+        assert_eq!(explorer.role(), "explorer");
+        let unset: UsageLogEntry = serde_json::from_value(serde_json::json!({ "agentRole": null })).unwrap();
+        assert_eq!(unset.agent_role, None);
+        assert_eq!(unset.role(), MAIN_AGENT_ROLE);
+    }
 
     fn temp_root(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

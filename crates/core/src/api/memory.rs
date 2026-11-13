@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Allowed memory categories; anything else falls back to `"project"`.
 const CATEGORIES: [&str; 4] = ["user", "feedback", "project", "reference"];
 
-/// Input for creating a memory (HTTP equivalent: `POST /api/memories` body).
+/// Input for creating a memory.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateMemoryInput {
@@ -17,13 +17,12 @@ pub struct CreateMemoryInput {
     pub project_path: Option<String>,
 }
 
-/// Lists all memories, newest update first (`GET /api/memories`).
+/// Lists all memories, newest update first.
 pub async fn list_memories(state: &AppState) -> ApiResult<Vec<crate::db::Memory>> {
     Ok(state.db.list_memories())
 }
 
-/// Creates a memory after validating content, scope, category and project path
-/// (`POST /api/memories`).
+/// Creates a memory after validating content, scope, category and project path.
 pub async fn create_memory(state: &AppState, input: CreateMemoryInput) -> ApiResult<crate::db::Memory> {
     let content = input.content.as_deref().unwrap_or("").trim().to_string();
     if content.is_empty() {
@@ -64,8 +63,7 @@ pub async fn create_memory(state: &AppState, input: CreateMemoryInput) -> ApiRes
         .map_err(|err| ApiError::internal(format!("Failed to save memory: {err}")))
 }
 
-/// Updates the content of a memory; 404 when the id does not exist
-/// (`PUT /api/memories/:id`).
+/// Updates the content of a memory; 404 when the id does not exist.
 pub async fn update_memory(state: &AppState, id: i64, content: &str) -> ApiResult<crate::db::Memory> {
     let content = content.trim().to_string();
     if content.is_empty() {
@@ -76,7 +74,7 @@ pub async fn update_memory(state: &AppState, id: i64, content: &str) -> ApiResul
     })
 }
 
-/// Deletes a memory; 404 when the id does not exist (`DELETE /api/memories/:id`).
+/// Deletes a memory; 404 when the id does not exist.
 pub async fn delete_memory(state: &AppState, id: i64) -> ApiResult<()> {
     if !state.db.delete_memory(id) {
         return Err(ApiError::not_found(format!(
@@ -86,7 +84,7 @@ pub async fn delete_memory(state: &AppState, id: i64) -> ApiResult<()> {
     Ok(())
 }
 
-/// Deletes every memory (`DELETE /api/memories`).
+/// Deletes every memory.
 pub async fn clear_memories(state: &AppState) -> ApiResult<()> {
     state.db.clear_memories();
     Ok(())

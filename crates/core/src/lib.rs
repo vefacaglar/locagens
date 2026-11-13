@@ -24,6 +24,11 @@ pub use locagens_protocol as protocol;
 /// Re-exported so consumers can keep referring to `crate::AppState`.
 pub use state::AppState;
 
+/// Serializes unit tests that mutate the process environment; env vars are
+/// process-global and tests run in parallel (QA-073).
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -7,7 +7,6 @@
 //! (split with [`split_shell_commands`]) to an [`Evaluation`].
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 // ----------------------------------------------------------------------
 // Decisions, patterns and rules
@@ -928,89 +927,6 @@ fn parse_network_rule(args: Vec<(String, StarlarkValue)>) -> Result<NetworkRule,
 }
 
 // ----------------------------------------------------------------------
-// Rule amendment (allow prefix rules)
-// ----------------------------------------------------------------------
-
-/// Interpreter / privilege-escalation programs whose invocations are never
-/// amended into allow rules automatically.
-const BANNED_AMEND_PREFIXES: [&str; 26] = [
-    "sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh", "python", "python3",
-    "node", "deno", "bun", "ruby", "perl", "php", "sudo", "su", "doas", "rm", "del", "rmdir",
-    "env", "xargs", "eval", "exec",
-];
-
-/// Escapes a string as a Starlark string literal.
-fn escape_starlark_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Appends an allow `prefix_rule` for `command` to `rules_file`, unless the
-/// command starts with a banned interpreter / dangerous program or an existing
-/// rule already allows it. Returns whether the rule was appended.
-pub fn append_allow_prefix_rule(rules_file: &Path, command: &str) -> Result<bool, String> {
-    // Raw segments (no nested-shell unwrapping) so a `sh -c …` / `python …`
-    // wrapper itself is caught by the banned-prefix check.
-    let segments = match split_shell_segments(command) {
-        Ok(segments) => segments,
-        Err(_) => return Ok(false),
-    };
-    if segments.len() != 1 || segments[0].is_empty() {
-        return Ok(false);
-    }
-    let program = segments[0][0]
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&segments[0][0])
-        .to_lowercase();
-    let program = program.strip_suffix(".exe").unwrap_or(&program);
-    if BANNED_AMEND_PREFIXES.contains(&program) {
-        return Ok(false);
-    }
-
-    // Already allowed by an existing matching rule?
-    if let Ok(source) = std::fs::read_to_string(rules_file) {
-        if let Ok(existing) = Policy::parse_str(&source) {
-            let evaluation = existing.evaluate_command(command);
-            if evaluation.matched_rule && evaluation.decision == Decision::Allow {
-                return Ok(false);
-            }
-        }
-    }
-
-    if let Some(parent) = rules_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("append_allow_prefix_rule: {err}"))?;
-    }
-    let pattern = segments[0]
-        .iter()
-        .map(|token| escape_starlark_string(token))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let line = format!("prefix_rule(pattern = [{pattern}], decision = \"allow\")\n");
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(rules_file)
-        .map_err(|err| format!("append_allow_prefix_rule: {err}"))?;
-    file.write_all(line.as_bytes())
-        .map_err(|err| format!("append_allow_prefix_rule: {err}"))?;
-    Ok(true)
-}
-
-// ----------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------
 
@@ -1189,55 +1105,5 @@ network_rule(host = "crates.io", protocol = "https", decision = "allow")
             "prefix_rule(pattern = [\"cargo\"], decision = \"allow\", match = [\"cargo check\"], not_match = [\"npm test\"])"
         )
         .is_ok());
-    }
-
-    #[test]
-    fn amend_appends_allow_rule_and_skips_banned_interpreters() {
-        let dir = std::env::temp_dir().join(format!("locagens-rules-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rules_file = dir.join("default.rules");
-
-        let appended = append_allow_prefix_rule(&rules_file, "cargo test --workspace").unwrap();
-        assert!(appended);
-        let source = std::fs::read_to_string(&rules_file).unwrap();
-        assert!(source.contains("prefix_rule(pattern = [\"cargo\", \"test\", \"--workspace\"]"));
-        // The appended rule now evaluates as Allow.
-        let policy = Policy::parse_str(&source).unwrap();
-        assert_eq!(policy.evaluate_command("cargo test --workspace").decision, Decision::Allow);
-
-        // A second amendment is a no-op (already allowed).
-        assert!(!append_allow_prefix_rule(&rules_file, "cargo test --workspace").unwrap());
-        let source = std::fs::read_to_string(&rules_file).unwrap();
-        assert_eq!(source.matches("prefix_rule").count(), 1);
-
-        // Banned interpreters / compound / unsafe commands are never amended.
-        for command in [
-            "sh -c 'echo hi'",
-            "bash -lc 'ls'",
-            "python script.py",
-            "sudo apt install",
-            "rm -rf /",
-            "node server.js",
-            "cargo build && npm test",
-            "echo $(whoami)",
-        ] {
-            assert!(
-                !append_allow_prefix_rule(&rules_file, command).unwrap(),
-                "{command} must not be amended"
-            );
-        }
-        assert_eq!(
-            std::fs::read_to_string(&rules_file)
-                .unwrap()
-                .matches("prefix_rule")
-                .count(),
-            1
-        );
-
-        // Path tokens are kept verbatim (basename check strips dirs / .exe).
-        let appended = append_allow_prefix_rule(&rules_file, "./scripts/lint.sh --fix").unwrap();
-        assert!(appended, "arbitrary binaries are amendable");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

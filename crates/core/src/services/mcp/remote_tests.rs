@@ -266,6 +266,7 @@ fn static_headers_resolve_env_and_bearer() {
 #[tokio::test]
 async fn configured_bearer_and_custom_headers_are_sent() {
     let (base, mock) = spawn_mock(false, Some("env-token-123")).await;
+    let _env = crate::ENV_TEST_LOCK.lock().await;
     std::env::set_var("LOCAGENS_TEST_MCP_BEARER_A", "env-token-123");
     let mut config = remote_config("authed", &format!("{base}/mcp"));
     config.bearer_token_env_var = Some("LOCAGENS_TEST_MCP_BEARER_A".to_string());
@@ -540,9 +541,9 @@ args = ["server.js"]
 env_vars = ["LOCAGENS_TEST_MCP_FORWARDED"]
 enabled = false
 "#;
-    std::env::set_var("LOCAGENS_TEST_MCP_FORWARDED", "yes");
     let config: locagens_config::config_toml::Config = toml::from_str(toml).unwrap();
-    let mapped = super::config_toml_servers(&config.mcp_servers);
+    let env = |var: &str| (var == "LOCAGENS_TEST_MCP_FORWARDED").then(|| "yes".to_string());
+    let mapped = super::config_toml_servers(&config.mcp_servers, &env);
     let docs = mapped.iter().find(|server| server.name == "docs").unwrap();
     assert_eq!(docs.transport, "streamable-http");
     assert_eq!(docs.scope, "user");

@@ -10,8 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 locagens_core = { package = "locagens-core", path = "../../crates/core" }
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
 
 [dev-dependencies]
 axum = "0.7"

@@ -62,7 +62,7 @@ fn shell_for_options(options: &SpawnOptions, command: &str) -> (String, Vec<Stri
 const MAX_LOGS_PER_PROCESS: usize = 2000;
 
 /// Current UTC time in the same shape as JS `new Date().toISOString()`
-/// (same helper as `apps/backend/src/util.rs`).
+/// (same format as `locagens_core::util::now_iso`).
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }

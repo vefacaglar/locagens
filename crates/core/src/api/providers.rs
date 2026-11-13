@@ -13,7 +13,7 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Result of `POST /api/providers/fetch-models`: remote + cached models, or a
+/// Result of `fetch_models`: remote + cached models, or a
 /// soft error (never a hard failure).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +25,7 @@ pub struct FetchModelsResult {
     pub error: Option<String>,
 }
 
-/// Result of `POST /api/providers/test`: a quick completion through the
+/// Result of `test_provider`: a quick completion through the
 /// provider endpoint, or a soft error (never a hard failure).
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +36,7 @@ pub struct TestProviderResult {
     pub error: Option<String>,
 }
 
-// Hand-written Serialize so the JSON matches the HTTP route exactly: the
+// Hand-written Serialize so the JSON keeps its established shape: the
 // success branch always emits `content` and `usage` (usage serializes as
 // `null` when the provider response has no usage block), the failure branch
 // emits only `success` + `error`.
@@ -93,13 +93,12 @@ impl OAuthLoginStart {
     }
 }
 
-/// Lists all configured / authenticated providers (`GET /api/providers`).
+/// Lists all configured / authenticated providers.
 pub async fn list_providers(state: &AppState) -> ApiResult<Vec<ProviderMetadata>> {
     Ok(state.pi.list_providers().await)
 }
 
-/// Returns editable provider configs with masked API keys
-/// (`GET /api/providers/config`).
+/// Returns editable provider configs with masked API keys.
 pub async fn get_provider_configs(
     state: &AppState,
 ) -> ApiResult<HashMap<String, EditableProviderConfig>> {
@@ -108,7 +107,7 @@ pub async fn get_provider_configs(
 
 /// Saves the whole provider config map the web client sends
 /// (`Record<providerId, ProviderConfig>`); providers missing from the map are
-/// removed (`POST /api/providers/config`).
+/// removed.
 pub async fn save_provider_configs(
     state: &AppState,
     configs: &HashMap<String, SaveProviderConfigInput>,
@@ -120,7 +119,7 @@ pub async fn save_provider_configs(
 }
 
 /// Fetches remote `{baseUrl}/models` models merged with the cached
-/// `models-store.json` models (`POST /api/providers/fetch-models`). Never
+/// `models-store.json` models. Never
 /// fails: provider errors come back as `success: false` with an error message.
 pub async fn fetch_models(
     state: &AppState,
@@ -141,7 +140,7 @@ pub async fn fetch_models(
 }
 
 /// Sends a quick completion request through the provider's endpoint using the
-/// resolved `auth.json` credential (`POST /api/providers/test`). Never fails:
+/// resolved `auth.json` credential. Never fails:
 /// provider errors come back as `success: false` with an error message.
 pub async fn test_provider(
     state: &AppState,
@@ -163,13 +162,12 @@ pub async fn test_provider(
     })
 }
 
-/// Returns masked credential status from `~/.pi/agent/auth.json`
-/// (`GET /api/pi/auth`).
+/// Returns masked credential status from `~/.pi/agent/auth.json`.
 pub async fn get_pi_auth(state: &AppState) -> ApiResult<Vec<serde_json::Value>> {
     Ok(state.pi.pi_auth_status())
 }
 
-/// Sets or deletes a provider credential (`POST /api/pi/auth`).
+/// Sets or deletes a provider credential.
 pub async fn set_pi_auth(state: &AppState, input: &SetPiAuthInput) -> ApiResult<()> {
     state
         .pi
@@ -263,26 +261,5 @@ pub async fn submit_oauth_redirect(state: &AppState, start: &OAuthLoginStart, pa
 pub fn open_verification_url(url: &str) -> ApiResult<()> {
     let url = locagens_config::oauth::xai::validate_verification_uri(url)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = std::process::Command::new("rundll32");
-        command.args(["url.dll,FileProtocolHandler", url.as_str()]);
-        command
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(url.as_str());
-        command
-    };
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(url.as_str());
-        command
-    };
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| ApiError::internal(format!("Could not open the browser: {err}")))
+    crate::util::open_browser(url.as_str()).map_err(ApiError::internal)
 }

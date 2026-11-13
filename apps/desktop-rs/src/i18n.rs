@@ -58,7 +58,7 @@ pub fn role_key(role: &str) -> &'static str {
     match role {
         "explorer" => "agent.explorer",
         "worker" => "agent.worker",
-        _ => "agent.planner",
+        _ => "agent.main",
     }
 }
 
@@ -430,7 +430,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("plugin.fallback_name", "plugin", "eklenti"),
     ("agent.explorer", "explorer", "gezgin"),
     ("agent.worker", "worker", "işçi"),
-    ("agent.planner", "planner", "planlayıcı"),
+    ("agent.main", "main", "ana"),
     ("thread.file_deleted", "{0} (deleted)", "{0} (silindi)"),
     ("header.tokens_cost", "{0} tok · {1}", "{0} tok · {1}"),
     ("header.tokens", "{0} tok", "{0} tok"),

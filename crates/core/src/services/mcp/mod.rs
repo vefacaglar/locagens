@@ -241,18 +241,20 @@ fn read_file(path: &PathBuf, scope: &str, project_path: Option<&str>) -> Vec<Mcp
 }
 
 /// Maps config.toml `[mcp_servers.<name>]` tables onto the user scope.
-/// `env_vars` (names to forward) are resolved from the current environment;
+/// `env_vars` (names to forward) are resolved through `lookup_env` (the
+/// process environment in production);
 /// `cwd` and the timeout keys have no equivalent here and are ignored;
 /// `enabled_tools` / `disabled_tools` are applied by [`tool_allowed`].
 fn config_toml_servers(
     servers: &BTreeMap<String, locagens_config::config_toml::McpServerConfig>,
+    lookup_env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<McpServerConfig> {
     servers
         .iter()
         .map(|(name, entry)| {
             let mut env = entry.env.clone();
             for var in &entry.env_vars {
-                if let Ok(value) = std::env::var(var) {
+                if let Some(value) = lookup_env(var) {
                     env.entry(var.clone()).or_insert(value);
                 }
             }
@@ -305,7 +307,7 @@ pub fn list_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
     }
     // Codex-style `[mcp_servers.<name>]` from config.toml, lowest precedence:
     // an entry saved from the UI (mcp.json) with the same name overrides it.
-    for cfg in config_toml_servers(&crate::config_runtime::current().mcp_servers) {
+    for cfg in config_toml_servers(&crate::config_runtime::current().mcp_servers, &|var| std::env::var(var).ok()) {
         if !seen.contains(&cfg.name) {
             configs.push(cfg);
         }
@@ -587,7 +589,7 @@ pub fn restart(name: &str, project_path: Option<&str>) -> Result<McpServerInfo, 
     Ok(server_info(&config))
 }
 
-/// Input payload for POST /api/mcp/servers.
+/// Input payload for `api::mcp::upsert_mcp_server`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerInput {

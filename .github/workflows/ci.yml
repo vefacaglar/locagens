@@ -18,11 +18,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
       # Pure Rust: tests + release build for the core (lcgn) and the desktop
       # app (locagens). No Node.js, pnpm, or Electron.
+      # Lints are reported, not enforced (remaining warnings are style-only).
+      - run: cargo clippy --workspace --all-targets
       - run: cargo test -p locagens-cli -p locagens-desktop
       - run: cargo build --release -p locagens-cli -p locagens-desktop
       - run: cargo test --workspace
