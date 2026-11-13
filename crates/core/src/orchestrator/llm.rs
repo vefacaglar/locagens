@@ -1379,8 +1379,6 @@ fn normalize_anthropic_block(block: &Value) -> Value {
     }
 }
 
-/// Wraps a non-streaming Anthropic usage object for replay.
-
 /// Short human-readable error summary from an API error body.
 fn summarize_error(body: &str) -> String {
     serde_json::from_str::<Value>(body)

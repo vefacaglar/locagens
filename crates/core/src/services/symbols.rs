@@ -237,7 +237,7 @@ pub fn valid_kind(kind: Option<&str>) -> Option<&'static str> {
     kind.and_then(|k| VALID_KINDS.iter().find(|valid| **valid == k).copied())
 }
 
-/// Public entry point used by the route: canonicalizes and searches.
+/// Public entry point used by the facade: canonicalizes and searches.
 pub fn search_canonical(raw_path: &str, query: &str, kind: Option<&str>) -> Result<Vec<CodeSymbol>, String> {
     let canonical = canonical_project_path(raw_path)?;
     Ok(search(&canonical, query, valid_kind(kind), 60))

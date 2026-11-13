@@ -17,7 +17,7 @@ use tokio::sync::broadcast::error::RecvError;
 // Payloads
 // ----------------------------------------------------------------------
 
-/// `POST /api/runs` body.
+/// Input for `create_run`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRunPayload {
@@ -40,7 +40,7 @@ pub struct CreateRunPayload {
     pub no_session: bool,
 }
 
-/// `POST /api/runs/:id/continue` body — same fields, all provider fields
+/// Input for `continue_run` — same fields, all provider fields
 /// optional so the frontend can resend the full composer state.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +58,7 @@ pub struct ContinueRunPayload {
     pub append_system_prompt: Option<String>,
 }
 
-/// `GET /api/usage-logs` query parameters.
+/// Filters for `usage_logs`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageLogQuery {
@@ -84,7 +84,7 @@ pub struct RoleUsage {
     pub output_tokens: i64,
 }
 
-/// Aggregate usage for one run (`GET /api/runs/:id/usage`).
+/// Aggregate usage for one run.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunUsageSummary {
@@ -98,7 +98,7 @@ pub struct RunUsageSummary {
     pub by_role: Vec<RoleUsage>,
 }
 
-/// Pending permission/question requests (`GET /api/runs/:id/pending`); both
+/// Pending permission/question requests; both
 /// keys are always present, `null` when nothing is pending.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +117,7 @@ pub struct UsageMetrics {
     pub avg_cache_hit_rate: f64,
 }
 
-/// Paged usage logs (`GET /api/usage-logs`).
+/// Paged usage logs.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageLogsResponse {
@@ -239,7 +239,7 @@ fn terminal_event_value(status: &str, error_message: Option<&str>) -> Value {
     }
 }
 
-/// Maps a live run event the way the SSE endpoint always did: terminal
+/// Maps a live run event for subscribers: terminal
 /// `status_changed` events are reduced to `{ type, status }`, everything
 /// else passes through unchanged.
 fn map_event(event: RunEvent) -> RunEvent {
@@ -304,10 +304,10 @@ async fn forward_from_handle(
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs
+// Create
 // ----------------------------------------------------------------------
 
-/// Creates a run and spawns its drive task (`POST /api/runs`). The event
+/// Creates a run and spawns its drive task. The event
 /// receiver is subscribed before the drive task starts so no event is lost.
 pub async fn create_run(
     state: &AppState,
@@ -393,11 +393,10 @@ pub async fn create_run(
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/continue
+// Continue
 // ----------------------------------------------------------------------
 
-/// Appends a user message to a finished run and drives the next round
-/// (`POST /api/runs/:id/continue`).
+/// Appends a user message to a finished run and drives the next round.
 pub async fn continue_run(
     state: &AppState,
     run_id: &str,
@@ -484,7 +483,7 @@ pub async fn continue_run(
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/fork
+// Fork
 // ----------------------------------------------------------------------
 
 /// Forks a run (optionally cut at `up_to_message_id`) into a new independent
@@ -508,11 +507,11 @@ pub async fn fork_run(
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/cancel
+// Cancel
 // ----------------------------------------------------------------------
 
 /// Cancels a run and resolves any pending permission/question so the loop
-/// can unwind (`POST /api/runs/:id/cancel`). Kills the run's exec sessions
+/// can unwind. Kills the run's exec sessions
 /// and waits (up to `DRIVE_UNWIND_GRACE`, then aborts) for the drive task to
 /// finish, so a following `continue_run`/delete sees a quiet run. Never
 /// errors.
@@ -551,7 +550,7 @@ pub async fn cancel_run(state: &AppState, run_id: &str) -> ApiResult<()> {
 }
 
 // ----------------------------------------------------------------------
-// DELETE /api/runs/:id
+// Delete
 // ----------------------------------------------------------------------
 
 /// How long `delete_run` waits for a cancelled drive task to unwind.
@@ -575,11 +574,10 @@ pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<()> {
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/messages
+// Mid-run messages
 // ----------------------------------------------------------------------
 
-/// Queues a mid-run message on an active run's inbox
-/// (`POST /api/runs/:id/messages`).
+/// Queues a mid-run message on an active run's inbox.
 pub async fn queue_message(state: &AppState, run_id: &str, content: &str) -> ApiResult<()> {
     let Some(handle) = state.orchestrator.handle(run_id) else {
         return Err(ApiError::conflict("Run is not active."));
@@ -593,11 +591,11 @@ pub async fn queue_message(state: &AppState, run_id: &str, content: &str) -> Api
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/permission
+// Permission answers
 // ----------------------------------------------------------------------
 
-/// Applies a permission decision to a run's pending request
-/// (`POST /api/runs/:id/permission`). Returns `false` when nothing was
+/// Applies a permission decision to a run's pending request.
+/// Returns `false` when nothing was
 /// pending. Also used directly by the `lcgn` interactive prompt.
 ///
 /// The decision is only delivered here: the orchestrator side that asked
@@ -624,8 +622,7 @@ pub async fn apply_permission_decision(
     }
 }
 
-/// Records a permission decision for a run by id
-/// (`POST /api/runs/:id/permission`).
+/// Records a permission decision for a run by id.
 pub async fn permission_decision(state: &AppState, run_id: &str, decision: &str) -> ApiResult<()> {
     let decision = decision.trim();
     if crate::orchestrator::permission_decision::PermissionDecision::parse(decision).is_none() {
@@ -642,10 +639,10 @@ pub async fn permission_decision(state: &AppState, run_id: &str, decision: &str)
 }
 
 // ----------------------------------------------------------------------
-// POST /api/runs/:id/answer
+// Question answers
 // ----------------------------------------------------------------------
 
-/// Sends an answer to a run's pending question (`POST /api/runs/:id/answer`).
+/// Sends an answer to a run's pending question.
 /// Returns `false` when nothing was pending. Also used by the `lcgn` prompt.
 pub async fn answer_question_core(
     handle: &Arc<RunHandle>,
@@ -668,8 +665,7 @@ pub async fn answer_question_core(
     }
 }
 
-/// Records an answer for a run's pending question by id
-/// (`POST /api/runs/:id/answer`).
+/// Records an answer for a run's pending question by id.
 pub async fn answer_question(
     state: &AppState,
     run_id: &str,
@@ -687,10 +683,10 @@ pub async fn answer_question(
 }
 
 // ----------------------------------------------------------------------
-// GET /api/runs, /api/runs/:id, messages, usage, plan, pending
+// Reads: runs, messages, usage, plan, pending requests
 // ----------------------------------------------------------------------
 
-/// Lists all runs, most recently active first (`GET /api/runs`).
+/// Lists all runs, most recently active first.
 pub async fn list_runs(state: &AppState) -> ApiResult<Vec<Run>> {
     // Pick up runs created or changed by another process (QA-039).
     state.db.refresh_runs_throttled();
@@ -699,7 +695,7 @@ pub async fn list_runs(state: &AppState) -> ApiResult<Vec<Run>> {
     Ok(runs)
 }
 
-/// Fetches one run (`GET /api/runs/:id`).
+/// Fetches one run.
 pub async fn get_run(state: &AppState, run_id: &str) -> ApiResult<Run> {
     state
         .db
@@ -707,7 +703,7 @@ pub async fn get_run(state: &AppState, run_id: &str) -> ApiResult<Run> {
         .ok_or_else(|| ApiError::not_found("Run not found."))
 }
 
-/// Lists a run's messages (`GET /api/runs/:id/messages`).
+/// Lists a run's messages.
 pub async fn list_messages(state: &AppState, run_id: &str) -> ApiResult<Vec<RunMessage>> {
     if state.db.get_run_full(run_id).is_none() {
         return Err(ApiError::not_found("Run not found."));
@@ -715,7 +711,7 @@ pub async fn list_messages(state: &AppState, run_id: &str) -> ApiResult<Vec<RunM
     Ok(state.db.list_messages(run_id))
 }
 
-/// Aggregated usage for one run (`GET /api/runs/:id/usage`).
+/// Aggregated usage for one run.
 pub async fn run_usage(state: &AppState, run_id: &str) -> ApiResult<RunUsageSummary> {
     if state.db.get_run_full(run_id).is_none() {
         return Err(ApiError::not_found("Run not found."));
@@ -723,23 +719,46 @@ pub async fn run_usage(state: &AppState, run_id: &str) -> ApiResult<RunUsageSumm
     Ok(usage_summary(run_id, &state.db.list_usage(Some(run_id))))
 }
 
+/// Sums over usage entries — the one aggregation behind every usage view
+/// (run header, usage-logs page, CLI and TUI status lines).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UsageTotals {
+    pub calls: usize,
+    pub cost: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+}
+
+impl UsageTotals {
+    pub fn of<'a>(entries: impl IntoIterator<Item = &'a UsageLogEntry>) -> Self {
+        entries.into_iter().fold(Self::default(), |mut totals, entry| {
+            totals.calls += 1;
+            totals.cost += entry.cost;
+            totals.input_tokens += entry.input_tokens;
+            totals.output_tokens += entry.output_tokens;
+            totals.cache_read_tokens += entry.cache_read_tokens;
+            totals
+        })
+    }
+
+    /// Cache reads in percent of input tokens (0 without input).
+    pub fn cache_hit_rate(&self) -> f64 {
+        if self.input_tokens > 0 {
+            self.cache_read_tokens as f64 * 100.0 / self.input_tokens as f64
+        } else {
+            0.0
+        }
+    }
+}
+
 /// `RunUsageSummary` aggregation over a run's usage logs.
 pub fn usage_summary(run_id: &str, entries: &[UsageLogEntry]) -> RunUsageSummary {
-    let total_calls = entries.len();
-    let total_cost: f64 = entries.iter().map(|entry| entry.cost).sum();
-    let total_input: i64 = entries.iter().map(|entry| entry.input_tokens).sum();
-    let total_output: i64 = entries.iter().map(|entry| entry.output_tokens).sum();
-    let total_cache_read: i64 = entries.iter().map(|entry| entry.cache_read_tokens).sum();
-    let total_input_weighted: i64 = entries.iter().map(|entry| entry.input_tokens).sum();
-    let avg_cache_hit_rate = if total_input_weighted > 0 {
-        total_cache_read as f64 * 100.0 / total_input_weighted as f64
-    } else {
-        0.0
-    };
+    let totals = UsageTotals::of(entries);
 
     let mut by_role: Vec<RoleUsage> = Vec::new();
     for entry in entries {
-        let role = entry.agent_role.clone().unwrap_or_else(|| "planner".to_string());
+        let role = entry.role().to_string();
         if let Some(slot) = by_role.iter_mut().find(|existing| existing.agent_role == role) {
             slot.cost += entry.cost;
             slot.calls += 1;
@@ -758,24 +777,22 @@ pub fn usage_summary(run_id: &str, entries: &[UsageLogEntry]) -> RunUsageSummary
 
     RunUsageSummary {
         run_id: run_id.to_string(),
-        total_cost,
-        total_calls,
-        total_input_tokens: total_input,
-        total_output_tokens: total_output,
-        total_cache_read_tokens: total_cache_read,
-        avg_cache_hit_rate,
+        total_cost: totals.cost,
+        total_calls: totals.calls,
+        total_input_tokens: totals.input_tokens,
+        total_output_tokens: totals.output_tokens,
+        total_cache_read_tokens: totals.cache_read_tokens,
+        avg_cache_hit_rate: totals.cache_hit_rate(),
         by_role,
     }
 }
 
-/// A run's stored plan, `None` when there is none (`GET /api/runs/:id/plan`;
-/// the HTTP adapter serializes `None` as JSON `null`).
+/// A run's stored plan, `None` when there is none.
 pub async fn run_plan(state: &AppState, run_id: &str) -> ApiResult<Option<Plan>> {
     Ok(state.db.get_plan(run_id))
 }
 
-/// A run's pending permission/question requests
-/// (`GET /api/runs/:id/pending`).
+/// A run's pending permission/question requests.
 pub async fn run_pending(state: &AppState, run_id: &str) -> ApiResult<PendingRequests> {
     let Some(handle) = state.orchestrator.handle(run_id) else {
         return Ok(PendingRequests {
@@ -821,10 +838,10 @@ pub async fn resync_run(state: &AppState, run_id: &str) -> RunResync {
 }
 
 // ----------------------------------------------------------------------
-// GET /api/usage-logs
+// Usage logs
 // ----------------------------------------------------------------------
 
-/// Filtered + paged usage logs with totals (`GET /api/usage-logs`).
+/// Filtered + paged usage logs with totals.
 pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<UsageLogsResponse> {
     let all = state.db.list_usage(None);
     let search = query.search.clone().unwrap_or_default().to_lowercase();
@@ -837,7 +854,7 @@ pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<Us
                 }
             }
             if let Some(role) = query.agent_role.as_deref().filter(|r| !r.is_empty()) {
-                if entry.agent_role.as_deref().unwrap_or("planner") != role {
+                if entry.role() != role {
                     return false;
                 }
             }
@@ -868,7 +885,7 @@ pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<Us
     let unique_roles: Vec<String> = {
         let mut roles: Vec<String> = filtered
             .iter()
-            .map(|entry| entry.agent_role.clone().unwrap_or_else(|| "planner".to_string()))
+            .map(|entry| entry.role().to_string())
             .collect();
         roles.sort();
         roles.dedup();
@@ -882,15 +899,7 @@ pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<Us
         .take(limit)
         .map(|entry| (*entry).clone())
         .collect();
-    let total_cost: f64 = filtered.iter().map(|entry| entry.cost).sum();
-    let total_tokens: i64 = filtered.iter().map(|entry| entry.input_tokens + entry.output_tokens).sum();
-    let summed_input: i64 = filtered.iter().map(|entry| entry.input_tokens).sum();
-    let summed_read: i64 = filtered.iter().map(|entry| entry.cache_read_tokens).sum();
-    let avg_cache_hit_rate = if summed_input > 0 {
-        summed_read as f64 * 100.0 / summed_input as f64
-    } else {
-        0.0
-    };
+    let totals = UsageTotals::of(filtered.iter().copied());
 
     Ok(UsageLogsResponse {
         logs,
@@ -898,20 +907,19 @@ pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<Us
         unique_providers,
         unique_roles,
         metrics: UsageMetrics {
-            total_cost,
+            total_cost: totals.cost,
             total_calls: total,
-            total_tokens,
-            avg_cache_hit_rate,
+            total_tokens: totals.input_tokens + totals.output_tokens,
+            avg_cache_hit_rate: totals.cache_hit_rate(),
         },
     })
 }
 
 // ----------------------------------------------------------------------
-// GET /api/runs/:id/events
+// Live events
 // ----------------------------------------------------------------------
 
-/// Subscribes to a run's live event stream (`GET /api/runs/:id/events`,
-/// without the HTTP-only leading `{"type":"connected"}` event).
+/// Subscribes to a run's live event stream.
 ///
 /// Semantics:
 /// * terminal run in the DB — replays the terminal event, then closes;
@@ -994,7 +1002,7 @@ mod tests {
         assert_eq!(summary.total_input_tokens, 2000);
         assert_eq!(summary.total_output_tokens, 400);
         assert_eq!(summary.by_role.len(), 2);
-        assert_eq!(summary.by_role[0].agent_role, "planner");
+        assert_eq!(summary.by_role[0].agent_role, "main");
         assert_eq!(summary.by_role[1].agent_role, "coder");
         assert_eq!(summary.by_role[1].calls, 2);
     }

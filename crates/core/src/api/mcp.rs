@@ -21,7 +21,6 @@ fn resolve_project(state: &AppState, raw: Option<&str>) -> Option<String> {
 /// Lists MCP servers visible to the project (or user scope) with live probe
 /// status: enabled servers get a concurrent `tools/list` probe (or their
 /// cached result), disabled servers report `disabled`.
-/// Mirrors `GET /api/mcp/servers`.
 pub async fn list_mcp_servers(state: &AppState, project_path: Option<&str>) -> ApiResult<mcp_service::McpServersResponse> {
     let project = resolve_project(state, project_path);
     let servers = mcp_service::probe_all(project.as_deref()).await;
@@ -30,7 +29,7 @@ pub async fn list_mcp_servers(state: &AppState, project_path: Option<&str>) -> A
 }
 
 /// Validates and saves an MCP server create/update payload (all errors are
-/// BadRequest, as the route returned). Mirrors `POST /api/mcp/servers`.
+/// BadRequest).
 pub async fn upsert_mcp_server(state: &AppState, input: mcp_service::McpServerInput) -> ApiResult<mcp_service::McpServerInfo> {
     let scope = if input.scope.as_deref() == Some("project") { "project" } else { "user" };
     let registered = if scope == "project" {
@@ -59,7 +58,7 @@ pub async fn upsert_mcp_server(state: &AppState, input: mcp_service::McpServerIn
 }
 
 /// Deletes an MCP server config by name (trimmed + lowercased); returns
-/// whether anything was deleted. Mirrors `DELETE /api/mcp/servers/:name`.
+/// whether anything was deleted.
 pub async fn delete_mcp_server(state: &AppState, name: &str, project_path: Option<&str>) -> ApiResult<bool> {
     let name = name.trim().to_lowercase();
     if name.is_empty() {
@@ -73,7 +72,6 @@ pub async fn delete_mcp_server(state: &AppState, name: &str, project_path: Optio
 }
 
 /// Restarts an MCP server process and returns its info.
-/// Mirrors `POST /api/mcp/servers/:name/restart`.
 pub async fn restart_mcp_server(state: &AppState, name: &str, project_path: Option<&str>) -> ApiResult<mcp_service::McpServerInfo> {
     let name = name.trim().to_lowercase();
     if name.is_empty() {
@@ -91,7 +89,6 @@ pub async fn restart_mcp_server(state: &AppState, name: &str, project_path: Opti
 }
 
 /// Enables/disables an MCP server and returns its info.
-/// Mirrors `PUT /api/mcp/servers/:name/enabled`.
 pub async fn toggle_mcp_server(state: &AppState, name: &str, enabled: bool, project_path: Option<&str>) -> ApiResult<mcp_service::McpServerInfo> {
     let name = name.trim().to_lowercase();
     if name.is_empty() {

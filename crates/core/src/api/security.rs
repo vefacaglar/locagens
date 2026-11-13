@@ -34,7 +34,7 @@ pub struct SecurityPolicy {
     pub workspace_writes_only: bool,
 }
 
-/// Full security status payload (`GET /api/security/status`).
+/// Full security status payload.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityStatus {
@@ -106,13 +106,13 @@ fn sandbox_status() -> SecuritySandbox {
     }
 }
 
-/// Returns the current security status (`GET /api/security/status`).
+/// Returns the current security status.
 pub async fn security_status() -> ApiResult<SecurityStatus> {
     Ok(status_value().await)
 }
 
 /// Runs the Windows sandbox setup after explicit user confirmation and returns
-/// the resulting status (`POST /api/security/sandbox/setup`).
+/// the resulting status.
 pub async fn setup_sandbox(confirmed: bool) -> ApiResult<SecurityStatus> {
     if !confirmed {
         return Err(ApiError::bad_request(

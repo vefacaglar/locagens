@@ -6,8 +6,7 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Input for spawning a background process
-/// (HTTP equivalent: `POST /api/processes/spawn` body).
+/// Input for spawning a background process.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnProcessInput {
@@ -16,7 +15,7 @@ pub struct SpawnProcessInput {
     pub env: Option<HashMap<String, String>>,
 }
 
-/// Logs of a background process (`GET /api/processes/:id/logs`).
+/// Logs of a background process.
 /// (`Default` is impossible: `ProcessInfo` does not implement it.)
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -26,8 +25,8 @@ pub struct ProcessLogs {
 }
 
 /// Lists tracked background processes, optionally filtered to a registered
-/// project directory (`GET /api/processes`). A path that does not resolve to a
-/// registered project is ignored (no filter), matching the HTTP route.
+/// project directory. A path that does not resolve to a
+/// registered project is ignored (no filter).
 pub async fn list_processes(
     state: &AppState,
     project_path: Option<&str>,
@@ -42,8 +41,8 @@ pub async fn list_processes(
     Ok(state.processes.list(project.as_deref()))
 }
 
-/// Spawns a background process in a registered project directory
-/// (`POST /api/processes/spawn`). Falls back to the default project path when
+/// Spawns a background process in a registered project directory.
+/// Falls back to the default project path when
 /// no `projectPath` is given.
 pub async fn spawn_process(
     state: &AppState,
@@ -73,14 +72,12 @@ pub async fn spawn_process(
         .spawn(command, canonical, input.env.clone()))
 }
 
-/// Kills a background process; returns whether a process with that id existed
-/// (`POST /api/processes/:id/kill`).
+/// Kills a background process; returns whether a process with that id existed.
 pub async fn kill_process(state: &AppState, id: &str) -> ApiResult<bool> {
     Ok(state.processes.kill(id).await)
 }
 
-/// Restarts a background process; 404 when the id is unknown
-/// (`POST /api/processes/:id/restart`).
+/// Restarts a background process; 404 when the id is unknown.
 pub async fn restart_process(state: &AppState, id: &str) -> ApiResult<ProcessInfo> {
     state
         .processes
@@ -90,7 +87,7 @@ pub async fn restart_process(state: &AppState, id: &str) -> ApiResult<ProcessInf
 }
 
 /// Returns a background process plus its captured log lines; 404 when the id
-/// is unknown (`GET /api/processes/:id/logs`).
+/// is unknown.
 pub async fn process_logs(state: &AppState, id: &str) -> ApiResult<ProcessLogs> {
     let Some(process) = state.processes.get(id) else {
         return Err(ApiError::not_found("Process not found"));

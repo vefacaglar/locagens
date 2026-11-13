@@ -6,8 +6,7 @@ use crate::services::skills as skill_service;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 
-/// Input for `POST /api/skills` (install) and `DELETE /api/skills/:name`
-/// (target/projectPath may arrive via body or query).
+/// Input for `install_skill` and `delete_skill`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallSkillInput {
@@ -16,7 +15,7 @@ pub struct InstallSkillInput {
     pub project_path: Option<String>,
 }
 
-/// Resolved skills folder for `POST /api/skills/folder` (`{path,target}`).
+/// Resolved skills folder (`{path,target}`).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsFolder {
@@ -40,7 +39,6 @@ fn resolve_project(state: &AppState, raw: Option<&str>) -> Option<String> {
 }
 
 /// Lists installed skills plus the user/project skill roots.
-/// Mirrors `GET /api/skills`.
 pub async fn list_skills(state: &AppState, project_path: Option<&str>) -> ApiResult<skill_service::SkillsListResponse> {
     let project = resolve_project(state, project_path);
     Ok(skill_service::SkillsListResponse {
@@ -54,7 +52,6 @@ pub async fn list_skills(state: &AppState, project_path: Option<&str>) -> ApiRes
 }
 
 /// Finds one skill by name (trimmed; empty name is a BadRequest).
-/// Mirrors `GET /api/skills/:name`.
 pub async fn get_skill(state: &AppState, name: &str, project_path: Option<&str>) -> ApiResult<skill_service::SkillSummary> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -71,7 +68,6 @@ pub async fn get_skill(state: &AppState, name: &str, project_path: Option<&str>)
 }
 
 /// Installs a SKILL.md into the user or project skills root.
-/// Mirrors `POST /api/skills`.
 pub async fn install_skill(state: &AppState, input: InstallSkillInput) -> ApiResult<skill_service::SkillSummary> {
     let target = match input.target.as_deref() {
         Some("project") => "project",
@@ -109,7 +105,7 @@ pub async fn install_skill(state: &AppState, input: InstallSkillInput) -> ApiRes
 }
 
 /// Ensures the skills folder for `target` exists and returns its path; the
-/// caller opens it. Mirrors `POST /api/skills/folder`.
+/// caller opens it.
 pub async fn skills_folder(state: &AppState, input: InstallSkillInput) -> ApiResult<SkillsFolder> {
     let target = match input.target.as_deref() {
         Some("project") => "project",
@@ -158,7 +154,7 @@ pub async fn skills_folder(state: &AppState, input: InstallSkillInput) -> ApiRes
 }
 
 /// Deletes a skill by name from the given target; returns whether anything was
-/// deleted. Mirrors `DELETE /api/skills/:name`.
+/// deleted.
 pub async fn delete_skill(
     state: &AppState,
     name: &str,

@@ -66,7 +66,7 @@ pub struct TokenStore {
 
 impl TokenStore {
     pub fn default_location() -> Self {
-        Self { path: locagens_config::paths::locagens_home().join("mcp-oauth.json") }
+        Self { path: crate::paths::locagens_home().join("mcp-oauth.json") }
     }
 
     pub fn at(path: PathBuf) -> Self {
@@ -148,12 +148,7 @@ pub fn logout(store: &TokenStore, config: &McpServerConfig) -> Result<bool, Stri
     store.remove(&store_key(config))
 }
 
-pub(super) fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+pub(super) use locagens_config::oauth::now_ms;
 
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -503,29 +498,4 @@ pub async fn access_token(
     }
 }
 
-/// Opens an http(s) URL in the default browser (never through a shell).
-pub fn open_browser(url: &str) -> Result<(), String> {
-    let parsed = Url::parse(url).map_err(|err| format!("Invalid URL: {err}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("Only http(s) URLs can be opened.".to_string());
-    }
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = std::process::Command::new("rundll32");
-        command.args(["url.dll,FileProtocolHandler", parsed.as_str()]);
-        command
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(parsed.as_str());
-        command
-    };
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(parsed.as_str());
-        command
-    };
-    command.spawn().map(|_| ()).map_err(|err| format!("Could not open the browser: {err}"))
-}
+pub use crate::util::open_browser;

@@ -10,7 +10,7 @@ pub enum ApiErrorKind {
 }
 
 /// Typed error returned by every facade function. Carries the category plus
-/// the exact message the HTTP route would have returned.
+/// the user-facing message.
 #[derive(Debug, Clone)]
 pub struct ApiError {
     pub kind: ApiErrorKind,

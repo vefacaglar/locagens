@@ -6,7 +6,7 @@
 //! models (`Project`, `Run`, `RunMessage`, `Plan`, `PlanTask`,
 //! `PermissionRule`, `Memory`, `UsageLogEntry`).
 //!
-//! The serde shapes here mirror `apps/backend/src/db.rs` exactly
+//! The serde shapes here are the on-disk format of `locagens_core::db`
 //! (`camelCase` keys, `default` on every field) so the JSON on disk keeps
 //! round-tripping unchanged.
 
@@ -129,7 +129,7 @@ pub fn from_run_mode(mode: &str) -> (ApprovalPolicy, SandboxMode) {
 }
 
 // ----------------------------------------------------------------------
-// Persisted data models (serde shapes mirror `apps/backend/src/db.rs`)
+// Persisted data models (on-disk serde shapes)
 // ----------------------------------------------------------------------
 
 /// A registered project folder.

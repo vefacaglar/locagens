@@ -137,11 +137,22 @@ fn setup_env(label: &str, base_url: &str) -> Env {
 }
 
 fn run_lcgn(env: &Env, args: &[&str]) -> (i32, String, String) {
+    // Every home-derived path points into temp dirs, so the test never reads
+    // (or runs hooks from) the developer's ~/.locagens, ~/.codex, ~/.pi/agent
+    // or app-data folders (QA-071).
+    let home = env.data.join("home");
     let output = Command::new(env!("CARGO_BIN_EXE_lcgn"))
         .args(args)
         .current_dir(&env.project)
-        .env("PI_CODING_AGENT_DIR", &env.agent)
+        .env("LOCAGENS_HOME", &env.agent)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("PI_CODING_AGENT_DIR", home.join(".pi").join("agent"))
         .env("LOCAGENS_DATA_DIR", &env.data)
+        .env("LOCAGENS_SETTINGS_PATH", home.join("settings.json"))
+        .env("LOCAGENS_PLUGINS_PATH", home.join("plugins"))
+        .env("LOCAGENS_SKILLS_PATH", home.join("skills"))
+        .env("LOCAGENS_MCP_CONFIG_PATH", home.join("mcp_servers.json"))
+        .env("XDG_DATA_HOME", home.join(".local").join("share"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()

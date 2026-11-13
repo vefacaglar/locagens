@@ -17,8 +17,8 @@ pub mod symbols;
 
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 
-/// Run events are JSON objects with a `"type"` field — the same payloads the
-/// SSE endpoint streams.
+/// Run events are JSON objects with a `"type"` field, broadcast on the run's
+/// event channel.
 pub type RunEvent = serde_json::Value;
 /// Receiving half of a run event broadcast channel.
 pub type EventRx = tokio::sync::broadcast::Receiver<RunEvent>;

@@ -48,7 +48,7 @@ pub fn main_entry() -> i32 {
 /// unset flags from it. Errors name the offending file.
 fn load_effective_config(cli: &mut Cli) -> Result<locagens_config::config_toml::Config, String> {
     use locagens_config::config_toml::Config;
-    let config = Config::load()
+    let config = Config::load_from_files(&crate::paths::config_files())
         .and_then(|config| config.with_profile(cli.profile.as_deref()))
         .map_err(|err| err.to_string())?;
     crate::config_runtime::install(config.clone());
@@ -58,7 +58,7 @@ fn load_effective_config(cli: &mut Cli) -> Result<locagens_config::config_toml::
 
 /// `lcgn config [show]`: the effective config with secrets masked.
 fn config_command(config: &locagens_config::config_toml::Config) -> i32 {
-    let files: Vec<String> = locagens_config::config_toml::Config::config_files()
+    let files: Vec<String> = crate::paths::config_files()
         .iter()
         .filter(|path| path.is_file())
         .map(|path| path.display().to_string())

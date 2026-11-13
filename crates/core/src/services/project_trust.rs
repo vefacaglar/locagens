@@ -156,12 +156,12 @@ mod store {
 
     #[cfg(not(test))]
     pub fn read_files() -> Vec<PathBuf> {
-        locagens_config::config_toml::Config::config_files()
+        crate::paths::config_files()
     }
 
     #[cfg(not(test))]
     pub fn write_file() -> PathBuf {
-        locagens_config::paths::locagens_home().join("config.toml")
+        crate::paths::locagens_home().join("config.toml")
     }
 
     #[cfg(test)]

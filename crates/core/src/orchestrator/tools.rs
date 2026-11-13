@@ -811,11 +811,18 @@ const FETCH_MAX_REDIRECTS: usize = 5;
 /// Bytes of response body `fetch_url` reads before it stops.
 const FETCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+/// Which resolved addresses `fetch_url` refuses; production uses
+/// `network_proxy::is_non_public_ip` (tests swap in their own predicate).
+type BlockedAddress = dyn Fn(&std::net::IpAddr) -> bool + Sync;
+
 /// Validates one `fetch_url` target and resolves it to public addresses:
-/// http(s) only, and every address the host resolves to must be public
+/// http(s) only, and no address the host resolves to may be `blocked`
 /// (`network_proxy::is_non_public_ip`, which also knows IPv4-mapped IPv6,
 /// link-local and reserved ranges).
-async fn resolve_public_target(url: &url::Url) -> Result<(String, Vec<std::net::SocketAddr>), String> {
+async fn resolve_public_target(
+    url: &url::Url,
+    blocked: &BlockedAddress,
+) -> Result<(String, Vec<std::net::SocketAddr>), String> {
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err("fetch_url: only http(s) URLs are allowed.".to_string());
     }
@@ -834,7 +841,7 @@ async fn resolve_public_target(url: &url::Url) -> Result<(String, Vec<std::net::
     if addrs.is_empty() {
         return Err(format!("fetch_url: cannot resolve {host}."));
     }
-    if addrs.iter().any(|addr| locagens_execpolicy::network_proxy::is_non_public_ip(&addr.ip())) {
+    if addrs.iter().any(|addr| blocked(&addr.ip())) {
         return Err("fetch_url: requests to private/internal addresses are blocked.".to_string());
     }
     Ok((host, addrs))
@@ -843,8 +850,8 @@ async fn resolve_public_target(url: &url::Url) -> Result<(String, Vec<std::net::
 /// One request pinned to the addresses that were just validated, so a
 /// second DNS answer (rebinding) can never redirect the connection. No
 /// proxy (it would resolve the host itself) and no automatic redirects.
-async fn fetch_pinned(url: &url::Url) -> Result<reqwest::Response, String> {
-    let (host, addrs) = resolve_public_target(url).await?;
+async fn fetch_pinned(url: &url::Url, blocked: &BlockedAddress) -> Result<reqwest::Response, String> {
+    let (host, addrs) = resolve_public_target(url, blocked).await?;
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Locagens/1.0")
@@ -872,12 +879,18 @@ async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> (Vec
 }
 
 async fn fetch_url(args: &Value) -> Result<String, String> {
+    fetch_url_guarded(args, &|ip| locagens_execpolicy::network_proxy::is_non_public_ip(ip)).await
+}
+
+/// `fetch_url` with the address guard applied to the first URL and to every
+/// redirect hop.
+async fn fetch_url_guarded(args: &Value, blocked: &BlockedAddress) -> Result<String, String> {
     let url = str_arg(args, "url").unwrap_or_default();
     let mut current = url::Url::parse(url.trim()).map_err(|err| format!("fetch_url: invalid URL: {err}"))?;
     // Follow redirects by hand: every hop is resolved, checked and pinned.
     let mut redirects = 0usize;
     let response = loop {
-        let response = fetch_pinned(&current).await?;
+        let response = fetch_pinned(&current, blocked).await?;
         if !response.status().is_redirection() {
             break response;
         }
@@ -1219,6 +1232,53 @@ mod tests {
         for ip in ["8.8.8.8", "2606:4700:4700::1111", "1.1.1.1"] {
             assert!(!is_non_public_ip(&ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    /// Serves `GET /ok` (200 "fetched-ok"), `GET /hop` (302 to `/ok`) and
+    /// anything else as a 302 to the cloud metadata address.
+    async fn spawn_redirect_server() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let redirect = |location: &str| {
+                    format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                };
+                let reply = if request.starts_with("GET /ok ") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\nfetched-ok".to_string()
+                } else if request.starts_with("GET /hop ") {
+                    redirect(&format!("http://127.0.0.1:{port}/ok"))
+                } else {
+                    redirect("http://169.254.169.254/latest/meta-data/")
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        port
+    }
+
+    /// QA-009: every redirect hop is resolved and checked like the first URL,
+    /// so a public page cannot bounce `fetch_url` to an internal address.
+    #[tokio::test]
+    async fn fetch_url_revalidates_every_redirect_hop() {
+        use locagens_execpolicy::network_proxy::is_non_public_ip;
+        let port = spawn_redirect_server().await;
+        // The test server stands in for a public host; every other address
+        // keeps the production check.
+        let blocked = |ip: &std::net::IpAddr| ip.to_string() != "127.0.0.1" && is_non_public_ip(ip);
+        let followed = fetch_url_guarded(&json!({ "url": format!("http://127.0.0.1:{port}/hop") }), &blocked)
+            .await
+            .unwrap();
+        assert!(followed.contains("fetched-ok"), "{followed}");
+        let err = fetch_url_guarded(&json!({ "url": format!("http://127.0.0.1:{port}/evil") }), &blocked)
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked"), "{err}");
     }
 
     #[tokio::test]

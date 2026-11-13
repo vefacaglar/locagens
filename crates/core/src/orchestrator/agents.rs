@@ -757,7 +757,7 @@ async fn supervised_agent_task(
     let handle = spec.handle.clone();
     let task = std::panic::AssertUnwindSafe(run_agent_task(spec, id.clone(), commands, interrupt, turn_diff));
     if let Err(payload) = task.catch_unwind().await {
-        let reason = super::panic_message(payload);
+        let reason = super::drive::panic_message(payload);
         tracing::error!("Sub-agent {id} panicked: {reason}");
         handle.agents.finish_turn(&id, "failed", format!("The agent crashed: {reason}"));
     }
@@ -772,7 +772,7 @@ async fn run_agent_task(
     turn_diff: Arc<super::TurnDiffTracker>,
 ) {
     let handle: Arc<RunHandle> = spec.handle.clone();
-    let mut agent = super::build_sub_loop(spec, Some(commands), turn_diff, Some(interrupt.clone())).await;
+    let mut agent = super::drive::build_sub_loop(spec, Some(commands), turn_diff, Some(interrupt.clone())).await;
     loop {
         interrupt.store(false, Ordering::SeqCst);
         handle.agents.set_status(&id, "running");

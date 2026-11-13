@@ -7,7 +7,7 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Input for `PUT /api/plugins/:id/toggle`.
+/// Input for `toggle_plugin`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ToggleInput {
@@ -30,7 +30,7 @@ fn resolve_project(state: &AppState, raw: Option<&str>) -> Option<String> {
 }
 
 /// Lists installed plugins plus plugin templates and the user/project plugin
-/// roots. Mirrors `GET /api/plugins`.
+/// roots.
 pub async fn list_plugins(state: &AppState, project_path: Option<&str>) -> ApiResult<plugin_service::PluginsResponse> {
     let project = resolve_project(state, project_path);
     Ok(plugin_service::PluginsResponse {
@@ -42,13 +42,13 @@ pub async fn list_plugins(state: &AppState, project_path: Option<&str>) -> ApiRe
     })
 }
 
-/// Available plugin templates. Mirrors `GET /api/plugins/templates`.
+/// Available plugin templates.
 pub fn plugin_templates() -> ApiResult<Vec<Value>> {
     Ok(plugin_service::templates())
 }
 
-/// Installs a plugin from a template or local folder. Mirrors
-/// `POST /api/plugins` (service failures map to Internal, as the route did).
+/// Installs a plugin from a template or local folder (service failures map
+/// to Internal).
 pub async fn install_plugin(state: &AppState, payload: plugin_service::InstallPayload) -> ApiResult<Value> {
     if payload.uri.is_empty() || payload.source.is_empty() {
         return Err(ApiError::bad_request(
@@ -77,7 +77,7 @@ pub async fn install_plugin(state: &AppState, payload: plugin_service::InstallPa
 }
 
 /// Toggles a plugin's enabled flag; service failures are NotFound, matching
-/// the 404 the route returned. Mirrors `PUT /api/plugins/:id/toggle`.
+/// NotFound.
 pub async fn toggle_plugin(state: &AppState, id: &str, input: ToggleInput) -> ApiResult<Value> {
     let enabled = !matches!(input.enabled, Some(false));
     let scope = if input.scope.as_deref() == Some("project") { "project" } else { "user" };
@@ -92,7 +92,6 @@ pub async fn toggle_plugin(state: &AppState, id: &str, input: ToggleInput) -> Ap
 
 /// Deletes a plugin directory by id. Unknown id -> NotFound
 /// "Plugin not found or could not be deleted."; service errors -> Internal.
-/// Mirrors `DELETE /api/plugins/:id`.
 pub async fn delete_plugin(
     state: &AppState,
     id: &str,

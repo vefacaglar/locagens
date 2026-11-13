@@ -112,8 +112,9 @@ fn is_internal_marker(value: &str) -> bool {
     value.trim().starts_with("internal:")
 }
 
-fn hooks_files(project_path: Option<&Path>) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = crate::paths::agent_dir_chain()
+/// `hooks.json` of every agent dir, then the trusted project's.
+fn hooks_files(agent_dirs: &[PathBuf], project_path: Option<&Path>) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = agent_dirs
         .iter()
         .map(|dir| dir.join("hooks.json"))
         .collect();
@@ -217,9 +218,9 @@ fn collect_event(map: &mut HashMap<String, Vec<HookCommand>>, key: &str, value: 
 /// Loads every hook registered for this project: `hooks.json` files in the
 /// agent-dir chain, `<project>/.locagens/hooks.json` and the `hooks` field
 /// of every enabled plugin manifest.
-fn load_hooks(project_path: Option<&Path>) -> HashMap<String, Vec<HookCommand>> {
+fn load_hooks(agent_dirs: &[PathBuf], project_path: Option<&Path>) -> HashMap<String, Vec<HookCommand>> {
     let mut map: HashMap<String, Vec<HookCommand>> = HashMap::new();
-    for file in hooks_files(project_path) {
+    for file in hooks_files(agent_dirs, project_path) {
         let Ok(raw) = std::fs::read_to_string(&file) else { continue };
         let Ok(parsed) = serde_json::from_str::<Value>(&raw) else { continue };
         // Support both `{ "hooks": { ... } }` and a bare event map at root.
@@ -277,10 +278,16 @@ fn matcher_matches(matcher: Option<&str>, event: &str, payload: &Value) -> bool 
 /// Runs every hook registered for `event_name` (any alias spelling) in
 /// order and folds the results into one `HookOutcome`.
 pub async fn run_hook_event(event_name: &str, project_path: &Path, payload: &Value) -> HookOutcome {
+    run_hook_event_in(&crate::paths::agent_dir_chain(), event_name, project_path, payload).await
+}
+
+/// [`run_hook_event`] with an explicit agent-dir chain (the `hooks.json`
+/// roots), so tests never load the developer's own hooks (QA-071).
+pub async fn run_hook_event_in(agent_dirs: &[PathBuf], event_name: &str, project_path: &Path, payload: &Value) -> HookOutcome {
     let Some(event) = canonical_event(event_name) else {
         return HookOutcome::default();
     };
-    let hooks = load_hooks(Some(project_path));
+    let hooks = load_hooks(agent_dirs, Some(project_path));
     let registered = hooks.get(event).cloned().unwrap_or_default();
     let mut outcome = HookOutcome::default();
     for hook in registered {
@@ -479,6 +486,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Hook tests load only the hooks they write (QA-071).
+    const NO_AGENT_DIRS: &[PathBuf] = &[];
+
     fn temp_project(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "locagens-hooks-{tag}-{}-{}",
@@ -503,14 +513,14 @@ mod tests {
             json!({ "id": "evil", "name": "Evil", "enabled": true, "hooks": { "SessionStart": "echo untrusted-plugin-ran" } }).to_string(),
         )
         .unwrap();
-        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
         assert!(
             !outcome.additional_context.iter().any(|c| c.contains("untrusted-")),
             "{:?}",
             outcome.additional_context
         );
         crate::services::project_trust::trust_for_session(&project);
-        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
         let context = outcome.context_joined().unwrap_or_default();
         assert!(context.contains("untrusted-hook-ran") && context.contains("untrusted-plugin-ran"), "{context}");
         let _ = std::fs::remove_dir_all(&project);
@@ -520,14 +530,29 @@ mod tests {
     async fn hooks_do_not_inherit_secret_environment_variables() {
         let project = temp_project("env");
         let var = format!("LOCAGENS_TEST_API_KEY_{}", uuid::Uuid::new_v4().simple());
+        let _env = crate::ENV_TEST_LOCK.lock().await;
         std::env::set_var(&var, "hook-secret-value");
         let print = if cfg!(windows) { format!("echo [%{var}%]") } else { format!("echo \"[${var}]\"") };
         write_hooks(&project, json!({ "SessionStart": print }));
-        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
         std::env::remove_var(&var);
         let context = outcome.context_joined().unwrap_or_default();
         assert!(context.contains('['), "hook ran: {context}");
         assert!(!context.contains("hook-secret-value"), "{context}");
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn agent_dir_hooks_load_from_the_injected_chain_only() {
+        let project = temp_project("agent-dir");
+        let agent_dir = project.join("agent-home");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("hooks.json"), json!({ "SessionStart": "echo agent-dir-hook-ran" }).to_string()).unwrap();
+        let payload = json!({ "hook_event_name": "SessionStart" });
+        let outcome = run_hook_event_in(&[agent_dir.clone()], "SessionStart", &project, &payload).await;
+        assert!(outcome.context_joined().unwrap_or_default().contains("agent-dir-hook-ran"));
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, "SessionStart", &project, &payload).await;
+        assert!(outcome.context_joined().is_none(), "{:?}", outcome.additional_context);
         let _ = std::fs::remove_dir_all(&project);
     }
 
@@ -593,7 +618,7 @@ mod tests {
         write_hooks(&project, hooks);
 
         // SessionStart: plain non-JSON stdout becomes additional context.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "SessionStart",
             &project,
             &json!({ "hook_event_name": "SessionStart", "session_id": "s1" }),
@@ -606,7 +631,7 @@ mod tests {
             .any(|c| c.contains("hello-session-start")));
 
         // PreToolUse: updatedInput replaces the tool args and adds context.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "PreToolUse",
             &project,
             &json!({ "hook_event_name": "PreToolUse", "tool_name": "write_file",
@@ -620,7 +645,7 @@ mod tests {
         assert_eq!(updated["content"], "hooked");
 
         // PreToolUse: JSON `decision: "block"` with a reason.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "PreToolUse",
             &project,
             &json!({ "hook_event_name": "PreToolUse", "tool_name": "run_command",
@@ -631,7 +656,7 @@ mod tests {
         assert_eq!(outcome.reason.as_deref(), Some("no shell for you"));
 
         // PreToolUse: exit code 2 with stderr as the reason.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "PreToolUse",
             &project,
             &json!({ "hook_event_name": "PreToolUse", "tool_name": "exec_command",
@@ -642,7 +667,7 @@ mod tests {
         assert_eq!(outcome.reason.as_deref(), Some("denied by policy"));
 
         // Unmatched tools never trigger the hooks.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "PreToolUse",
             &project,
             &json!({ "hook_event_name": "PreToolUse", "tool_name": "read_file",
@@ -693,7 +718,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "SessionStart",
             &project,
             &json!({ "hook_event_name": "SessionStart", "session_id": "s2" }),
@@ -711,7 +736,7 @@ mod tests {
         );
 
         // PostToolUse with only an internal marker must be a clean no-op.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "PostToolUse",
             &project,
             &json!({ "hook_event_name": "PostToolUse", "tool_name": "read_file" }),
@@ -721,7 +746,7 @@ mod tests {
         assert!(outcome.additional_context.is_empty());
 
         // Unknown event names are clean no-ops too.
-        let outcome = run_hook_event(
+        let outcome = run_hook_event_in(NO_AGENT_DIRS, 
             "NotARealEvent",
             &project,
             &json!({ "hook_event_name": "NotARealEvent" }),

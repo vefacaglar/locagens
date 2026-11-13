@@ -6,8 +6,7 @@ use crate::services::symbols::CodeSymbol;
 
 /// Searches code symbols in a project directory: registered projects search
 /// directly, unregistered-but-valid directories fall back to a canonicalized
-/// search so the tab is usable before registration
-/// (`GET /api/projects/symbols`).
+/// search so the tab is usable before registration.
 pub async fn search_symbols(
     state: &AppState,
     path: &str,
