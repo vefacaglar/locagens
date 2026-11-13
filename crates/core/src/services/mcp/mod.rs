@@ -336,6 +336,23 @@ pub fn find_config(name: &str, project_path: Option<&str>) -> Option<McpServerCo
         .find(|cfg| cfg.name == name.trim().to_lowercase())
 }
 
+/// Carries auth settings the edit form cannot express (bearer env var,
+/// headers, OAuth client id, scopes) over from the stored entry with the same
+/// name and scope, so saving a remote server from the UI never drops them.
+pub fn keep_stored_auth(mut config: McpServerConfig) -> McpServerConfig {
+    let Some(stored) = find_config(&config.name, config.project_path.as_deref())
+        .filter(|stored| stored.scope == config.scope)
+    else {
+        return config;
+    };
+    config.bearer_token_env_var = config.bearer_token_env_var.or(stored.bearer_token_env_var);
+    config.http_headers = config.http_headers.or(stored.http_headers);
+    config.env_http_headers = config.env_http_headers.or(stored.env_http_headers);
+    config.oauth_client_id = config.oauth_client_id.or(stored.oauth_client_id);
+    config.scopes = config.scopes.or(stored.scopes);
+    config
+}
+
 /// Writes one entry into the appropriate scope file, creating it if needed.
 pub fn save_config(config: &McpServerConfig) -> Result<(), String> {
     let (path, name, entry) = match config.scope.as_str() {

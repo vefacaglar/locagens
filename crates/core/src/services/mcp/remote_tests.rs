@@ -377,3 +377,27 @@ fn sse_parser_handles_split_chunks_crlf_and_multiline_data() {
     let events = parser.push(b":1}\r\n\r\n: comment\n\ndata: x\ndata: y\n\n");
     assert_eq!(events, vec!["{\"a\":1}".to_string(), "x\ny".to_string()]);
 }
+
+#[test]
+fn saving_from_the_form_keeps_stored_auth_settings() {
+    let project = tempfile::tempdir().unwrap();
+    let project_path = std::fs::canonicalize(project.path()).unwrap().to_string_lossy().to_string();
+    let mut stored = remote_config("remote-auth", "http://127.0.0.1:1/mcp");
+    stored.scope = "project".to_string();
+    stored.project_path = Some(project_path.clone());
+    stored.bearer_token_env_var = Some("MY_TOKEN".to_string());
+    stored.http_headers = Some(BTreeMap::from([("X-Team".to_string(), "core".to_string())]));
+    stored.scopes = Some(vec!["read".to_string()]);
+    super::save_config(&stored).unwrap();
+
+    // The edit form only knows name/transport/url/enabled.
+    let mut edited = remote_config("remote-auth", "http://127.0.0.1:2/mcp");
+    edited.scope = "project".to_string();
+    edited.project_path = Some(project_path);
+    let merged = super::keep_stored_auth(edited);
+
+    assert_eq!(merged.url.as_deref(), Some("http://127.0.0.1:2/mcp"));
+    assert_eq!(merged.bearer_token_env_var.as_deref(), Some("MY_TOKEN"));
+    assert_eq!(merged.http_headers.unwrap()["X-Team"], "core");
+    assert_eq!(merged.scopes.unwrap(), vec!["read".to_string()]);
+}

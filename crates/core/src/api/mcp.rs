@@ -49,6 +49,7 @@ pub async fn upsert_mcp_server(state: &AppState, input: mcp_service::McpServerIn
     };
 
     let config = mcp_service::validate_input(&input, registered.as_deref()).map_err(ApiError::bad_request)?;
+    let config = mcp_service::keep_stored_auth(config);
 
     mcp_service::save_config(&config).map_err(ApiError::bad_request)?;
     // The stored config changed: drop stale probes for this server name.
