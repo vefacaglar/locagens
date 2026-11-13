@@ -1,6 +1,7 @@
 //! Interactive `lcgn` REPL: line editor, slash commands, Ctrl+C cancel.
 
-use super::commands::{self, CommandSession, Output, SlashCommand};
+use super::commands::{self, CommandSession, Output};
+use crate::commands::SlashCommand;
 use super::models::ResolvedModel;
 use super::runner::{run_turn, TurnOptions, TurnTarget};
 use crate::state::AppState;

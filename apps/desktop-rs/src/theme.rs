@@ -803,6 +803,9 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .ccm-divider { height: 1px; margin: 4px 6px; background: var(--border); }
 .ccm-submenu-row { position: relative; }
 .composer-context-menu.model-menu { width: 280px; }
+.composer-context-menu.slash-menu { width: min(420px, 100%); }
+.ccm-cmd-usage { flex: none; color: var(--text); font-weight: 500; }
+.ccm-cmd-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); font-size: 12px; }
 .ccm-list.model-list { max-height: min(320px, calc(100vh - 180px)); overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
 .ccm-list::-webkit-scrollbar { width: 5px; }
 .ccm-list::-webkit-scrollbar-thumb { background: var(--active); border-radius: 999px; }

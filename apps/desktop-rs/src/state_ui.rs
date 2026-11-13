@@ -208,6 +208,39 @@ pub struct UiStore {
     pub patch_progress: Signal<Option<Value>>,
 }
 
+/// Creates every `UiStore` signal (a hook: call it once, from the root
+/// component; the end-to-end test builds its store the same way).
+pub fn use_ui_store() -> UiStore {
+    UiStore {
+        appearance: use_signal(prefs::load),
+        system_dark: use_signal(|| true),
+        page: use_signal(|| AppPage::Chat),
+        projects: use_signal(Vec::new),
+        selected_project: use_signal(|| None),
+        runs: use_signal(Vec::new),
+        search_query: use_signal(String::new),
+        active_run_id: use_signal(|| None),
+        active_run: use_signal(|| None),
+        messages: use_signal(Vec::new),
+        plan: use_signal(|| None),
+        run_usage: use_signal(|| None),
+        pending_permission: use_signal(|| None),
+        pending_question: use_signal(|| None),
+        providers_catalog: use_signal(Vec::new),
+        selected_provider: use_signal(String::new),
+        selected_model: use_signal(String::new),
+        selected_effort: use_signal(|| "medium".to_string()),
+        selected_mode: use_signal(|| "accept_edits".to_string()),
+        right_panel_open: use_signal(|| false),
+        right_panel_tab: use_signal(|| RightPanelTab::Plan),
+        status_toast: use_signal(|| None),
+        prompt: use_signal(String::new),
+        turn_diff: use_signal(|| None),
+        spawned_agents: use_signal(Vec::new),
+        patch_progress: use_signal(|| None),
+    }
+}
+
 impl UiStore {
     /// The UI language (subscribes the calling component to changes).
     pub fn lang(&self) -> Lang {

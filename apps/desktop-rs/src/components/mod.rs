@@ -10,6 +10,7 @@ pub mod review;
 pub mod right_panel;
 pub mod settings;
 pub mod sidebar;
+pub mod slash;
 pub mod trust_banner;
 pub mod usage_logs;
 

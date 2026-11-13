@@ -1,18 +1,11 @@
 //! The `/command` and `@file` completion popups above the composer.
 
-/// The `/` popup offers the same command table the REPL and the shared
-/// executor use ([`crate::cli::commands`]).
-pub use crate::cli::commands::{CommandSpec as SlashCommand, COMMANDS as SLASH_COMMANDS};
+use crate::commands::{self, CommandSpec, Frontend};
 
-/// Commands matching `query` (without the slash): prefix matches first,
-/// then substring matches, each in table order.
-pub fn filter_commands(query: &str) -> Vec<&'static SlashCommand> {
-    let query = query.trim().to_lowercase();
-    let prefix = SLASH_COMMANDS.iter().filter(|c| c.name.starts_with(&query));
-    let contains = SLASH_COMMANDS
-        .iter()
-        .filter(|c| !c.name.starts_with(&query) && c.name.contains(&query));
-    prefix.chain(contains).collect()
+/// The `/` popup offers the shared command table ([`crate::commands`]):
+/// CLI commands matching `query` (without the slash), prefix matches first.
+pub fn filter_commands(query: &str) -> Vec<&'static CommandSpec> {
+    commands::matching(query, Frontend::Cli)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +57,7 @@ pub fn slash_items(query: &str) -> Vec<PopupItem> {
         .into_iter()
         .map(|command| PopupItem {
             value: format!("/{}", command.name),
-            label: format!("/{} {}", command.name, command.args).trim_end().to_string(),
+            label: command.usage(),
             detail: command.description.to_string(),
         })
         .collect()
@@ -144,10 +137,7 @@ pub fn completion_text(kind: PopupKind, item: &PopupItem) -> String {
 
 /// Whether a slash command takes no arguments (so Enter can run it).
 pub fn command_takes_no_args(value: &str) -> bool {
-    SLASH_COMMANDS
-        .iter()
-        .find(|command| format!("/{}", command.name) == value)
-        .is_some_and(|command| command.args.is_empty())
+    value.starts_with('/') && commands::find(value).is_some_and(|command| command.args.is_empty())
 }
 
 #[cfg(test)]
@@ -162,7 +152,7 @@ mod tests {
         // "skills" contains no 'm'; "undo" neither; "new" neither.
         assert!(!names.contains(&"skills"));
         let all = filter_commands("");
-        assert_eq!(all.len(), SLASH_COMMANDS.len());
+        assert_eq!(all.len(), commands::commands_for(Frontend::Cli).count());
     }
 
     #[test]

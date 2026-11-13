@@ -6,6 +6,8 @@
 //! the desktop runtime with the root `App` component.
 
 mod components;
+#[cfg(test)]
+mod e2e_tests;
 mod i18n;
 mod logo;
 mod markdown;
@@ -15,7 +17,7 @@ mod theme;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
-use state_ui::{set_core, AppPage, RightPanelTab, UiStore};
+use state_ui::{set_core, AppPage};
 
 fn main() {
     // 1. Bootstrap the core (opens the data store, runs startup tasks).
@@ -60,61 +62,9 @@ fn main() {
 /// renders the 3-column shell (sidebar / main column / inspector panel).
 #[component]
 fn App() -> Element {
-    let appearance = use_signal(prefs::load);
-    let system_dark = use_signal(|| true);
-    let page: Signal<AppPage> = use_signal(|| AppPage::Chat);
-    let projects = use_signal(Vec::new);
-    let selected_project: Signal<Option<String>> = use_signal(|| None);
-    let runs = use_signal(Vec::new);
-    let search_query = use_signal(String::new);
-    let active_run_id: Signal<Option<String>> = use_signal(|| None);
-    let active_run: Signal<Option<locagens_core::db::Run>> = use_signal(|| None);
-    let messages = use_signal(Vec::new);
-    let plan: Signal<Option<locagens_core::db::Plan>> = use_signal(|| None);
-    let run_usage: Signal<Option<locagens_core::api::runs::RunUsageSummary>> = use_signal(|| None);
-    let pending_permission: Signal<Option<serde_json::Value>> = use_signal(|| None);
-    let pending_question: Signal<Option<serde_json::Value>> = use_signal(|| None);
-    let providers = use_signal(Vec::new);
-    let selected_provider = use_signal(String::new);
-    let selected_model = use_signal(String::new);
-    let selected_effort = use_signal(|| "medium".to_string());
-    let selected_mode = use_signal(|| "accept_edits".to_string());
-    let right_panel_open = use_signal(|| false);
-    let right_panel_tab: Signal<RightPanelTab> = use_signal(|| RightPanelTab::Plan);
-    let status_toast: Signal<Option<String>> = use_signal(|| None);
-    let prompt = use_signal(String::new);
-    let turn_diff: Signal<Option<(String, usize)>> = use_signal(|| None);
-    let spawned_agents: Signal<Vec<serde_json::Value>> = use_signal(Vec::new);
-    let patch_progress: Signal<Option<serde_json::Value>> = use_signal(|| None);
-
-    let store = UiStore {
-        appearance,
-        system_dark,
-        page,
-        projects,
-        selected_project,
-        runs,
-        search_query,
-        active_run_id,
-        active_run,
-        messages,
-        plan,
-        run_usage,
-        pending_permission,
-        pending_question,
-        providers_catalog: providers,
-        selected_provider,
-        selected_model,
-        selected_effort,
-        selected_mode,
-        right_panel_open,
-        right_panel_tab,
-        status_toast,
-        prompt,
-        turn_diff,
-        spawned_agents,
-        patch_progress,
-    };
+    let store = state_ui::use_ui_store();
+    let appearance = store.appearance;
+    let system_dark = store.system_dark;
     use_context_provider(|| store);
 
     // Clipboard handler for code-block copy buttons, and chat scroll helpers.

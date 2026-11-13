@@ -1,13 +1,16 @@
-//! Slash commands shared by the REPL and the TUI (QA-049): one parser, one
-//! command table and one executor. A frontend copies its session state into a
-//! [`CommandSession`], calls [`execute`], then renders the returned
-//! [`Output`]s and applies the changed state; it only owns what is genuinely
-//! UI-specific (streaming a review, clearing a transcript, quitting).
+//! The CLI executor for slash commands, shared by the REPL and the TUI
+//! (QA-049). The command table, parser and busy rule live in
+//! [`crate::commands`] (also used by the desktop composer). A frontend copies
+//! its session state into a [`CommandSession`], calls [`execute`], then
+//! renders the returned [`Output`]s and applies the changed state; it only
+//! owns what is genuinely UI-specific (streaming a review, clearing a
+//! transcript, quitting).
 //!
 //! Also home of the small helpers every frontend used to copy-paste: the
 //! "provider not authenticated" check and the usage summary line.
 
 use crate::cli::models::{list_models_table, resolve_model, ResolvedModel};
+use crate::commands::{commands_for, Frontend, SlashCommand};
 use crate::db::UsageLogEntry;
 use crate::state::AppState;
 use std::path::Path;
@@ -18,98 +21,6 @@ pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high
 
 /// Shown when a state-changing command is refused during a run.
 pub const BUSY_NOTICE: &str = "Wait for the current run to finish (or press Esc to interrupt).";
-
-/// One row of the command table (also feeds the TUI `/` popup).
-pub struct CommandSpec {
-    pub name: &'static str,
-    pub args: &'static str,
-    pub description: &'static str,
-}
-
-pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec { name: "model", args: "[provider/id]", description: "show or switch models" },
-    CommandSpec { name: "thinking", args: "<level>", description: "reasoning effort (off..max)" },
-    CommandSpec { name: "plan", args: "", description: "switch to plan mode (read-only)" },
-    CommandSpec { name: "build", args: "", description: "switch to build mode (edits applied)" },
-    CommandSpec { name: "auto", args: "", description: "switch to full access (no permission prompts)" },
-    CommandSpec { name: "chat", args: "", description: "switch to chat mode (no tools)" },
-    CommandSpec { name: "new", args: "", description: "start a fresh session on the next message" },
-    CommandSpec { name: "fork", args: "", description: "fork the current session" },
-    CommandSpec { name: "undo", args: "", description: "undo the last turn (git snapshot)" },
-    CommandSpec { name: "diff", args: "", description: "show the working-tree diff" },
-    CommandSpec { name: "review", args: "[target]", description: "code review: changes, a branch or a commit" },
-    CommandSpec { name: "mcp", args: "", description: "list MCP servers and status" },
-    CommandSpec { name: "skills", args: "", description: "list discovered skills" },
-    CommandSpec { name: "sessions", args: "", description: "list sessions for this directory" },
-    CommandSpec { name: "usage", args: "", description: "usage and cost of this session" },
-    CommandSpec { name: "help", args: "", description: "show commands and key bindings" },
-    CommandSpec { name: "exit", args: "", description: "leave lcgn" },
-];
-
-/// A parsed slash command.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SlashCommand {
-    Exit,
-    Help,
-    /// `/model` lists, `/model <id>` switches.
-    Model(Option<String>),
-    /// `/thinking` shows, `/thinking <level>` sets.
-    Thinking(Option<String>),
-    Plan,
-    Build,
-    Auto,
-    Chat,
-    New,
-    Fork,
-    Undo,
-    Diff,
-    /// `/review [target]`; the argument is the raw text after the command.
-    Review(String),
-    Mcp,
-    Skills,
-    Sessions,
-    Usage,
-    Unknown(String),
-}
-
-impl SlashCommand {
-    /// Parses a line starting with `/`; `None` for ordinary text.
-    pub fn parse(line: &str) -> Option<SlashCommand> {
-        let line = line.trim();
-        if !line.starts_with('/') {
-            return None;
-        }
-        let mut parts = line.split_whitespace();
-        let head = parts.next().unwrap_or("").to_lowercase();
-        let first_arg = parts.next().map(str::to_string);
-        Some(match head.as_str() {
-            "/exit" | "/quit" => Self::Exit,
-            "/help" => Self::Help,
-            "/model" => Self::Model(first_arg),
-            "/thinking" => Self::Thinking(first_arg),
-            "/plan" => Self::Plan,
-            "/build" => Self::Build,
-            "/auto" => Self::Auto,
-            "/chat" => Self::Chat,
-            "/new" | "/clear" => Self::New,
-            "/fork" => Self::Fork,
-            "/undo" => Self::Undo,
-            "/diff" => Self::Diff,
-            "/review" => Self::Review(line["/review".len()..].trim().to_string()),
-            "/mcp" => Self::Mcp,
-            "/skills" => Self::Skills,
-            "/sessions" => Self::Sessions,
-            "/usage" => Self::Usage,
-            _ => Self::Unknown(head),
-        })
-    }
-
-    /// Commands that change which run is current or touch the working tree;
-    /// they are refused while a run is generating.
-    pub fn blocked_while_busy(&self) -> bool {
-        matches!(self, Self::New | Self::Fork | Self::Undo | Self::Review(_))
-    }
-}
 
 /// The session-level state a command may read or change.
 #[derive(Clone, Debug)]
@@ -161,13 +72,8 @@ impl CommandResult {
 /// The `/help` text for the plain REPL (the TUI appends its key bindings).
 pub fn help_text() -> String {
     let mut text = String::from("Commands:");
-    for spec in COMMANDS {
-        let usage = if spec.args.is_empty() {
-            format!("/{}", spec.name)
-        } else {
-            format!("/{} {}", spec.name, spec.args)
-        };
-        text.push_str(&format!("\n  {usage:<24}{}", spec.description));
+    for spec in commands_for(Frontend::Cli) {
+        text.push_str(&format!("\n  {:<24}{}", spec.usage(), spec.description));
     }
     text
 }
@@ -369,44 +275,6 @@ async fn fork(state: &Arc<AppState>, result: &mut CommandResult, session: &mut C
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_every_command_and_ignores_plain_text() {
-        assert_eq!(SlashCommand::parse("hello"), None);
-        assert_eq!(SlashCommand::parse("  /exit "), Some(SlashCommand::Exit));
-        assert_eq!(SlashCommand::parse("/QUIT"), Some(SlashCommand::Exit));
-        assert_eq!(SlashCommand::parse("/model"), Some(SlashCommand::Model(None)));
-        assert_eq!(SlashCommand::parse("/model p/m"), Some(SlashCommand::Model(Some("p/m".into()))));
-        assert_eq!(SlashCommand::parse("/thinking HIGH"), Some(SlashCommand::Thinking(Some("HIGH".into()))));
-        assert_eq!(SlashCommand::parse("/auto"), Some(SlashCommand::Auto));
-        assert_eq!(SlashCommand::parse("/chat"), Some(SlashCommand::Chat));
-        assert_eq!(SlashCommand::parse("/clear"), Some(SlashCommand::New));
-        assert_eq!(
-            SlashCommand::parse("/review base main"),
-            Some(SlashCommand::Review("base main".into()))
-        );
-        assert_eq!(SlashCommand::parse("/review"), Some(SlashCommand::Review(String::new())));
-        assert_eq!(SlashCommand::parse("/nope x"), Some(SlashCommand::Unknown("/nope".into())));
-    }
-
-    #[test]
-    fn every_table_entry_parses_to_a_known_command() {
-        for spec in COMMANDS {
-            let parsed = SlashCommand::parse(&format!("/{}", spec.name)).unwrap();
-            assert!(!matches!(parsed, SlashCommand::Unknown(_)), "/{} is in the table but not parsed", spec.name);
-        }
-        assert!(help_text().contains("/auto") && help_text().contains("/chat"));
-    }
-
-    #[test]
-    fn state_changing_commands_are_blocked_while_busy() {
-        for blocked in ["/new", "/fork", "/undo", "/review"] {
-            assert!(SlashCommand::parse(blocked).unwrap().blocked_while_busy(), "{blocked}");
-        }
-        for allowed in ["/plan", "/model", "/diff", "/usage", "/help"] {
-            assert!(!SlashCommand::parse(allowed).unwrap().blocked_while_busy(), "{allowed}");
-        }
-    }
-
     fn session() -> CommandSession {
         CommandSession {
             model: None,
@@ -415,6 +283,14 @@ mod tests {
             bypass: false,
             session: Some("run-1".into()),
             busy: false,
+        }
+    }
+
+    #[test]
+    fn help_lists_every_cli_command() {
+        let help = help_text();
+        for spec in crate::commands::COMMANDS {
+            assert!(help.contains(&spec.usage()), "{}", spec.name);
         }
     }
 
