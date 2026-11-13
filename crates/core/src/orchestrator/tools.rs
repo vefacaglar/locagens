@@ -728,7 +728,14 @@ pub fn command_sandbox_spec(
         allow_network,
         network: Some(network),
         writable_roots: crate::config_runtime::sandbox_writable_roots(),
+        secret_paths: sandbox_secret_paths(),
     }
+}
+
+/// Credential files of the user's home and the agent dirs that sandboxed
+/// commands must not read (macOS/Linux) or write (QA-020).
+pub fn sandbox_secret_paths() -> Vec<PathBuf> {
+    locagens_execpolicy::secret_paths::credential_paths(&crate::paths::user_home(), &crate::paths::agent_dir_chain())
 }
 
 async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String, String> {

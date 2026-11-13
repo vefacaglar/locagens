@@ -202,7 +202,7 @@ mod tests {
             .unwrap();
         assert!(output.contains("Sandbox blocked network access to: blocked.example"), "{output}");
         assert!(ws.join("marker.txt").exists(), "{output}");
-        let _ = locagens_execpolicy::windows_sandbox::revoke_workspace_access(&ws, &[]);
+        let _ = locagens_execpolicy::windows_sandbox::revoke_workspace_access(&ws, &[], &[]);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

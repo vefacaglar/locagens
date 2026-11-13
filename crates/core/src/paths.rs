@@ -17,6 +17,14 @@ pub use test_home::{
     plugins_root, skills_root,
 };
 
+/// The user's home directory (the isolated test home under `cfg(test)`).
+pub fn user_home() -> PathBuf {
+    #[cfg(test)]
+    return test_home::root();
+    #[cfg(not(test))]
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// The `config.toml` files of the agent-dir chain, primary first.
 pub fn config_files() -> Vec<PathBuf> {
     agent_dir_chain().into_iter().map(|dir| dir.join("config.toml")).collect()

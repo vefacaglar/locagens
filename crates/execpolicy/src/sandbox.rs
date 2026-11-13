@@ -49,6 +49,18 @@ pub struct SandboxSpec {
     /// Extra directories writable in `workspace-write` (config.toml
     /// `[sandbox_workspace_write] writable_roots`). Missing ones are skipped.
     pub writable_roots: Vec<PathBuf>,
+    /// Credential files / directories kept from the command (QA-020, see
+    /// [`crate::secret_paths`]): unreadable and unwritable on macOS/Linux,
+    /// unwritable on Windows. Usually [`crate::secret_paths::credential_paths`].
+    pub secret_paths: Vec<PathBuf>,
+}
+
+impl SandboxSpec {
+    /// The workspace plus every extra writable root (what secret masks
+    /// must never hide).
+    fn kept_roots(&self) -> Vec<PathBuf> {
+        std::iter::once(self.project_path.clone()).chain(self.writable_roots.iter().cloned()).collect()
+    }
 }
 
 /// The first existing file among `hard_paths`, else `name` found on `path_var`
@@ -365,6 +377,14 @@ pub fn build_macos_seatbelt_profile_and_params(
         params.push(("LOCAGENS_CONFIG_DIR".to_string(), format!("{root}/.locagens")));
     }
 
+    // Credentials: neither readable nor writable (after the allows, so the
+    // denies win).
+    for secret in crate::secret_paths::maskable(&spec.secret_paths, &spec.kept_roots()) {
+        let filter = if secret.is_dir() { "subpath" } else { "literal" };
+        let path = seatbelt_string(&secret.to_string_lossy());
+        profile.push_str(&format!("(deny file-read* file-write* ({filter} {path}))\n"));
+    }
+
     if spec.allow_network {
         profile.push_str(
             "(allow network-outbound)\n(allow network-inbound)\n(allow system-socket)\n",
@@ -431,6 +451,16 @@ pub fn build_linux_bwrap_args(
                 out.push(path.clone());
                 out.push(path);
             }
+        }
+    }
+    // Credentials: an empty tmpfs over directories, /dev/null over files
+    // (mounted last, so they also cover secrets inside writable roots).
+    for secret in crate::secret_paths::maskable(&spec.secret_paths, &spec.kept_roots()) {
+        let target = secret.to_string_lossy().to_string();
+        if secret.is_dir() {
+            out.extend(["--tmpfs".to_string(), target]);
+        } else {
+            out.extend(["--ro-bind".to_string(), "/dev/null".to_string(), target]);
         }
     }
     out.push("--".to_string());
@@ -555,6 +585,7 @@ mod tests {
             allow_network: false,
             network: None,
             writable_roots: Vec::new(),
+            secret_paths: Vec::new(),
         };
         (canonical, spec)
     }
@@ -656,6 +687,7 @@ mod tests {
             allow_network: false,
             network: None,
             writable_roots: Vec::new(),
+            secret_paths: Vec::new(),
         };
         let script = format!("echo ran > \"{}\"", marker.display());
         let result = run_captured(
@@ -721,6 +753,7 @@ mod tests {
                 allow_network: true,
                 network: None,
                 writable_roots: Vec::new(),
+                secret_paths: Vec::new(),
             }),
         );
         assert_eq!(program, "/bin/sh");
@@ -775,5 +808,104 @@ mod tests {
         assert!(std::fs::metadata(&outside_target).is_err());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A temp "home" with a credential dir and a credential file (never the
+    /// real home).
+    fn temp_home_with_secrets(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let home = std::env::temp_dir().join(format!("locagens-sbx-home-{label}-{}", uuid::Uuid::new_v4()));
+        let ssh = home.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
+        let credentials = home.join(".git-credentials");
+        std::fs::write(&credentials, "https://user:token@example.com").unwrap();
+        let home = std::fs::canonicalize(&home).unwrap();
+        (home.clone(), home.join(".ssh"), home.join(".git-credentials"))
+    }
+
+    /// QA-020: Seatbelt denies reads and writes of credentials; bwrap mounts
+    /// an empty tmpfs over credential dirs and /dev/null over files, after
+    /// the workspace binds.
+    #[test]
+    fn credentials_are_masked_in_seatbelt_and_bwrap() {
+        let (root, mut spec) = temp_spec("secrets");
+        let (home, ssh, credentials) = temp_home_with_secrets("mask");
+        spec.secret_paths = crate::secret_paths::credential_paths(&home, &[]);
+        assert_eq!(spec.secret_paths, vec![ssh.clone(), credentials.clone()]);
+
+        let (profile, _) = build_macos_seatbelt_profile_and_params(&spec);
+        let ssh_rule = format!("(deny file-read* file-write* (subpath {}))", seatbelt_string(&ssh.to_string_lossy()));
+        let file_rule =
+            format!("(deny file-read* file-write* (literal {}))", seatbelt_string(&credentials.to_string_lossy()));
+        assert!(profile.contains(&ssh_rule), "{profile}");
+        assert!(profile.contains(&file_rule), "{profile}");
+        assert!(profile.find(&ssh_rule) > profile.find("(allow file-read*)"), "denies follow the allows");
+
+        let args = vec!["-c".to_string(), "true".to_string()];
+        let (_, out) = build_linux_bwrap_args(Path::new("/usr/bin/bwrap"), &spec, "sh", &args);
+        let ssh_text = ssh.to_string_lossy().to_string();
+        let file_text = credentials.to_string_lossy().to_string();
+        let tmpfs = out.windows(2).position(|w| w[0] == "--tmpfs" && w[1] == ssh_text).expect("tmpfs over .ssh");
+        let null = out
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == file_text)
+            .expect("/dev/null over the credential file");
+        let workspace = out.iter().position(|arg| arg == "--bind").unwrap();
+        let separator = out.iter().position(|arg| arg == "--").unwrap();
+        assert!(workspace < tmpfs && tmpfs < separator && null < separator, "{out:?}");
+
+        // A credential dir that contains the workspace is never masked.
+        let mut nested = spec.clone();
+        nested.project_path = ssh.clone();
+        let (_, out) = build_linux_bwrap_args(Path::new("/usr/bin/bwrap"), &nested, "sh", &args);
+        assert!(!out.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == ssh_text), "{out:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Runs `script` through the platform's argv sandbox; `None` when the
+    /// backend cannot run here (missing, or nested in another sandbox).
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn run_wrapped_or_skip(spec: &SandboxSpec, script: &str) -> Option<std::process::Output> {
+        if !matches!(detect_backend(), SandboxBackend::MacosSeatbelt | SandboxBackend::LinuxBubblewrap) {
+            return None;
+        }
+        let run = |script: &str| {
+            let (program, args) = wrap_shell_command("/bin/sh", &["-c".to_string(), script.to_string()], Some(spec));
+            std::process::Command::new(&program).args(&args).current_dir(&spec.project_path).output().ok()
+        };
+        // The backend must work at all (CI containers may lack user
+        // namespaces; Seatbelt cannot nest).
+        if !run("true").is_some_and(|output| output.status.success()) {
+            return None;
+        }
+        run(script)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn sandboxed_commands_cannot_read_planted_credentials() {
+        let (root, mut spec) = temp_spec("secrets-run");
+        let (home, ssh, credentials) = temp_home_with_secrets("run");
+        spec.secret_paths = crate::secret_paths::credential_paths(&home, &[]);
+        let script = format!(
+            "cat '{}' '{}'; echo pwned > '{}'",
+            ssh.join("id_ed25519").display(),
+            credentials.display(),
+            ssh.join("id_ed25519").display()
+        );
+        let Some(output) = run_wrapped_or_skip(&spec, &script) else {
+            eprintln!("skipping: no working sandbox backend");
+            let _ = std::fs::remove_dir_all(&root);
+            let _ = std::fs::remove_dir_all(&home);
+            return;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("PRIVATE KEY"), "{stdout}");
+        assert!(!stdout.contains("token"), "{stdout}");
+        assert_eq!(std::fs::read_to_string(ssh.join("id_ed25519")).unwrap(), "PRIVATE KEY");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

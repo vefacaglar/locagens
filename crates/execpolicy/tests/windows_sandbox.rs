@@ -38,6 +38,7 @@ impl Workspace {
             allow_network: false,
             network,
             writable_roots: Vec::new(),
+            secret_paths: Vec::new(),
         }
     }
 }
@@ -46,7 +47,7 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         // Revoke the ACEs, then delete this workspace's private temp dir.
         let sandbox_temp = std::env::temp_dir().join("locagens-sandbox");
-        for path in revoke_workspace_access(&self.root, &[]).unwrap_or_default() {
+        for path in revoke_workspace_access(&self.root, &[], &[]).unwrap_or_default() {
             if path.starts_with(&sandbox_temp) {
                 let _ = std::fs::remove_dir_all(path);
             }
@@ -292,6 +293,7 @@ async fn sandbox_setup_errors_fail_the_session_closed() {
                 allow_network: false,
                 network: None,
                 writable_roots: Vec::new(),
+                secret_paths: Vec::new(),
             }),
             ..SpawnOptions::default()
         },
@@ -300,6 +302,47 @@ async fn sandbox_setup_errors_fail_the_session_closed() {
     let logs: String = manager.get_logs(&info.id).into_iter().map(|entry| entry.text).collect();
     assert!(logs.contains("Windows sandbox"), "{logs}");
     assert!(!logs.contains("should-not-run"));
+}
+
+/// QA-020: credentials inside a writable root (here a temp "home" granted
+/// as an extra writable root, never the real home) cannot be overwritten,
+/// appended to or added to, while the rest of that root stays writable.
+/// Reads (and deletes, which a write-restricted token does not check
+/// against its restricting SIDs) cannot be denied with this token; see
+/// `locagens_execpolicy::secret_paths`.
+#[tokio::test]
+async fn credentials_inside_writable_roots_are_write_protected() {
+    let ws = Workspace::new("secrets");
+    let home = ws.outside.join("home");
+    let ssh = home.join(".ssh");
+    let agent_dir = home.join(".locagens");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, &[agent_dir.clone()]);
+    assert_eq!(secrets, vec![ssh.clone(), agent_dir.join("auth.json")]);
+
+    let mut spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    spec.writable_roots = vec![home.clone()];
+    spec.secret_paths = secrets.clone();
+
+    let other = run(&ws, &spec, &format!("echo ok> \"{}\"", home.join("notes.txt").display())).await;
+    assert!(other.success(), "the writable root itself stays writable: {}", text(&other));
+    for script in [
+        format!("echo pwned> \"{}\"", ssh.join("id_ed25519").display()),
+        format!("echo pwned> \"{}\"", ssh.join("authorized_keys").display()),
+        format!("echo pwned>> \"{}\"", agent_dir.join("auth.json").display()),
+    ] {
+        let output = run(&ws, &spec, &script).await;
+        assert!(!output.success(), "{script}: {}", text(&output));
+    }
+    assert_eq!(std::fs::read_to_string(ssh.join("id_ed25519")).unwrap(), "PRIVATE KEY");
+    assert!(!ssh.join("authorized_keys").exists());
+    assert_eq!(std::fs::read_to_string(agent_dir.join("auth.json")).unwrap(), "{}");
+
+    let revoked = revoke_workspace_access(&ws.root, &[home.clone()], &secrets).unwrap();
+    assert!(revoked.contains(&ssh) && revoked.contains(&agent_dir.join("auth.json")), "{revoked:?}");
 }
 
 /// QA-015: `allow_network` (network_access = true) is honoured on Windows:
