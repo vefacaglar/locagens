@@ -11,7 +11,10 @@
 //! unlabeled (Medium), so the command cannot write, delete or rename it;
 //! objects already labeled Low (`AppData\LocalLow`, app-container data,
 //! other sandboxed workspaces) can still be deleted, as `DELETE` is never
-//! checked against the restricting SIDs. The process
+//! checked against the restricting SIDs. For the same reason the command
+//! can rename `.git`, `.git/hooks`, `.git/config` and `.locagens` and put a
+//! replacement there; [`guard`] detects and undoes that after the command.
+//! The process
 //! tree runs in a kill-on-close Job Object. No admin rights, no service, no
 //! extra user accounts. See `docs/SANDBOX.md`.
 
@@ -19,6 +22,8 @@ pub mod plan;
 
 #[cfg(windows)]
 mod acl;
+#[cfg(windows)]
+pub mod guard;
 #[cfg(windows)]
 mod job;
 #[cfg(windows)]

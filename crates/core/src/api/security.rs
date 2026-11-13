@@ -94,7 +94,7 @@ fn sandbox_status() -> SecuritySandbox {
                     .to_string(),
                 "Windows Build mode blocks writes and deletes outside the workspace, except in low-integrity folders: a sandboxed command can still delete (not modify) files in other workspaces you used with the sandbox and in folders such as AppData\\LocalLow."
                     .to_string(),
-                "Windows Build mode cannot reliably protect .git/hooks, .git/config and .locagens: a sandboxed command can rename the .git or .locagens folder and create a new one in its place."
+                "Windows cannot stop a sandboxed command from renaming .git, .git/hooks, .git/config or .locagens and creating a replacement; Locagens detects this when the command (and its background processes) end or before it runs git itself, moves the replacement to a *.locagens-quarantine-* folder, restores the original and flags the command. Your own git runs in between are not covered."
                     .to_string(),
             ],
             can_install: false,

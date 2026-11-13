@@ -24,8 +24,9 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::acl;
+use super::guard::{self, MetadataGuard};
 use super::job::JobObject;
-use super::plan::{build_plan, strip_verbatim_prefix, TokenMode, WindowsSandboxPlan};
+use super::plan::{build_plan, normalize_path, strip_verbatim_prefix, TokenMode, WindowsSandboxPlan};
 use super::token::{create_restricted_token, to_wide, LocalSid, LOW_INTEGRITY_SID, MEDIUM_INTEGRITY_SID};
 use crate::sandbox::SandboxSpec;
 
@@ -48,6 +49,11 @@ pub struct SandboxedChild {
     pub stdin: Option<File>,
     pub stdout: File,
     pub stderr: File,
+    /// Identities of the protected metadata before the command started.
+    pub guard: Arc<MetadataGuard>,
+    /// Repairs made after an earlier command in this workspace had already
+    /// returned (its background descendants replaced metadata).
+    pub earlier_violations: Vec<String>,
 }
 
 impl SandboxedChild {
@@ -102,8 +108,20 @@ pub fn spawn_sandboxed(spec: &SandboxSpec, request: &SpawnRequest) -> Result<San
             env.insert(key.to_string(), temp_dir.to_string_lossy().to_string());
         }
     }
-    create_process(&token, request, &env)
-        .map_err(|err| format!("Windows sandbox: cannot start the sandboxed process: {err}"))
+    let root = normalize_path(&spec.project_path);
+    // Repair what earlier commands replaced before taking the new baseline.
+    let earlier_violations = guard::check_workspace(&root);
+    let guard = guard::start(&root, &plan.guarded_paths);
+    match create_process(&token, request, &env, Arc::clone(&guard)) {
+        Ok(mut child) => {
+            child.earlier_violations = earlier_violations;
+            Ok(child)
+        }
+        Err(err) => {
+            guard::check_after_kill(&guard);
+            Err(format!("Windows sandbox: cannot start the sandboxed process: {err}"))
+        }
+    }
 }
 
 /// Integrity labels the sandbox writes: writable roots become Low (the
@@ -330,6 +348,7 @@ fn create_process(
     token: &OwnedHandle,
     request: &SpawnRequest,
     env: &HashMap<String, String>,
+    guard: Arc<MetadataGuard>,
 ) -> io::Result<SandboxedChild> {
     let job = Arc::new(JobObject::create()?);
     let stdin = create_pipe(true)?;
@@ -361,6 +380,8 @@ fn create_process(
         stdin: request.stdin_pipe.then_some(stdin_file),
         stdout: unsafe { File::from_raw_handle(stdout.read as _) },
         stderr: unsafe { File::from_raw_handle(stderr.read as _) },
+        guard,
+        earlier_violations: Vec::new(),
     })
 }
 

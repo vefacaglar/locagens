@@ -51,6 +51,7 @@ fn git_output(project: &Path, args: &[&str]) -> Result<(i32, String), String> {
     if !READONLY_GIT.contains(&subcommand) {
         return Err(format!("git {subcommand}: not allowed in review mode (read-only git only)."));
     }
+    crate::services::git::check_sandbox_metadata(project)?;
     let output = Command::new("git")
         .args(args)
         .current_dir(project)

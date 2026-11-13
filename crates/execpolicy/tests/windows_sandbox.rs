@@ -149,6 +149,149 @@ async fn workspace_write_protects_git_metadata_and_locagens_dir() {
     assert!(objects.success(), "{}", text(&objects));
 }
 
+/// A workspace with git metadata whose files carry marker contents.
+fn git_workspace(label: &str) -> Workspace {
+    let ws = Workspace::new(label);
+    std::fs::create_dir_all(ws.root.join(".git").join("hooks")).unwrap();
+    std::fs::write(ws.root.join(".git").join("config"), "[core]\n\toriginal = true\n").unwrap();
+    std::fs::write(ws.root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    ws
+}
+
+/// Names in `dir` that start with `prefix`.
+fn entries_starting_with(dir: &Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name().to_string_lossy().to_string()))
+        .filter(|name| name.starts_with(prefix))
+        .collect()
+}
+
+fn assert_original_git(ws: &Workspace) {
+    let git = ws.root.join(".git");
+    assert_eq!(std::fs::read_to_string(git.join("config")).unwrap(), "[core]\n\toriginal = true\n");
+    assert_eq!(std::fs::read_to_string(git.join("HEAD")).unwrap(), "ref: refs/heads/main\n");
+    assert!(!git.join("hooks").join("pre-commit").exists(), "no planted hook");
+}
+
+/// ACLs cannot stop a rename of `.git` (a write-restricted token never
+/// checks `DELETE` / `FILE_DELETE_CHILD` against the capability SID, deny
+/// ACEs included), so the post-command guard repairs it: the planted
+/// replacement goes to quarantine and the original is renamed back.
+#[tokio::test]
+async fn renamed_git_dir_is_restored_and_the_planted_one_quarantined() {
+    let ws = git_workspace("swapgit");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    let attack = "ren .git old-git && mkdir .git\\hooks && (echo [core]& echo fsmonitor = evil.exe) > .git\\config \
+                  && echo evil> .git\\hooks\\pre-commit && echo planted";
+    let output = run(&ws, &spec, attack).await;
+    assert!(String::from_utf8_lossy(&output.stdout).contains("planted"), "the attack ran: {}", text(&output));
+    assert_eq!(output.sandbox_violations.len(), 1, "{:?}", output.sandbox_violations);
+    assert!(output.sandbox_violations[0].contains("`.git`"), "{:?}", output.sandbox_violations);
+    assert!(output.sandbox_violations[0].contains("restored"), "{:?}", output.sandbox_violations);
+
+    assert_original_git(&ws);
+    assert!(!ws.root.join("old-git").exists(), "the original was moved back");
+    let quarantined = entries_starting_with(&ws.root, ".git.locagens-quarantine-");
+    assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+    let planted = std::fs::read_to_string(ws.root.join(&quarantined[0]).join("config")).unwrap();
+    assert!(planted.contains("fsmonitor"), "{planted}");
+
+    // The next command sees an intact workspace.
+    let next = run(&ws, &spec, "echo next").await;
+    assert!(next.sandbox_violations.is_empty(), "{:?}", next.sandbox_violations);
+}
+
+/// The same for `.locagens`, `.git/hooks` and `.git/config` themselves.
+#[tokio::test]
+async fn replaced_locagens_hooks_and_config_do_not_survive() {
+    let ws = git_workspace("swapmeta");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+
+    let rules = run(&ws, &spec, "ren .locagens old-loc && mkdir .locagens\\rules && echo evil> .locagens\\rules\\default.rules").await;
+    assert!(rules.sandbox_violations.iter().any(|report| report.contains("`.locagens`")), "{}", text(&rules));
+    assert!(!ws.root.join(".locagens").join("rules").join("default.rules").exists());
+    assert!(ws.root.join(".locagens").is_dir() && !ws.root.join("old-loc").exists());
+    assert_eq!(entries_starting_with(&ws.root, ".locagens.locagens-quarantine-").len(), 1);
+
+    let hooks = run(&ws, &spec, "ren .git\\hooks old-hooks && mkdir .git\\hooks && echo evil> .git\\hooks\\pre-commit").await;
+    assert!(hooks.sandbox_violations.iter().any(|report| report.contains("hooks")), "{}", text(&hooks));
+    assert_original_git(&ws);
+    assert!(!ws.root.join(".git").join("old-hooks").exists());
+
+    // Deleting the original (through the Low parent's delete-child right)
+    // cannot be undone, but the planted file never stays in place.
+    let config = run(&ws, &spec, "del .git\\config && echo evil> .git\\config").await;
+    assert!(
+        config.sandbox_violations.iter().any(|report| report.contains("no longer exists")),
+        "{}",
+        text(&config)
+    );
+    assert!(!ws.root.join(".git").join("config").exists(), "the planted config was quarantined");
+    let quarantined = entries_starting_with(&ws.root.join(".git"), "config.locagens-quarantine-");
+    assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+}
+
+/// While a sandboxed session still runs, Locagens repairs a swapped `.git`
+/// before it runs git itself (`repair_workspace_metadata`).
+#[tokio::test]
+async fn swaps_by_a_running_session_are_repaired_before_unsandboxed_git() {
+    let ws = git_workspace("swaplive");
+    let manager = Arc::new(ProcessManager::new());
+    let options = SpawnOptions {
+        env_clean: true,
+        env: Some(base_env()),
+        sandbox: Some(ws.spec(SandboxMode::WorkspaceWrite, None)),
+        ..SpawnOptions::default()
+    };
+    let info = manager.spawn_with_options(
+        "ren .git old-git & mkdir .git & echo evil> .git\\config & \"%SystemRoot%\\System32\\ping.exe\" -n 10 127.0.0.1 >nul",
+        ws.root.clone(),
+        options,
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !ws.root.join(".git").join("config").exists() || !ws.root.join("old-git").exists() {
+        assert!(std::time::Instant::now() < deadline, "{:?}", manager.get_logs(&info.id));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let reports = locagens_execpolicy::sandbox::repair_workspace_metadata(&ws.root);
+    assert!(reports.iter().any(|report| report.contains("`.git`")), "{reports:?}");
+    assert_original_git(&ws);
+    assert!(manager.kill(&info.id).await);
+}
+
+/// A background descendant that swaps `.git` after the root command exited
+/// is repaired once the job is empty, and the next command reports it.
+#[tokio::test]
+async fn background_descendants_cannot_swap_git_after_the_command_returns() {
+    let ws = git_workspace("swaplate");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    let manager = Arc::new(ProcessManager::new());
+    let options = SpawnOptions {
+        env_clean: true,
+        env: Some(base_env()),
+        sandbox: Some(spec.clone()),
+        ..SpawnOptions::default()
+    };
+    let late = "start \"\" /b cmd /c \"ping -n 3 127.0.0.1 >nul & ren .git old-git & mkdir .git & echo evil> .git\\config\"";
+    let info = manager.spawn_with_options(late, ws.root.clone(), options);
+    let log = wait_for_output(&manager, &info.id, "exited with code").await;
+    assert!(!log.contains("SANDBOX VIOLATION"), "the root exits before the swap: {log}");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let repaired = || {
+        !entries_starting_with(&ws.root, ".git.locagens-quarantine-").is_empty()
+            && ws.root.join(".git").join("HEAD").exists()
+    };
+    while !repaired() {
+        assert!(std::time::Instant::now() < deadline, "the late swap was not repaired");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_original_git(&ws);
+    let next = run(&ws, &spec, "echo next").await;
+    assert!(next.sandbox_violations.iter().any(|report| report.contains("`.git`")), "{}", text(&next));
+}
+
 #[tokio::test]
 async fn read_only_mode_denies_workspace_writes() {
     let ws = Workspace::new("ro");
