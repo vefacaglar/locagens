@@ -43,3 +43,7 @@ locagens-context = { path = "../context" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+axum = "0.7"
+tempfile = "3"

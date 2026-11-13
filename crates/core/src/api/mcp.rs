@@ -104,3 +104,48 @@ pub async fn toggle_mcp_server(state: &AppState, name: &str, enabled: bool, proj
     mcp_service::invalidate_server(&name);
     Ok(info)
 }
+
+fn find_remote_server(name: &str, project: Option<&str>) -> ApiResult<mcp_service::McpServerConfig> {
+    let name = name.trim().to_lowercase();
+    let config = mcp_service::effective_configs(project)
+        .into_iter()
+        .find(|cfg| cfg.name.eq_ignore_ascii_case(&name))
+        .ok_or_else(|| ApiError::bad_request(format!("MCP server \"{name}\" not found.")))?;
+    if config.url.is_none() || config.transport == "stdio" {
+        return Err(ApiError::bad_request(format!(
+            "MCP server \"{name}\" is not a remote (http) server."
+        )));
+    }
+    Ok(config)
+}
+
+/// Signs a remote MCP server in via OAuth (discovery, dynamic registration,
+/// PKCE, loopback callback). `on_url` receives the authorization URL (open it
+/// in a browser or print it); tokens go to `~/.locagens/mcp-oauth.json`.
+/// Returns the re-probed server info.
+pub async fn login_mcp_server(
+    state: &AppState,
+    name: &str,
+    project_path: Option<&str>,
+    on_url: &(dyn Fn(&str) + Sync),
+) -> ApiResult<mcp_service::McpServerInfo> {
+    let project = resolve_project(state, project_path);
+    let config = find_remote_server(name, project.as_deref())?;
+    let store = mcp_service::oauth::TokenStore::default_location();
+    mcp_service::oauth::login(&store, &config, on_url)
+        .await
+        .map_err(|err| ApiError::bad_request(format!("MCP login failed: {err}")))?;
+    mcp_service::invalidate_server(&config.name);
+    Ok(mcp_service::probe_server(&config).await)
+}
+
+/// Removes the stored OAuth token of a remote MCP server; returns whether one
+/// existed.
+pub async fn logout_mcp_server(state: &AppState, name: &str, project_path: Option<&str>) -> ApiResult<bool> {
+    let project = resolve_project(state, project_path);
+    let config = find_remote_server(name, project.as_deref())?;
+    let store = mcp_service::oauth::TokenStore::default_location();
+    let removed = mcp_service::oauth::logout(&store, &config).map_err(ApiError::bad_request)?;
+    mcp_service::invalidate_server(&config.name);
+    Ok(removed)
+}

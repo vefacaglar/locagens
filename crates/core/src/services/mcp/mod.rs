@@ -6,7 +6,17 @@
 //! file (`<project>/.locagens/mcp.json`). Project entries override same-named
 //! user entries. Live connections use the JSON-RPC client below: `stdio`
 //! servers are spawned as child processes, `http`/`sse`/`streamable-http`
-//! servers get JSON-RPC POSTs, and discovered tools are cached in memory.
+//! servers use the streamable HTTP client in `http.rs` (sessions, SSE replies,
+//! bearer/header auth, MCP OAuth in `oauth.rs`), and discovered tools are
+//! cached in memory.
+
+mod http;
+pub mod oauth;
+
+pub use http::shutdown_sessions;
+
+#[cfg(test)]
+mod remote_tests;
 
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -24,8 +34,6 @@ const MCP_CLIENT_NAME: &str = "locagens";
 const MCP_CLIENT_VERSION: &str = "0.1.0";
 /// Bound for the whole stdio roundtrip (initialize + target call).
 const STDIO_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bound for one HTTP JSON-RPC POST.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum characters returned by a single MCP tool call.
 const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
 
@@ -47,6 +55,21 @@ pub struct McpServerConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
+    /// Env var holding a bearer token (Codex `bearer_token_env_var`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token_env_var: Option<String>,
+    /// Static request headers (Codex `http_headers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_headers: Option<BTreeMap<String, String>>,
+    /// Header name -> env var holding its value (Codex `env_http_headers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_http_headers: Option<BTreeMap<String, String>>,
+    /// Pre-registered OAuth client id (skips dynamic registration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_id: Option<String>,
+    /// OAuth scopes to request at login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -56,6 +79,12 @@ pub struct McpServerInfo {
     pub status: String,
     pub error: Option<String>,
     pub tools: Vec<Value>,
+    /// The server answered 401 and the user must sign in (OAuth).
+    #[serde(default)]
+    pub needs_login: bool,
+    /// An MCP OAuth token is stored for this server.
+    #[serde(default)]
+    pub signed_in: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -84,6 +113,16 @@ struct RawMcpEntry {
     transport: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disabled: Option<bool>,
+    #[serde(default, alias = "bearerTokenEnvVar", skip_serializing_if = "Option::is_none")]
+    bearer_token_env_var: Option<String>,
+    #[serde(default, alias = "httpHeaders", skip_serializing_if = "Option::is_none")]
+    http_headers: Option<BTreeMap<String, String>>,
+    #[serde(default, alias = "envHttpHeaders", skip_serializing_if = "Option::is_none")]
+    env_http_headers: Option<BTreeMap<String, String>>,
+    #[serde(default, alias = "oauthClientId", skip_serializing_if = "Option::is_none")]
+    oauth_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scopes: Option<Vec<String>>,
 }
 
 /// User-level MCP config file path.
@@ -123,6 +162,11 @@ fn read_file(path: &PathBuf, scope: &str, project_path: Option<&str>) -> Vec<Mcp
                     url: entry.url,
                     enabled: !entry.disabled.unwrap_or(false),
                     project_path: project_path.map(|p| p.to_string()),
+                    bearer_token_env_var: entry.bearer_token_env_var,
+                    http_headers: entry.http_headers,
+                    env_http_headers: entry.env_http_headers,
+                    oauth_client_id: entry.oauth_client_id,
+                    scopes: entry.scopes,
                 });
             }
         }
@@ -210,6 +254,13 @@ fn config_from_plugin_entry(
             .collect::<BTreeMap<String, String>>()
     });
     let url = obj.get("url").and_then(Value::as_str).map(str::to_string);
+    let string_map = |key: &str| {
+        obj.get(key).and_then(Value::as_object).map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                .collect::<BTreeMap<String, String>>()
+        })
+    };
     let enabled = obj
         .get("enabled")
         .and_then(Value::as_bool)
@@ -225,6 +276,11 @@ fn config_from_plugin_entry(
         url,
         enabled,
         project_path: project_path.map(|p| p.to_string()),
+        bearer_token_env_var: obj.get("bearer_token_env_var").and_then(Value::as_str).map(str::to_string),
+        http_headers: string_map("http_headers"),
+        env_http_headers: string_map("env_http_headers"),
+        oauth_client_id: None,
+        scopes: None,
     })
 }
 
@@ -256,13 +312,21 @@ fn status_for(config: &McpServerConfig) -> String {
     }
 }
 
-pub fn server_info(config: &McpServerConfig) -> McpServerInfo {
+/// Builds an info record, flagging stored/missing OAuth sign-in for remote servers.
+fn info_for(config: &McpServerConfig, status: String, error: Option<String>, tools: Vec<Value>) -> McpServerInfo {
+    let remote = http::is_remote(&config.transport);
     McpServerInfo {
         config: config.clone(),
-        status: status_for(config),
-        error: None,
-        tools: Vec::new(),
+        status,
+        needs_login: error.as_deref().is_some_and(|e| e.contains(http::LOGIN_HINT)),
+        signed_in: remote && oauth::is_signed_in(&oauth::TokenStore::default_location(), config),
+        error,
+        tools,
     }
+}
+
+pub fn server_info(config: &McpServerConfig) -> McpServerInfo {
+    info_for(config, status_for(config), None, Vec::new())
 }
 
 /// The effective config for a name (project scope wins over user scope).
@@ -303,6 +367,11 @@ fn entry_from_config(config: &McpServerConfig) -> RawMcpEntry {
         url: config.url.clone(),
         transport: Some(config.transport.clone()),
         disabled: Some(!config.enabled),
+        bearer_token_env_var: config.bearer_token_env_var.clone(),
+        http_headers: config.http_headers.clone(),
+        env_http_headers: config.env_http_headers.clone(),
+        oauth_client_id: config.oauth_client_id.clone(),
+        scopes: config.scopes.clone(),
     }
 }
 
@@ -389,12 +458,15 @@ pub fn validate_input(input: &McpServerInput, registered_project: Option<&str>) 
         project_path = canonical;
     }
 
-    let transport = if input.transport.as_deref() == Some("sse") { "sse" } else { "stdio" };
+    let transport = match input.transport.as_deref() {
+        Some(t @ ("sse" | "http" | "streamable-http")) => t,
+        _ => "stdio",
+    };
     if transport == "stdio" && input.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err("command is required for stdio transport.".to_string());
     }
-    if transport == "sse" && input.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        return Err("url is required for sse transport.".to_string());
+    if transport != "stdio" && input.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err("url is required for remote (http/sse) transport.".to_string());
     }
 
     Ok(McpServerConfig {
@@ -407,6 +479,11 @@ pub fn validate_input(input: &McpServerInput, registered_project: Option<&str>) 
         url: input.url.clone().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()),
         enabled: input.enabled.unwrap_or(true),
         project_path,
+        bearer_token_env_var: None,
+        http_headers: None,
+        env_http_headers: None,
+        oauth_client_id: None,
+        scopes: None,
     })
 }
 
@@ -438,6 +515,7 @@ fn cache_put(project_path: Option<&str>, info: &McpServerInfo) {
 /// Drops every cached probe for a server name (any project scope). Used by
 /// the Settings facade on upsert/delete/toggle/restart.
 pub fn invalidate_server(name: &str) {
+    http::forget_server(name);
     let suffix = format!("::{name}");
     if let Ok(mut cache) = cache().lock() {
         let stale: Vec<String> = cache
@@ -457,7 +535,7 @@ pub fn invalidate_server(name: &str) {
 
 async fn rpc_call(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
     match config.transport.as_str() {
-        "http" | "sse" | "streamable-http" => rpc_http(config, method, params).await,
+        "http" | "sse" | "streamable-http" => http::rpc_http(config, method, params).await,
         _ => rpc_stdio(config, method, params).await,
     }
 }
@@ -570,47 +648,6 @@ fn unwrap_rpc_response(value: Value) -> Result<Value, String> {
     Ok(value.get("result").cloned().unwrap_or(Value::Null))
 }
 
-async fn rpc_http(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
-    let url = config
-        .url
-        .clone()
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| format!("MCP server '{}' has no url.", config.name))?;
-    let client = reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|err| format!("Failed to build HTTP client: {err}"))?;
-    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let response = client
-        .post(&url)
-        .header("Accept", "application/json, text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|err| format!("MCP HTTP request to '{url}' failed: {err}"))?;
-    let status = response.status();
-    let text = response.text().await.map_err(|err| err.to_string())?;
-    if !status.is_success() {
-        return Err(format!("MCP HTTP endpoint returned {status}: {}", truncate_chars(&text, 400)));
-    }
-    // Direct JSON response first…
-    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-        if value.get("jsonrpc").is_some() || value.get("result").is_some() || value.get("error").is_some() {
-            return unwrap_rpc_response(value);
-        }
-    }
-    // …otherwise parse SSE `data: {...}` lines.
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(data) = line.strip_prefix("data:") else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else { continue };
-        if value.get("id").and_then(Value::as_u64) == Some(1) {
-            return unwrap_rpc_response(value);
-        }
-    }
-    Err(format!("MCP HTTP endpoint '{url}' returned no JSON-RPC response."))
-}
-
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
@@ -628,12 +665,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// Disabled servers report `disabled` without being spawned.
 pub async fn probe_server(config: &McpServerConfig) -> McpServerInfo {
     if !config.enabled {
-        return McpServerInfo {
-            config: config.clone(),
-            status: "disabled".to_string(),
-            error: None,
-            tools: Vec::new(),
-        };
+        return info_for(config, "disabled".to_string(), None, Vec::new());
     }
     match rpc_call(config, "tools/list", &json!({})).await {
         Ok(result) => {
@@ -642,21 +674,11 @@ pub async fn probe_server(config: &McpServerConfig) -> McpServerInfo {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let info = McpServerInfo {
-                config: config.clone(),
-                status: "connected".to_string(),
-                error: None,
-                tools,
-            };
+            let info = info_for(config, "connected".to_string(), None, tools);
             cache_put(config.project_path.as_deref(), &info);
             info
         }
-        Err(error) => McpServerInfo {
-            config: config.clone(),
-            status: "error".to_string(),
-            error: Some(error),
-            tools: Vec::new(),
-        },
+        Err(error) => info_for(config, "error".to_string(), Some(error), Vec::new()),
     }
 }
 
@@ -837,6 +859,11 @@ done"#;
             url: None,
             enabled: true,
             project_path: None,
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+            oauth_client_id: None,
+            scopes: None,
         }
     }
 

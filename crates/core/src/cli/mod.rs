@@ -3,6 +3,7 @@
 
 pub mod args;
 pub mod auth;
+pub mod mcp;
 pub mod models;
 pub mod render;
 pub mod repl;
@@ -30,7 +31,12 @@ pub fn main_entry() -> i32 {
             return 2;
         }
     };
-    runtime.block_on(run(cli))
+    runtime.block_on(async {
+        let code = run(cli).await;
+        // Politely end remote MCP sessions (DELETE Mcp-Session-Id).
+        crate::services::mcp::shutdown_sessions().await;
+        code
+    })
 }
 
 async fn run(cli: Cli) -> i32 {
@@ -49,6 +55,10 @@ async fn run(cli: Cli) -> i32 {
     if let Some(command) = cli.command.clone() {
         return match command {
             Command::Auth { action } => auth::auth_command(&state, action).await,
+            Command::Mcp { action } => {
+                let project = cli.project_dir().ok().map(|p| p.to_string_lossy().to_string());
+                mcp::mcp_command(&state, action, project.as_deref()).await
+            }
             Command::Sessions { json } => {
                 let project = match cli.project_dir() {
                     Ok(project) => project,

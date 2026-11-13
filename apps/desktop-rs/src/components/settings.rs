@@ -764,6 +764,7 @@ fn McpTab() -> Element {
                     onchange: move |event| new_transport.set(event.value()),
                     option { value: "stdio", "stdio" }
                     option { value: "sse", "sse" }
+                    option { value: "streamable-http", "streamable-http" }
                 }
             }
             div {
@@ -843,6 +844,9 @@ fn McpTab() -> Element {
                 let tool_count = server.tools.len();
                 let toggle_name = name.clone();
                 let delete_name = name.clone();
+                let auth_name = name.clone();
+                let needs_login = server.needs_login;
+                let signed_in = server.signed_in;
                 rsx! {
                     div {
                         key: "{name}",
@@ -858,6 +862,37 @@ fn McpTab() -> Element {
                             div { class: "mono", style: "font-size:11px", "{detail} · {tool_count} {store.t(\"mcp.tools\")}" }
                             if let Some(err) = server.error.clone() {
                                 div { class: "badge err", "{err}" }
+                            }
+                        }
+                        if needs_login || signed_in {
+                            button {
+                                onclick: move |_| {
+                                    let mut servers = servers;
+                                    let auth_name = auth_name.clone();
+                                    spawn(async move {
+                                        let state = core();
+                                        let result = if signed_in {
+                                            locagens_core::api::mcp::logout_mcp_server(&state, &auth_name, None)
+                                                .await
+                                                .map(|_| ())
+                                        } else {
+                                            store.toast("Opening the browser to sign in…".to_string());
+                                            let on_url = |url: &str| {
+                                                let _ = locagens_core::services::mcp::oauth::open_browser(url);
+                                            };
+                                            locagens_core::api::mcp::login_mcp_server(&state, &auth_name, None, &on_url)
+                                                .await
+                                                .map(|_| ())
+                                        };
+                                        if let Err(err) = result {
+                                            store.toast(format!("MCP sign-in failed: {err}"));
+                                        }
+                                        if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+                                            servers.set(response.servers);
+                                        }
+                                    });
+                                },
+                                if signed_in { "Sign out" } else { "Sign in" }
                             }
                         }
                         button {
