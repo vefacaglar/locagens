@@ -242,11 +242,16 @@ async fn planted_commondir_and_config_worktree_are_quarantined() {
     let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
     std::fs::create_dir_all(ws.outside.join("evil")).unwrap();
     let attack = format!(
-        "echo {}> .git\\commondir && (echo [alias]& echo x = !evil) > .git\\config.worktree && echo planted",
+        "echo planted& echo {}> .git\\commondir& echo [alias]> .git\\config.worktree",
         ws.outside.join("evil").display()
     );
     let output = run(&ws, &spec, &attack).await;
-    assert!(String::from_utf8_lossy(&output.stdout).contains("planted"), "the files were written: {}", text(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("planted"),
+        "the command ran: {} violations={:?}",
+        text(&output),
+        output.sandbox_violations
+    );
     for name in ["commondir", "config.worktree"] {
         assert!(
             output.sandbox_violations.iter().any(|report| report.contains("created") && report.contains(name)),

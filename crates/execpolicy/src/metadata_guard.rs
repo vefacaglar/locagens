@@ -28,12 +28,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Identity of a file system object: survives renames, changes when the
-/// entry is replaced by a new object.
+/// Identity of a file system object: survives renames and content edits,
+/// changes when the entry is replaced by a new object.
+///
+/// Unix file systems hand a freed inode straight back, so after
+/// `rm config && echo planted > config` the (device, inode) pair can be the
+/// same; the birth time (`statx` btime, where the file system records it)
+/// tells the two files apart. Windows file IDs are not reused that way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileId {
     volume: u64,
     index: u64,
+    birth_nanos: u128,
 }
 
 #[cfg(windows)]
@@ -72,6 +78,7 @@ mod os {
         Some(FileId {
             volume: u64::from(info.dwVolumeSerialNumber),
             index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            birth_nanos: 0,
         })
     }
 
@@ -126,7 +133,12 @@ mod os {
 
     pub(super) fn current_id(path: &Path) -> Option<FileId> {
         let metadata = std::fs::symlink_metadata(path).ok()?;
-        Some(FileId { volume: metadata.dev(), index: metadata.ino() })
+        let birth_nanos = metadata
+            .created()
+            .ok()
+            .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_nanos());
+        Some(FileId { volume: metadata.dev(), index: metadata.ino(), birth_nanos })
     }
 
     /// Unix has no open-by-inode for unprivileged processes; the sandboxes
@@ -173,12 +185,24 @@ pub fn guarded_paths(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// One guarded entry and the object that was there before the command
-/// (`None`: nothing was there).
+/// What was at a guarded path: the object's identity (see [`FileId`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EntryState {
+    id: FileId,
+}
+
+impl EntryState {
+    fn of(path: &Path) -> Option<Self> {
+        Some(Self { id: os::current_id(path)? })
+    }
+}
+
+/// One guarded entry and what was there before the command (`None`:
+/// nothing was there).
 #[derive(Clone, Debug)]
 struct GuardedEntry {
     path: PathBuf,
-    id: Option<FileId>,
+    state: Option<EntryState>,
 }
 
 /// Identities of a workspace's protected metadata, recorded before a command.
@@ -191,7 +215,7 @@ pub struct MetadataGuard {
 impl MetadataGuard {
     /// Records the current state of `paths` (parents before children).
     fn record(root: &Path, paths: &[PathBuf]) -> Self {
-        let entries = paths.iter().map(|path| GuardedEntry { path: path.clone(), id: os::current_id(path) }).collect();
+        let entries = paths.iter().map(|path| GuardedEntry { path: path.clone(), state: EntryState::of(path) }).collect();
         Self { root: root.to_path_buf(), entries }
     }
 
@@ -202,12 +226,12 @@ impl MetadataGuard {
     }
 
     fn repair(&self, entry: &GuardedEntry) -> Option<String> {
-        let current = os::current_id(&entry.path);
-        if current == entry.id {
+        let current = EntryState::of(&entry.path);
+        if current == entry.state {
             return None;
         }
         let shown = entry.path.strip_prefix(&self.root).unwrap_or(&entry.path).display().to_string();
-        let verb = if entry.id.is_some() { "replaced" } else { "created" };
+        let verb = if entry.state.is_some() { "replaced" } else { "created" };
         let mut report = format!("the sandboxed command {verb} `{shown}`");
         if current.is_some() {
             let quarantine = quarantine_path(&entry.path);
@@ -222,8 +246,8 @@ impl MetadataGuard {
                 }
             }
         }
-        let Some(original) = entry.id else { return Some(report) };
-        match os::locate(&self.root, original) {
+        let Some(original) = entry.state else { return Some(report) };
+        match os::locate(&self.root, original.id) {
             Some(moved) => match std::fs::rename(&moved, &entry.path) {
                 Ok(()) => report.push_str(&format!("; the original was restored from `{}`", moved.display())),
                 Err(err) => report.push_str(&format!(
@@ -295,7 +319,7 @@ pub fn start(root: &Path, paths: &[PathBuf]) -> Arc<MetadataGuard> {
             .flat_map(|other| other.entries.iter())
             .find(|other| other.path == entry.path);
         if let Some(older) = older {
-            entry.id = older.id;
+            entry.state = older.state;
         }
     }
     let guard = Arc::new(guard);
@@ -459,6 +483,9 @@ mod tests {
         std::fs::remove_file(root.join("config")).unwrap();
         std::fs::write(root.join("config"), "planted").unwrap();
         let reports = guard.check_and_repair();
+        // Windows: a new file ID; Unix may reuse the freed inode, the birth
+        // time still differs (CI on ubuntu caught the inode reuse).
+        assert_eq!(reports.len(), 1, "{reports:?}");
         assert!(reports[0].contains("no longer exists"), "{reports:?}");
         assert!(!root.join("config").exists(), "the planted file is quarantined");
         let _ = std::fs::remove_dir_all(&root);
@@ -486,7 +513,7 @@ mod tests {
         // A concurrent command plants the file before a second one starts.
         std::fs::write(root.join(".git").join("commondir"), "../evil").unwrap();
         let second = start(&root, &[root.join(".git").join("commondir")]);
-        assert_eq!(second.entries[0].id, None, "the planted file is not the new baseline");
+        assert_eq!(second.entries[0].state, None, "the planted file is not the new baseline");
 
         let reports = check_workspace(&root);
         assert!(!reports.is_empty() && reports[0].contains("created"), "{reports:?}");
