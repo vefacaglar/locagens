@@ -83,6 +83,8 @@ pub struct ModelInfo {
     pub reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// Metadata returned by `GET /api/providers` (web client contract: `type` is
@@ -162,6 +164,98 @@ pub struct SetPiAuthInput {
     pub provider_id: String,
     pub action: String,
     pub api_key: Option<String>,
+}
+
+/// Explicit reasoning-effort levels for a model catalog entry: an array of
+/// level strings (`reasoningEfforts`) wins, otherwise the set of
+/// non-null level keys in `thinkingLevelMap` (canonical order). `None` when
+/// the entry carries neither field.
+fn parse_reasoning_efforts(model: &Value) -> Option<Vec<String>> {
+    if let Some(list) = model.get("reasoningEfforts").and_then(Value::as_array) {
+        return Some(
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
+    }
+    if let Some(map) = model.get("thinkingLevelMap").and_then(Value::as_object) {
+        const CANONICAL_ORDER: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+        let efforts: Vec<String> = CANONICAL_ORDER
+            .iter()
+            .filter(|level| map.get(**level).and_then(Value::as_str).is_some())
+            .map(|level| level.to_string())
+            .collect();
+        return Some(efforts);
+    }
+    None
+}
+
+/// Supported reasoning-effort levels for a model, using explicit catalog
+/// metadata (`thinkingLevelMap` / `reasoningEfforts`) when known and model
+/// capability fallbacks otherwise.
+pub fn model_reasoning_efforts(
+    model_id: &str,
+    reasoning: Option<bool>,
+    explicit: Option<&[String]>,
+) -> Vec<String> {
+    if let Some(list) = explicit {
+        return list.to_vec();
+    }
+    if reasoning == Some(false) {
+        return Vec::new();
+    }
+    let id = model_id.to_lowercase();
+    // Models with no reasoning-effort control at all.
+    if id.contains("gpt-4")
+        || id.contains("haiku-4")
+        || id == "deepseek-chat"
+        || id == "deepseek-reasoner"
+        || id.contains("deepseek-r")
+        || id.contains("qwen3-coder")
+        || id.contains("qwen3.5")
+        || id.contains("qwen3.7")
+        || id.contains("qwen3.8")
+        || id.contains("gemma")
+        || id.contains("kimi-k2")
+        || id.contains("mimo-")
+        || id.contains("longcat")
+        || id.contains("iceman")
+        || id.contains("embed")
+        || (id.contains("minimax-m3") && !id.contains("minimax-m3.1"))
+    {
+        return Vec::new();
+    }
+    const MODEL_SETS: [(&[&str], &[&str]); 6] = [
+        (
+            &["gpt-5.6", "gpt-6", "beam-free", "minimax-m3.1"],
+            &["low", "medium", "high", "xhigh", "max"],
+        ),
+        (&["gpt-5", "grok-4", "codex"], &["low", "medium", "high", "xhigh"]),
+        (
+            &["muse-spark", "muse-wonder"],
+            &["minimal", "low", "medium", "high", "xhigh"],
+        ),
+        (&["glm-5.3", "deepseek-v4.1", "kimi-k3.1"], &["low", "high", "max"]),
+        (&["glm-5.2", "deepseek-v4-pro", "claude-haiku-5"], &["high", "max"]),
+        (
+            &["gemini-2.5", "gemini-3", "gemini-4", "claude-sonnet", "claude-opus", "o1", "o3", "o4", "step-5"],
+            &["low", "medium", "high"],
+        ),
+    ];
+    for (prefixes, efforts) in MODEL_SETS {
+        if prefixes.iter().any(|prefix| id.starts_with(prefix)) {
+            return efforts.iter().map(|e| e.to_string()).collect();
+        }
+    }
+    if reasoning == Some(true) {
+        return ["low", "medium", "high"]
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+    }
+    Vec::new()
 }
 
 struct BuiltinProvider {
@@ -278,6 +372,22 @@ fn codex_credential(key: &str, value: &Value) -> Vec<(String, Value)> {
         }
         return Vec::new();
     }
+    // Codex ChatGPT-login `auth.json`: the OAuth `tokens.access_token` is a
+    // usable OpenAI credential when `OPENAI_API_KEY` is absent/null.
+    if key == "tokens" {
+        let access_token = value
+            .get("access_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        if let Some(access_token) = access_token {
+            return vec![(
+                "openai".to_string(),
+                json!({ "type": "api_key", "key": access_token }),
+            )];
+        }
+        return Vec::new();
+    }
     // pi-style credential entries pass through keyed by provider id.
     match value {
         Value::Object(_) if value.get("type").is_some() || value.get("key").is_some() => {
@@ -296,11 +406,14 @@ fn is_anthropic(provider_id: &str, api: &str, base_url: &str) -> bool {
 }
 
 /// Web-client provider type for a resolved `api` kind: `anthropic-messages`
-/// (and friends) map to `"anthropic"`, everything else to
-/// `"openai-compatible"`.
+/// (and friends) map to `"anthropic"`, the Codex Responses WireAPI
+/// (`openai-responses` / `responses`) keeps its own kind, and everything else
+/// falls back to `"openai-compatible"`.
 fn provider_type(api: &str) -> &'static str {
     if api.contains("anthropic") {
         "anthropic"
+    } else if api == "openai-responses" || api == "responses" {
+        "openai-responses"
     } else {
         "openai-compatible"
     }
@@ -396,10 +509,39 @@ impl PiProviderManager {
             let path = directory.join("auth.json");
             match Self::read_json(&path) {
                 Value::Object(map) => {
+                    // An explicit non-empty `OPENAI_API_KEY` must win over a
+                    // `tokens.access_token` from the same file, regardless of
+                    // JSON key order.
+                    let mut explicit_openai: Option<Value> = None;
+                    let mut tokens_openai: Option<Value> = None;
+                    let mut others: Vec<(String, Value)> = Vec::new();
                     for (key, value) in map {
-                        let credential = codex_credential(&key, &value);
-                        for (provider_id, entry) in credential {
-                            merged.entry(provider_id).or_insert(entry);
+                        if key == "OPENAI_API_KEY" {
+                            explicit_openai =
+                                codex_credential(&key, &value).into_iter().next().map(|(_, entry)| entry);
+                        } else {
+                            let from_tokens = key == "tokens";
+                            for (provider_id, entry) in codex_credential(&key, &value) {
+                                if from_tokens && provider_id == "openai" {
+                                    tokens_openai = Some(entry.clone());
+                                }
+                                others.push((provider_id, entry));
+                            }
+                        }
+                    }
+                    for (provider_id, entry) in others {
+                        merged.entry(provider_id).or_insert(entry);
+                    }
+                    if let Some(entry) = explicit_openai {
+                        // Only override a tokens-derived openai entry from this
+                        // same file (or nothing at all); credentials from
+                        // earlier chain entries keep their fallback priority.
+                        let overwritable = match merged.get("openai") {
+                            Some(existing) => tokens_openai.as_ref() == Some(existing),
+                            None => true,
+                        };
+                        if overwritable {
+                            merged.insert("openai".to_string(), entry);
                         }
                     }
                 }
@@ -487,8 +629,20 @@ impl PiProviderManager {
                     converted.insert("envKey".into(), json!(env_key));
                 }
                 // Codex `wire_api` ("chat" / "responses") maps onto the
-                // OpenAI-compatible chat-completions adapter.
-                converted.insert("api".into(), json!("openai-compatible"));
+                // matching API adapter: `responses` keeps the Codex
+                // Responses WireAPI, everything else stays chat-completions.
+                let wire_api = entry
+                    .get("wire_api")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default();
+                let api = if wire_api.eq_ignore_ascii_case("responses")
+                    || wire_api.eq_ignore_ascii_case("openai-responses")
+                {
+                    "openai-responses"
+                } else {
+                    "openai-compatible"
+                };
+                converted.insert("api".into(), json!(api));
                 result.insert(name.clone(), Value::Object(converted));
             }
         }
@@ -645,9 +799,36 @@ impl PiProviderManager {
     // Catalog assembly
     // ------------------------------------------------------------------
 
-    /// Models for a provider cached in `pi`'s `models-store.json`.
+    /// Models for a provider cached in `pi`'s `models-store.json` — fallback
+    /// directories first (oldest to newest), then the primary agent dir whose
+    /// entries win for matching model ids.
     fn models_store_models(&self, provider_id: &str) -> Vec<ModelInfo> {
-        let store = Self::read_json(&self.models_store_path());
+        let mut models: Vec<ModelInfo> = Vec::new();
+        for directory in self.fallback_dirs.iter().rev() {
+            for model in Self::parse_models_store_file(
+                &directory.join("models-store.json"),
+                provider_id,
+            ) {
+                if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
+                    *existing = model;
+                } else {
+                    models.push(model);
+                }
+            }
+        }
+        for model in Self::parse_models_store_file(&self.models_store_path(), provider_id) {
+            if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
+                *existing = model;
+            } else {
+                models.push(model);
+            }
+        }
+        models
+    }
+
+    /// Models for one provider entry of a single `models-store.json` file.
+    fn parse_models_store_file(path: &Path, provider_id: &str) -> Vec<ModelInfo> {
+        let store = Self::read_json(path);
         store
             .get(provider_id)
             .and_then(|provider| provider.get("models"))
@@ -677,6 +858,7 @@ impl PiProviderManager {
                             max_tokens: model.get("maxTokens").and_then(Value::as_i64),
                             reasoning: model.get("reasoning").and_then(Value::as_bool),
                             cost: model.get("cost").cloned(),
+                            reasoning_efforts: parse_reasoning_efforts(model),
                             id,
                         })
                     })
@@ -703,6 +885,7 @@ impl PiProviderManager {
                             max_tokens: None,
                             reasoning: None,
                             cost: None,
+                            reasoning_efforts: None,
                         }),
                         Value::Object(object) => {
                             let id = object.get("id")?.as_str()?.to_string();
@@ -723,6 +906,7 @@ impl PiProviderManager {
                                 max_tokens: object.get("maxTokens").and_then(Value::as_i64),
                                 reasoning: object.get("reasoning").and_then(Value::as_bool),
                                 cost: object.get("cost").cloned(),
+                                reasoning_efforts: parse_reasoning_efforts(&Value::Object(object.clone())),
                                 id,
                             })
                         }
@@ -745,11 +929,22 @@ impl PiProviderManager {
             .cloned()
             .unwrap_or_default();
         for model in models {
-            if map.contains_key(&model.id) {
-                continue;
+            let efforts = model_reasoning_efforts(
+                &model.id,
+                model.reasoning,
+                model.reasoning_efforts.as_deref(),
+            );
+            if !map.contains_key(&model.id) {
+                if let Some(settings) = Self::derived_model_settings(model) {
+                    map.insert(model.id.clone(), settings);
+                }
             }
-            if let Some(settings) = Self::derived_model_settings(model) {
-                map.insert(model.id.clone(), settings);
+            // Every model entry carries its supported reasoning efforts —
+            // including UI-entered meta entries that predate this field.
+            if let Some(entry) = map.get_mut(&model.id).and_then(Value::as_object_mut) {
+                entry
+                    .entry("reasoningEfforts".to_string())
+                    .or_insert_with(|| json!(efforts));
             }
         }
         if map.is_empty() {
@@ -759,10 +954,17 @@ impl PiProviderManager {
         }
     }
 
-    /// Per-model settings derived from a merged `ModelInfo` (context window
-    /// and pricing tiers) — used when no UI-entered settings exist yet.
+    /// Per-model settings derived from a merged `ModelInfo` (supported
+    /// reasoning efforts, context window and pricing tiers) — used when no
+    /// UI-entered settings exist yet. Always carries `reasoningEfforts`.
     fn derived_model_settings(model: &ModelInfo) -> Option<Value> {
         let mut settings = Map::new();
+        let efforts = model_reasoning_efforts(
+            &model.id,
+            model.reasoning,
+            model.reasoning_efforts.as_deref(),
+        );
+        settings.insert("reasoningEfforts".into(), json!(efforts));
         if let Some(context_limit) = model.context_window {
             settings.insert("contextLimit".into(), json!(context_limit));
         }
@@ -888,6 +1090,7 @@ impl PiProviderManager {
                         max_tokens: None,
                         reasoning: None,
                         cost: None,
+                        reasoning_efforts: None,
                     })
                     .collect()
             })
@@ -915,6 +1118,9 @@ impl PiProviderManager {
                 existing.max_tokens = model.max_tokens;
                 existing.reasoning = model.reasoning;
                 existing.cost = model.cost;
+                if model.reasoning_efforts.is_some() {
+                    existing.reasoning_efforts = model.reasoning_efforts;
+                }
             } else {
                 models.push(model);
             }
@@ -1031,7 +1237,8 @@ impl PiProviderManager {
         }
 
         // 2. type / baseUrl / models → models.json (`type: "anthropic"` is
-        //    stored as pi's `anthropic-messages` api kind).
+        //    stored as pi's `anthropic-messages` api kind; `openai-responses`
+        //    / `responses` keep the Codex Responses WireAPI kind).
         let api = input
             .provider_type
             .as_deref()
@@ -1040,6 +1247,10 @@ impl PiProviderManager {
             .map(|t| {
                 if t.eq_ignore_ascii_case("anthropic") {
                     "anthropic-messages".to_string()
+                } else if t.eq_ignore_ascii_case("openai-responses")
+                    || t.eq_ignore_ascii_case("responses")
+                {
+                    "openai-responses".to_string()
                 } else {
                     t.to_string()
                 }
@@ -1074,7 +1285,14 @@ impl PiProviderManager {
                     entry.insert("api".into(), json!(api));
                 }
                 None => {
-                    entry.remove("api");
+                    // The provider_type was not changed in this save: keep an
+                    // explicitly configured Responses WireAPI instead of
+                    // clobbering it back to chat-completions.
+                    let is_responses =
+                        entry.get("api").and_then(Value::as_str) == Some("openai-responses");
+                    if !is_responses {
+                        entry.remove("api");
+                    }
                 }
             }
             match input.models.as_ref() {
@@ -1487,8 +1705,13 @@ mod tests {
         (agent, support)
     }
 
+    /// Serializes tests that touch `LOCAGENS_TEST_KEY_VAR` (env vars are
+    /// process-global, so parallel `set_var`/`remove_var` would race).
+    static ENV_VAR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn auth_json_roundtrip_and_key_resolution() {
+        let _guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (agent, support) = temp_dirs("auth");
         let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
 
@@ -1528,6 +1751,7 @@ mod tests {
 
     #[tokio::test]
     async fn env_var_credential_resolution() {
+        let _guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (agent, support) = temp_dirs("env");
         let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
         std::env::set_var("LOCAGENS_TEST_KEY_VAR", "from-env");
@@ -1541,6 +1765,56 @@ mod tests {
         std::env::remove_var("LOCAGENS_TEST_KEY_VAR");
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn codex_oauth_tokens_in_auth_json_resolve_for_openai() {
+        let (agent, support) = temp_dirs("codex-tokens");
+        let codex = std::env::temp_dir().join(format!(
+            "locagens-pi-codex-tokens-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&codex).unwrap();
+        let manager = PiProviderManager::with_chain(
+            agent.clone(),
+            support.clone(),
+            vec![codex.clone()],
+        );
+
+        // `OPENAI_API_KEY: null` + OAuth `tokens.access_token` → openai works.
+        let value = json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "access_token": "  ey-oauth-token  ",
+                "refresh_token": "r",
+                "account_id": "acc"
+            }
+        });
+        PiProviderManager::write_json(&codex.join("auth.json"), &value).unwrap();
+        assert_eq!(
+            manager.resolve_api_key("openai", None).await.as_deref(),
+            Some("ey-oauth-token")
+        );
+
+        // An explicit non-empty OPENAI_API_KEY wins over tokens.
+        let value = json!({
+            "OPENAI_API_KEY": "sk-explicit-key",
+            "tokens": { "access_token": "ey-oauth-token" }
+        });
+        PiProviderManager::write_json(&codex.join("auth.json"), &value).unwrap();
+        assert_eq!(
+            manager.resolve_api_key("openai", None).await.as_deref(),
+            Some("sk-explicit-key")
+        );
+
+        // Empty/missing tokens fall back cleanly.
+        let value = json!({ "OPENAI_API_KEY": null, "tokens": { "access_token": "" } });
+        PiProviderManager::write_json(&codex.join("auth.json"), &value).unwrap();
+        assert!(manager.read_auth_map().get("openai").is_none());
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+        let _ = std::fs::remove_dir_all(codex);
     }
 
     #[test]
@@ -1878,6 +2152,109 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn codex_wire_api_responses_resolves_to_openai_responses() {
+        let (agent, support) = temp_dirs("wireapi");
+        let codex = std::env::temp_dir().join(format!("locagens-pi-wireapi-codex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(
+            codex.join("config.toml"),
+            r#"
+[model_providers.custom]
+name = "Custom"
+base_url = "https://custom.example.com/v1"
+env_key = "CUSTOM_API_KEY"
+wire_api = "responses"
+
+[model_providers.chatonly]
+name = "ChatOnly"
+base_url = "https://chat.example.com/v1"
+wire_api = "chat"
+"#,
+        )
+        .unwrap();
+        let manager = PiProviderManager::with_chain(agent.clone(), support.clone(), vec![codex.clone()]);
+
+        // `wire_api = "responses"` keeps the Codex Responses WireAPI.
+        assert_eq!(manager.resolve_api("custom"), "openai-responses");
+        assert_eq!(provider_type(&manager.resolve_api("custom")), "openai-responses");
+        // Any other wire_api (or none) stays chat-completions.
+        assert_eq!(manager.resolve_api("chatonly"), "openai-compatible");
+        assert_eq!(provider_type("anthropic-messages"), "anthropic");
+        assert_eq!(provider_type("responses"), "openai-responses");
+        assert_eq!(provider_type("openai-compatible"), "openai-compatible");
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+        let _ = std::fs::remove_dir_all(codex);
+    }
+
+    #[test]
+    fn models_store_thinking_level_map_populates_reasoning_efforts() {
+        let (agent, support) = temp_dirs("efforts");
+        let fallback =
+            std::env::temp_dir().join(format!("locagens-pi-efforts-fallback-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&fallback).unwrap();
+
+        // Fallback catalog: `thinkingLevelMap` metadata plus an empty map.
+        PiProviderManager::write_json(
+            &fallback.join("models-store.json"),
+            &json!({
+                "acme": { "models": [
+                    { "id": "gemini-4-argon", "name": "Gemini 4 Argon", "thinkingLevelMap": { "low": "low", "medium": "medium", "high": "high" } },
+                    { "id": "no-effort-model", "name": "No Effort", "thinkingLevelMap": {} }
+                ]}
+            }),
+        )
+        .unwrap();
+
+        // Primary catalog: `thinkingLevelMap` and explicit `reasoningEfforts`.
+        PiProviderManager::write_json(
+            &agent.join("models-store.json"),
+            &json!({
+                "acme": { "models": [
+                    { "id": "gpt-5.6-luna", "name": "GPT 5.6 Luna", "thinkingLevelMap": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" } },
+                    { "id": "glm-5.3-flash", "name": "GLM Flash", "reasoningEfforts": ["low", "high", "max"] }
+                ]}
+            }),
+        )
+        .unwrap();
+
+        let manager =
+            PiProviderManager::with_chain(agent.clone(), support.clone(), vec![fallback.clone()]);
+        let models = manager.models_store_models("acme");
+        let efforts = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.id == id)
+                .map(|model| model.reasoning_efforts.clone().unwrap_or_default())
+                .unwrap_or_else(|| panic!("model {id} missing"))
+        };
+
+        // Read from the fallback models-store.json.
+        assert_eq!(
+            efforts("gemini-4-argon"),
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
+        assert_eq!(efforts("gpt-5.6-luna"), vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string()
+        ]);
+        assert_eq!(
+            efforts("glm-5.3-flash"),
+            vec!["low".to_string(), "high".to_string(), "max".to_string()]
+        );
+        // An empty thinkingLevelMap means no effort levels.
+        assert!(efforts("no-effort-model").is_empty());
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+        let _ = std::fs::remove_dir_all(fallback);
     }
 
 }
