@@ -170,7 +170,7 @@ file `.usage_seq`); `list_usage` aggregates the `usage` lines of all rollouts.
 |---|---|---|
 | `id` | `integer` | Auto-increment surrogate key |
 | `runId` | `string` | Parent run (the rollout the line lives in) |
-| `agentRole` | `string?` | Agent role (`main`, `explorer`, `worker`) |
+| `agentRole` | `string?` | Agent role: `main` for the main agent, `explorer`, `worker` (legacy rows with `planner` are read as `main`) |
 | `providerId` | `string` | Provider identifier |
 | `model` | `string` | Model name used for completion |
 | `inputTokens` / `outputTokens` | `integer` | Prompt / completion token counts |

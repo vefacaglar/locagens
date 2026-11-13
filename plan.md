@@ -1,3 +1,8 @@
+> **Historical document.** This is the original two-model MVP plan (Electron + Vue +
+> Node, SQLite, planner/coder split). It no longer describes Locagens: the product is a
+> single-model, pure-Rust agent with no Node/SQLite/HTTP server. Read `README.md`,
+> `Claude.md` and `docs/*.md` for the current design; `state.md` for project status.
+
 # Locagens Plan
 
 ## 1. Project Summary

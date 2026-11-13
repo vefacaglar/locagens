@@ -10,7 +10,7 @@ returning typed values — no HTTP involved.
 | Consumer | How |
 | --- | --- |
 | **Native Rust desktop app** (`apps/desktop-rs`, Dioxus) | calls `api` functions directly on the UI thread / from async tasks |
-| **`lcgn` CLI** (`apps/cli`: `src/bin/lcgn.rs`, `src/cli/`) | creates runs, answers questions and streams events through the facade |
+| **`lcgn` CLI** (`apps/cli` entry, implementation in `crates/core/src/cli/`) | creates runs, answers questions and streams events through the facade |
 
 ## Startup
 
@@ -18,12 +18,23 @@ returning typed values — no HTTP involved.
 pub fn bootstrap() -> anyhow::Result<AppState>
 ```
 
-Opens the data store (file-based JSON/JSONL under the app-support dir), loads
-provider auth/models (`crates/config`: `~/.locagens` + `~/.codex` + legacy
-`~/.pi/agent`), runs startup tasks (fail stuck runs, project
-sync), and returns the shared `AppState` (`db`, `orchestrator`, `pi`,
-`processes`, `default_project_path`). The desktop UI calls this once at
-startup — it is what the desktop app and `lcgn` do first.
+Opens the data store (file-based JSON/JSONL under `~/.locagens`), loads
+provider auth/models (`crates/config`: `~/.locagens` with `~/.codex` and
+`~/.pi/agent` as read fallbacks), runs startup tasks (fail runs whose owner
+process is gone, project sync), and returns the shared `AppState`:
+
+```rust
+pub struct AppState {
+    pub db: Arc<Db>,                          // file-based store
+    pub pi: Arc<PiProviderManager>,           // providers, models, auth
+    pub orchestrator: Arc<Orchestrator>,      // run handles + drive loop
+    pub settings_path: PathBuf,
+    pub default_project_path: PathBuf,
+    pub processes: Arc<ProcessManager>,
+}
+```
+
+The desktop UI and `lcgn` both call `bootstrap` once at startup.
 
 ## Error handling
 
@@ -36,34 +47,40 @@ pub type ApiResult<T> = Result<T, ApiError>;
 ```
 
 Constructors: `ApiError::bad_request`, `not_found`, `conflict`, `internal`.
-`ApiError` implements `std::error::Error` + `Display`; the kinds map 1:1 onto
-the HTTP status codes the former routes used (400/404/409/500), and messages
-pass through unchanged.
+`ApiError` implements `std::error::Error` + `Display`; messages pass through
+unchanged.
 
 ## Modules
 
 ### `api::runs` — run lifecycle, messages, usage, events
 
 ```rust
-pub async fn create_run(state, payload: &CreateRunPayload)  -> ApiResult<StartedRun>   // POST /api/runs
+pub async fn create_run(state, payload: &CreateRunPayload)  -> ApiResult<StartedRun>
 pub async fn continue_run(state, run_id, payload: &ContinueRunPayload) -> ApiResult<ContinuedRun>
+pub async fn fork_run(state, run_id, up_to_message_id: Option<&str>) -> ApiResult<Run>  // copy of a run, optionally cut at a message
 pub async fn cancel_run(state, run_id)                      -> ApiResult<()>
-pub async fn queue_message(state, run_id, content)          -> ApiResult<()>           // mid-run inbox (409 when idle)
-pub async fn apply_permission_decision(state, run_id, call_id, decision, updated_args) -> ApiResult<()>
-pub async fn permission_decision(state, run_id, decision)   -> ApiResult<()>   // unknown decision: 400
-pub async fn answer_question(state, run_id, answer: &AnswerQuestionPayload) -> ApiResult<()>
+pub async fn delete_run(state, run_id)                      -> ApiResult<()>  // cancels an active run, waits for it, then deletes
+pub async fn queue_message(state, run_id, content)          -> ApiResult<()>  // mid-run inbox (409 when idle)
 
-pub async fn list_runs(state)      -> ApiResult<Vec<Run>>          // lastActiveAt DESC; picks up runs of other processes
-pub async fn delete_run(state, run_id) -> ApiResult<()>            // cancels an active run, waits for it, then deletes
-pub async fn resync_run(state, run_id) -> RunResync                // after a lagged receiver: run + messages + pending prompts + terminal event
-pub async fn get_run(state, id)    -> ApiResult<Run>
-pub async fn list_messages(state, id) -> ApiResult<Vec<RunMessage>>
-pub async fn run_usage(state, id)  -> ApiResult<RunUsageSummary>   // tokens/cost, byRole
-pub async fn run_plan(state, id)   -> ApiResult<Option<Plan>>
-pub async fn run_pending(state, id) -> ApiResult<PendingRequests>  // pending permission/question
+// permission and question answers
+pub async fn permission_decision(state, run_id, decision: &str) -> ApiResult<()>  // unknown decision: 400; nothing pending: 409
+pub async fn apply_permission_decision(state, handle: &Arc<RunHandle>, decision: &str) -> bool  // false when nothing pending; unknown -> deny
+pub async fn answer_question(state, run_id, selections: Vec<Vec<String>>, notes: Vec<String>) -> ApiResult<()>
+pub async fn answer_question_core(handle: &Arc<RunHandle>, selections, notes) -> bool
+
+// reads
+pub async fn list_runs(state)         -> ApiResult<Vec<Run>>             // lastActiveAt DESC; picks up runs of other processes
+pub async fn get_run(state, run_id)   -> ApiResult<Run>
+pub async fn list_messages(state, run_id) -> ApiResult<Vec<RunMessage>>
+pub async fn run_plan(state, run_id)  -> ApiResult<Option<Plan>>
+pub async fn run_pending(state, run_id) -> ApiResult<PendingRequests>    // pending permission/question
+pub async fn run_usage(state, run_id) -> ApiResult<RunUsageSummary>      // tokens/cost, byRole
+pub fn usage_summary(run_id, entries: &[UsageLogEntry]) -> RunUsageSummary
 pub async fn usage_logs(state, query: &UsageLogQuery) -> ApiResult<UsageLogsResponse>
 
+// events
 pub async fn subscribe_run_events(state, run_id) -> EventRx
+pub async fn resync_run(state, run_id) -> RunResync   // { run, messages, events }: rebuild after a lagged receiver
 ```
 
 Run lifecycle rules:
@@ -91,7 +108,7 @@ Run lifecycle rules:
 ### Event subscription
 
 ```rust
-pub type RunEvent  = serde_json::Value;               // { "type": ..., ... } — same payloads as SSE
+pub type RunEvent  = serde_json::Value;               // { "type": ..., ... }
 pub type EventRx   = tokio::sync::broadcast::Receiver<RunEvent>;
 pub async fn subscribe_run_events(state: &AppState, run_id: &str) -> EventRx
 ```
@@ -106,32 +123,57 @@ Semantics:
 
 A receiver that falls behind gets `{"type":"lagged"}` (or `RecvError::Lagged`
 on a handle receiver). Do not ignore it: call `api::runs::resync_run` and
-rebuild the view from the returned messages, pending requests and terminal
-event (`lcgn` does this in `cli/events.rs`).
+re-apply the returned `RunResync` (`run`, `messages`, and the replayable
+`events`: pending prompts and the terminal event) (`lcgn` does this in `cli/events.rs`).
 
 Event types: `run_started`, `status_changed`, `message_created`,
-`message_updated`, `plan_updated`, `title_changed`, `run_completed`,
-`run_failed`, `run_cancelled` (sub-agent messages carry
-`agentRole`/`agentName`).
+`message_updated`, `plan_updated`, `title_changed`, `permission_requested`,
+`question_requested`, `turn_diff_updated`, `context_compacted`,
+`agent_spawned`, `patch_progress`, `run_completed`, `run_failed`,
+`run_cancelled`, `lagged` (sub-agent messages carry `agentRole`/`agentName`).
 
 ### `api::projects` — projects, files, git
 
 ```rust
+// projects and files
 pub async fn list_projects(state) -> ApiResult<Vec<Project>>
 pub async fn create_project(state, input: CreateProjectInput) -> ApiResult<Project>
 pub async fn delete_project(state, path) -> ApiResult<()>
-pub async fn list_files(state, path, query) -> ApiResult<Vec<String>>
-pub async fn git_status(state, path) -> ApiResult<GitStatus>
-pub async fn git_diff_details(state, path) -> ApiResult<Vec<GitFileDiff>>
-pub async fn git_generate_message(state, run_id) -> ApiResult<String>   // LLM commit message
-pub async fn git_commit(state, input: GitCommitInput) -> ApiResult<()>
 pub fn require_registered_project(state, raw) -> ApiResult<PathBuf>     // workspace containment
+pub async fn list_files(state, path, query: Option<&str>) -> ApiResult<Vec<String>>
+pub fn fuzzy_file_score(path, query) -> Option<i64>                     // ranking used by the @file popup
+
+// git
+pub async fn git_status(state, path) -> ApiResult<GitStatus>
+pub async fn git_diff_details(state, path) -> ApiResult<Vec<GitFileDiff>>  // per-file changes for the git panel
+pub async fn git_diff(state, path, staged: bool) -> ApiResult<String>      // plain `git diff [--cached]`
+pub async fn git_stage(state, path, files: &[String]) -> ApiResult<()>
+pub async fn git_unstage(state, path, files: &[String]) -> ApiResult<()>
+pub async fn git_generate_message(state, run_id) -> ApiResult<String>      // LLM commit message
+pub async fn git_commit(state, input: GitCommitInput) -> ApiResult<()>
+
+// turn snapshots and undo
+pub async fn create_git_snapshot(state, path, run_id) -> ApiResult<Option<GitSnapshot>>
+pub async fn create_git_snapshot_for_path(project_path: &Path, run_id) -> Result<Option<GitSnapshot>, String>
+pub async fn record_turn_end_for_path(project_path: &Path, snapshot_id) -> Result<(), String>
 pub async fn undo_last_turn(state, path, run_id: Option<&str>) -> ApiResult<GitSnapshot>
+pub async fn undo_last_turn_for_path(project_path: &Path, run_id: Option<&str>) -> Result<GitSnapshot, String>
+
+// worktrees
+pub async fn list_worktrees(state, path) -> ApiResult<Vec<GitWorktree>>
+pub async fn create_worktree(state, path, branch, register: bool) -> ApiResult<GitWorktree>
+    // <parent>/.locagens-worktrees/<project>/<branch-slug>; `register` also adds it as a project
+pub async fn remove_worktree(state, path, worktree_path, force: bool) -> ApiResult<()>
+
+// project trust
 pub struct ProjectTrust { pub trusted: bool, pub ignored_files: Vec<String> }
 pub fn is_project_trusted(path) -> bool
-pub async fn project_trust(path) -> ApiResult<ProjectTrust>     // ignored_files: project config skipped while untrusted
-pub async fn trust_project(path, trusted: bool) -> ApiResult<()> // writes [projects."<path>"] trust_level
+pub async fn project_trust(path) -> ApiResult<ProjectTrust>      // ignored_files: project config skipped while untrusted
+pub async fn trust_project(path, trusted: bool) -> ApiResult<ProjectTrust>  // writes [projects."<path>"] trust_level
 ```
+
+The snapshot/undo engine is an internal service; these facade functions are
+the stable entry points.
 
 `undo_last_turn` reverts only the paths the turn changed (pre-turn tree vs
 the post-turn tree recorded when the turn ended). Paths changed again since
@@ -144,15 +186,15 @@ Untrusted projects load no `<project>/.locagens/` hooks, MCP servers,
 plugins, `.rules` or agent roles; home and filesystem roots cannot be
 trusted.
 
-### `api::providers` — `pi` providers, models & auth
+### `api::providers` — providers, models & auth
 
 ```rust
 pub async fn list_providers(state) -> ApiResult<Vec<ProviderMetadata>>
-pub async fn get_provider_configs(state) -> ApiResult<Value>            // keys masked
-pub async fn save_provider_configs(state, input: &SaveProviderConfigInput) -> ApiResult<()>
-pub async fn fetch_models(state, input: &FetchModelsInput) -> ApiResult<Vec<String>>
+pub async fn get_provider_configs(state) -> ApiResult<HashMap<String, EditableProviderConfig>>  // keys masked
+pub async fn save_provider_configs(state, configs: &HashMap<String, SaveProviderConfigInput>) -> ApiResult<()>
+pub async fn fetch_models(state, input: &FetchModelsInput) -> ApiResult<FetchModelsResult>
 pub async fn test_provider(state, input: &TestProviderInput) -> ApiResult<TestProviderResult>
-pub async fn get_pi_auth(state) -> ApiResult<Vec<Value>>                // ~/.pi/agent/auth.json status
+pub async fn get_pi_auth(state) -> ApiResult<Vec<Value>>                // auth.json status (keys never returned)
 pub async fn set_pi_auth(state, input: &SetPiAuthInput) -> ApiResult<()>
 
 // OAuth login: xai, github-copilot, kimi-coding (device code) and openai
@@ -198,9 +240,8 @@ matches. `keyPreview` of an API key is `…` plus its last 4 characters (keys of
 timeout (`cmd /S /C` on Windows). `test_provider` / `fetch_models` use a key
 typed in the UI literally (no `!`/`$` expansion) and never send the stored
 credential to a `baseUrl` other than the provider's configured one.
-```
 
-### `api::permissions` — standing grants
+### `api::permissions` — standing grants (`permissions.json`)
 
 ```rust
 pub async fn list_permissions(state) -> ApiResult<Vec<PermissionRule>>
@@ -280,14 +321,14 @@ pub async fn list_plugins(state, project_path) -> ApiResult<PluginsResponse>
 pub fn plugin_templates() -> ApiResult<Vec<Value>>
 pub async fn install_plugin(state, payload: InstallPayload) -> ApiResult<Value>
 pub async fn toggle_plugin(state, id, input: ToggleInput) -> ApiResult<Value>
-pub async fn delete_plugin(state, id, input: ToggleInput) -> ApiResult<()>
+pub async fn delete_plugin(state, id, scope: Option<&str>, project_path: Option<&str>) -> ApiResult<()>  // scope: "project" or user (default)
 ```
 
 ### `api::processes` — managed terminal processes
 
 ```rust
-pub async fn list_processes(state, project_path) -> ApiResult<Vec<ProcessInfo>>
-pub async fn spawn_process(state, input: SpawnProcessInput) -> ApiResult<ProcessInfo>
+pub async fn list_processes(state, project_path: Option<&str>) -> ApiResult<Vec<ProcessInfo>>
+pub async fn spawn_process(state, input: &SpawnProcessInput) -> ApiResult<ProcessInfo>
 pub async fn kill_process(state, id) -> ApiResult<bool>
 pub async fn restart_process(state, id) -> ApiResult<ProcessInfo>
 pub async fn process_logs(state, id) -> ApiResult<ProcessLogs>
@@ -296,7 +337,7 @@ pub async fn process_logs(state, id) -> ApiResult<ProcessLogs>
 ### `api::security` — sandbox status & setup
 
 ```rust
-pub async fn security_status() -> ApiResult<SecurityStatus>
+pub async fn security_status() -> ApiResult<SecurityStatus>   // sandbox backend and availability
 pub async fn setup_sandbox(confirmed: bool) -> ApiResult<SecurityStatus>
 ```
 
@@ -307,7 +348,7 @@ pub async fn list_skills(state, project_path) -> ApiResult<SkillsListResponse>
 pub async fn get_skill(state, name, project_path) -> ApiResult<SkillSummary>
 pub async fn install_skill(state, input: InstallSkillInput) -> ApiResult<SkillSummary>
 pub async fn skills_folder(state, input: InstallSkillInput) -> ApiResult<SkillsFolder>
-pub async fn delete_skill(state, name, location) -> ApiResult<()>
+pub async fn delete_skill(state, name, target: Option<&str>, project_path: Option<&str>) -> ApiResult<bool>  // target: "project" | "user"
 ```
 
 ### `api::review` — code review
@@ -319,9 +360,10 @@ pub fn review_of_message(message: &RunMessage) -> Option<ReviewPayload>
 pub fn is_review_run(state, run_id) -> bool
 ```
 
-`start_review` takes a `ReviewTarget` (`locagens_core::protocol::review`:
-`Uncommitted`, `BaseBranch { branch }`, `Commit { sha, title }`,
-`Custom { instructions }`), builds the diff with read-only git
+`start_review` takes a `StartReviewPayload` (`target`, `project_path`,
+`provider_id`, `model`, `reasoning_effort`) whose `target` is a `ReviewTarget`
+(`locagens_protocol::review`: `Uncommitted`, `BaseBranch { branch }`,
+`Commit { sha, title }`, `Custom { instructions }`). It builds the diff with read-only git
 (`orchestrator::review`: diff, merge-base, show, status, log, rev-parse,
 ls-files, for-each-ref, cat-file only) and starts a `chat`-mode run whose
 appended system prompt carries the reviewer rubric, the diff and a
@@ -337,7 +379,7 @@ raw text. `review_choices` lists branches/recent commits for target pickers.
 ### `api::symbols` — code symbol search
 
 ```rust
-pub async fn search_symbols(state, path, query, kind) -> ApiResult<Vec<CodeSymbol>>
+pub async fn search_symbols(state, path, query: Option<&str>, kind: Option<&str>) -> ApiResult<Vec<CodeSymbol>>
 ```
 
 Registered projects search directly; unregistered-but-valid directories fall
@@ -363,10 +405,12 @@ coder/utility tiers and no `delegate_tasks`/`delegate_to_utility` tools.
 * `AppState` is cheap to clone (internally `Arc`'d) and shared across the
   desktop UI and the CLI.
 
-## Phase 9 — Codex Harness Tools (crates/core orchestrator + crates/* support)
+## Codex harness tools
 
-The agent loop exposes the full Codex toolset in addition to the classic
-workspace tools:
+The agent loop exposes the Codex toolset in addition to the classic
+workspace tools. The per-mode tool lists are in `README.md`; `load_skill`,
+`list_mcp_resources`, `read_mcp_resource`, `remember`, `ask_user_question`,
+`set_chat_title` and `spawn_agents` are not tabulated below.
 
 | Tool | Schema | Behaviour |
 | --- | --- | --- |
