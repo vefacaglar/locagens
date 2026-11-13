@@ -117,7 +117,7 @@ pub struct SandboxSession {
     #[cfg(windows)]
     job: std::sync::Arc<crate::windows_sandbox::JobObject>,
     #[cfg(windows)]
-    guard: std::sync::Arc<crate::windows_sandbox::guard::MetadataGuard>,
+    guard: std::sync::Arc<crate::metadata_guard::MetadataGuard>,
     proxy: Option<NetworkProxy>,
 }
 
@@ -131,12 +131,13 @@ impl SandboxSession {
     /// The root exited on its own: let background descendants keep running
     /// after the session is dropped (Codex `preserve_descendants`), then
     /// check the protected workspace metadata (see
-    /// [`crate::windows_sandbox::guard`]). Returns the repairs made.
+    /// [`crate::metadata_guard`]). Returns the repairs made.
     pub fn finish_natural_exit(&self) -> Vec<String> {
         #[cfg(windows)]
         {
             let _ = self.job.preserve_descendants();
-            crate::windows_sandbox::guard::check_after_exit(&self.guard, &self.job)
+            let job = std::sync::Arc::clone(&self.job);
+            crate::metadata_guard::check_after_exit(&self.guard, move || job.active_processes().is_ok_and(|count| count > 0))
         }
         #[cfg(not(windows))]
         Vec::new()
@@ -146,7 +147,7 @@ impl SandboxSession {
     /// the tree was killed. Returns the repairs made.
     pub fn check_metadata(&self) -> Vec<String> {
         #[cfg(windows)]
-        return crate::windows_sandbox::guard::check_after_kill(&self.guard);
+        return crate::metadata_guard::finish(&self.guard);
         #[cfg(not(windows))]
         Vec::new()
     }
@@ -252,18 +253,51 @@ pub async fn run_captured(
     set_command_args(&mut cmd, &program, &prog_args);
     cmd.current_dir(cwd)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .env_clear()
         .envs(env);
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))??;
+    // Its own process group, so the metadata guard can wait for background
+    // descendants (`kill(-pgid, 0)`).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let guard = start_metadata_guard(spec);
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            if let Some((guard, _)) = &guard {
+                crate::metadata_guard::finish(guard);
+            }
+            return Err(err);
+        }
+    };
+    let pid = child.id();
+    let finished = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    let mut violations = Vec::new();
+    if let Some((guard, earlier)) = guard {
+        violations = earlier;
+        violations.extend(match finished {
+            Ok(_) => finish_metadata_guard(&guard, pid),
+            Err(_) => crate::metadata_guard::finish(&guard),
+        });
+    }
+    let output = match finished {
+        Ok(output) => output?,
+        Err(_) => {
+            let mut message = "command timed out".to_string();
+            if !violations.is_empty() {
+                message.push_str(&format!("\n\n{}", sandbox_violation_note(&violations)));
+            }
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, message));
+        }
+    };
     Ok(CapturedOutput {
         exit_code: output.status.code(),
         stdout: output.stdout,
         stderr: output.stderr,
         blocked_hosts: Vec::new(),
-        sandbox_violations: Vec::new(),
+        sandbox_violations: violations,
     })
 }
 
@@ -369,16 +403,35 @@ pub fn sandbox_violation_note(reports: &[String]) -> String {
 /// still running there (or its background descendants) replaced, and
 /// returns the repairs (they are also reported by the next sandboxed
 /// command). Call it before running git unsandboxed in the workspace.
-/// Windows only: Bubblewrap pins these entries as mount points and
-/// Seatbelt's path rules deny recreating them.
 pub fn repair_workspace_metadata(project_path: &Path) -> Vec<String> {
-    #[cfg(windows)]
-    return crate::windows_sandbox::guard::repair_active(&crate::windows_sandbox::plan::normalize_path(project_path));
-    #[cfg(not(windows))]
-    {
-        let _ = project_path;
-        Vec::new()
+    crate::metadata_guard::repair_active(&crate::metadata_guard::workspace_root(project_path))
+}
+
+/// Whether commands under `spec` get a [`crate::metadata_guard`]: every
+/// sandboxed `workspace-write` command (read-only ones cannot create files).
+fn guards_metadata(spec: Option<&SandboxSpec>) -> bool {
+    spec.is_some_and(|spec| spec.mode == SandboxMode::WorkspaceWrite)
+}
+
+/// Starts the metadata guard for a wrapped (macOS / Linux) command.
+pub fn start_metadata_guard(
+    spec: Option<&SandboxSpec>,
+) -> Option<(std::sync::Arc<crate::metadata_guard::MetadataGuard>, Vec<String>)> {
+    guards_metadata(spec).then(|| {
+        let root = crate::metadata_guard::workspace_root(&spec.expect("guarded spec").project_path);
+        crate::metadata_guard::start_command(&root)
+    })
+}
+
+/// Checks a wrapped command's guard after its process (group leader
+/// `pid`) exited; background members of the group are waited for.
+pub fn finish_metadata_guard(guard: &std::sync::Arc<crate::metadata_guard::MetadataGuard>, pid: Option<u32>) -> Vec<String> {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        return crate::metadata_guard::check_after_exit(guard, move || crate::metadata_guard::process_group_alive(pid));
     }
+    let _ = pid;
+    crate::metadata_guard::finish(guard)
 }
 
 fn canonical_or(path: &Path) -> String {
@@ -421,6 +474,8 @@ pub fn build_macos_seatbelt_profile_and_params(
 (allow file-write* (subpath "/private/var/folders"))
 (deny file-write* (subpath (param "GIT_HOOKS_DIR")))
 (deny file-write* (literal (param "GIT_CONFIG_FILE")))
+(deny file-write* (literal (param "GIT_COMMONDIR_FILE")))
+(deny file-write* (literal (param "GIT_CONFIG_WORKTREE_FILE")))
 (deny file-write* (subpath (param "LOCAGENS_CONFIG_DIR")))
 "#,
         );
@@ -436,6 +491,8 @@ pub fn build_macos_seatbelt_profile_and_params(
         params.push(("PROJECT_ROOT".to_string(), root.clone()));
         params.push(("GIT_HOOKS_DIR".to_string(), format!("{root}/.git/hooks")));
         params.push(("GIT_CONFIG_FILE".to_string(), format!("{root}/.git/config")));
+        params.push(("GIT_COMMONDIR_FILE".to_string(), format!("{root}/.git/commondir")));
+        params.push(("GIT_CONFIG_WORKTREE_FILE".to_string(), format!("{root}/.git/config.worktree")));
         params.push(("LOCAGENS_CONFIG_DIR".to_string(), format!("{root}/.locagens")));
     }
 
@@ -745,6 +802,7 @@ mod tests {
         let (root, spec) = temp_spec("bwrap-git");
         std::fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
         std::fs::write(root.join(".git").join("config"), "[core]\n").unwrap();
+        std::fs::write(root.join(".git").join("commondir"), ".").unwrap();
         let (_, out) = build_linux_bwrap_args(Path::new("/usr/bin/bwrap"), &spec, "sh", &[]);
         let canonical = canonical_or(&root);
         let bind_of = |flag: &str, relative: &str| {
@@ -755,6 +813,8 @@ mod tests {
         let hooks = bind_of("--ro-bind", ".git/hooks").expect("hooks stay read-only");
         assert!(git < hooks, "the .git mount comes before the carve-outs inside it");
         assert!(bind_of("--ro-bind", ".git/config").is_some());
+        assert!(bind_of("--ro-bind", ".git/commondir").is_some(), "an existing commondir is read-only");
+        assert!(bind_of("--ro-bind", ".git/config.worktree").is_none(), "absent: left to the metadata guard");
         assert!(bind_of("--ro-bind", ".locagens").is_some(), "{out:?}");
         assert!(root.join(".locagens").is_dir(), ".locagens is pre-created");
         let _ = std::fs::remove_dir_all(&root);
@@ -809,6 +869,8 @@ mod tests {
         assert!(profile.contains("(allow file-write* (subpath (param \"PROJECT_ROOT\")))"));
         assert!(profile.contains("(deny file-write* (subpath (param \"GIT_HOOKS_DIR\")))"));
         assert!(profile.contains("(deny file-write* (literal (param \"GIT_CONFIG_FILE\")))"));
+        assert!(profile.contains("(deny file-write* (literal (param \"GIT_COMMONDIR_FILE\")))"));
+        assert!(profile.contains("(deny file-write* (literal (param \"GIT_CONFIG_WORKTREE_FILE\")))"));
         assert!(profile.contains("(deny file-write* (subpath (param \"LOCAGENS_CONFIG_DIR\")))"));
         assert!(profile.contains("(allow network-outbound (remote unix-socket))"));
         assert!(!profile.contains("(allow network-outbound)\n"));

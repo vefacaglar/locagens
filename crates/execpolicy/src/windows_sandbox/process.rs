@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::acl;
-use super::guard::{self, MetadataGuard};
+use crate::metadata_guard::{self, MetadataGuard};
 use super::job::JobObject;
 use super::plan::{build_plan, normalize_path, strip_verbatim_prefix, TokenMode, WindowsSandboxPlan};
 use super::token::{create_restricted_token, to_wide, LocalSid, LOW_INTEGRITY_SID, MEDIUM_INTEGRITY_SID};
@@ -110,15 +110,14 @@ pub fn spawn_sandboxed(spec: &SandboxSpec, request: &SpawnRequest) -> Result<San
     }
     let root = normalize_path(&spec.project_path);
     // Repair what earlier commands replaced before taking the new baseline.
-    let earlier_violations = guard::check_workspace(&root);
-    let guard = guard::start(&root, &plan.guarded_paths);
+    let (guard, earlier_violations) = metadata_guard::start_command(&root);
     match create_process(&token, request, &env, Arc::clone(&guard)) {
         Ok(mut child) => {
             child.earlier_violations = earlier_violations;
             Ok(child)
         }
         Err(err) => {
-            guard::check_after_kill(&guard);
+            metadata_guard::finish(&guard);
             Err(format!("Windows sandbox: cannot start the sandboxed process: {err}"))
         }
     }

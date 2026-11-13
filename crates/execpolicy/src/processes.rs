@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 
+use crate::metadata_guard::MetadataGuard;
+
 /// Options controlling how a child process is spawned.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
@@ -591,9 +593,14 @@ impl ProcessManager {
             cmd.env(key, value);
         }
 
+        let guard = crate::sandbox::start_metadata_guard(options.sandbox.as_ref());
         match cmd.spawn() {
             Ok(mut child) => {
                 let pid = child.id();
+                let guard = guard.map(|(guard, earlier)| {
+                    self.log_violations(id, &earlier);
+                    guard
+                });
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let stdin = if options.stdin_pipe {
@@ -630,10 +637,13 @@ impl ProcessManager {
                 let this = Arc::clone(self);
                 let id_owned = id.to_string();
                 tokio::spawn(async move {
-                    this.wait_for_exit(&id_owned, child).await;
+                    this.wait_for_exit(&id_owned, child, guard).await;
                 });
             }
             Err(err) => {
+                if let Some((guard, _)) = &guard {
+                    crate::metadata_guard::finish(guard);
+                }
                 let managed_arc = self.get_arc(id).unwrap();
                 let mut m = managed_arc
                     .lock()
@@ -720,10 +730,15 @@ impl ProcessManager {
             });
         }
 
+        let guard = crate::sandbox::start_metadata_guard(options.sandbox.as_ref());
         match cmd.spawn() {
             Ok(mut child) => {
                 let pid = child.id();
                 unsafe { libc::close(slave_fd) };
+                let guard = guard.map(|(guard, earlier)| {
+                    self.log_violations(id, &earlier);
+                    guard
+                });
 
                 // Writer task: stdin writes flow through an unbounded channel
                 // into the PTY master from a dedicated blocking thread.
@@ -780,6 +795,9 @@ impl ProcessManager {
                 let id_owned = id.to_string();
                 std::thread::spawn(move || {
                     let code = child.wait().ok().and_then(|status| status.code());
+                    if let Some(guard) = guard {
+                        this.log_violations(&id_owned, &crate::sandbox::finish_metadata_guard(&guard, Some(pid)));
+                    }
                     this.finish_exit(&id_owned, code);
                 });
 
@@ -788,6 +806,9 @@ impl ProcessManager {
                 unsafe { libc::close(master_fd) };
             }
             Err(err) => {
+                if let Some((guard, _)) = &guard {
+                    crate::metadata_guard::finish(guard);
+                }
                 unsafe {
                     libc::close(slave_fd);
                     libc::close(master_fd);
@@ -801,6 +822,13 @@ impl ProcessManager {
                 drop(m);
                 self.append_log(id, "system", &format!("[Failed to spawn process: {err}]"));
             }
+        }
+    }
+
+    /// Logs the metadata guard's repairs, if any, as a loud system note.
+    fn log_violations(&self, id: &str, reports: &[String]) {
+        if !reports.is_empty() {
+            self.append_log(id, "system", &crate::sandbox::sandbox_violation_note(reports));
         }
     }
 
@@ -847,9 +875,13 @@ impl ProcessManager {
         });
     }
 
-    async fn wait_for_exit(self: Arc<Self>, id: &str, mut child: Child) {
+    async fn wait_for_exit(self: Arc<Self>, id: &str, mut child: Child, guard: Option<Arc<MetadataGuard>>) {
+        let pid = child.id();
         let status = child.wait().await.ok();
         let code = status.and_then(|s| s.code());
+        if let Some(guard) = guard {
+            self.log_violations(id, &crate::sandbox::finish_metadata_guard(&guard, pid));
+        }
         if let Some(managed) = self.get_arc(id) {
             let mut m = managed.lock().expect("managed process poisoned");
             // A manual kill already marked the process stopped; only record the

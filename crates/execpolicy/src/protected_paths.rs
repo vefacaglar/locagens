@@ -35,11 +35,20 @@ impl ProtectedPath {
 
 /// Paths sandboxed commands may never write in `workspace-write`:
 /// `.locagens` (hooks.json, mcp.json, rules, agent roles, plugins) and git
-/// hooks and config (run by the user's next git command).
-pub const SANDBOX_PROTECTED_PATHS: [ProtectedPath; 3] = [
+/// hooks and config (run by the user's next git command). `commondir`
+/// redirects git to another directory's `config` and `hooks` (verified:
+/// git honours it in a main repository, so a planted one runs a foreign
+/// `core.fsmonitor` on the next `git status`); `config.worktree` is extra
+/// config once `extensions.worktreeConfig` is set. Both usually do not
+/// exist, so the backends must also stop them from being created.
+/// (`.git/info/attributes` is left out: attributes only name filter / diff
+/// drivers, whose commands live in config.)
+pub const SANDBOX_PROTECTED_PATHS: [ProtectedPath; 5] = [
     ProtectedPath { relative: ".locagens", kind: ProtectedKind::Subtree, pre_create: true },
     ProtectedPath { relative: ".git/hooks", kind: ProtectedKind::Subtree, pre_create: false },
     ProtectedPath { relative: ".git/config", kind: ProtectedKind::File, pre_create: false },
+    ProtectedPath { relative: ".git/commondir", kind: ProtectedKind::File, pre_create: false },
+    ProtectedPath { relative: ".git/config.worktree", kind: ProtectedKind::File, pre_create: false },
 ];
 
 /// Extra top-level entries the file tools protect. Commands must keep
@@ -102,6 +111,8 @@ mod tests {
         for path in [
             ".git/hooks/pre-commit",
             ".git/config",
+            ".git/commondir",
+            ".git/config.worktree",
             ".git/modules/sub/hooks/post-checkout",
             ".git",
             ".locagens/hooks.json",

@@ -52,10 +52,6 @@ pub struct WindowsSandboxPlan {
     pub create_dirs: Vec<PathBuf>,
     /// `TEMP` / `TMP` for the child (the private sandbox temp dir).
     pub temp_dir: Option<PathBuf>,
-    /// Entries whose identity is checked after the command
-    /// (`guard::MetadataGuard`): `.git` when it exists, then the protected
-    /// paths. Parents come before their children.
-    pub guarded_paths: Vec<PathBuf>,
 }
 
 /// Builds the plan for one command. An error means the sandbox must refuse
@@ -88,8 +84,6 @@ pub fn build_plan(
             secret_read_paths: unreadable_secrets(secret_paths, std::slice::from_ref(&root)),
             create_dirs: Vec::new(),
             temp_dir: None,
-            // Without any grant the command cannot create a replacement.
-            guarded_paths: Vec::new(),
         });
     }
 
@@ -114,9 +108,6 @@ pub fn build_plan(
         }
     }
 
-    let git_dir = root.join(".git");
-    let guarded_paths: Vec<PathBuf> =
-        git_dir.exists().then_some(git_dir).into_iter().chain(deny_write_paths.iter().cloned()).collect();
     let writable_roots: Vec<PathBuf> = [root, temp_dir.clone()]
         .into_iter()
         .chain(
@@ -138,7 +129,6 @@ pub fn build_plan(
         secret_read_paths,
         create_dirs,
         temp_dir: Some(temp_dir),
-        guarded_paths,
     })
 }
 
@@ -238,6 +228,8 @@ mod tests {
         let root = temp_workspace("ww");
         std::fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
         std::fs::write(root.join(".git").join("config"), "[core]\n").unwrap();
+        // An existing commondir is protected like config.
+        std::fs::write(root.join(".git").join("commondir"), ".").unwrap();
         let temp_base = std::env::temp_dir();
 
         let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &temp_base, &[], &[]).unwrap();
@@ -251,19 +243,11 @@ mod tests {
             vec![
                 root.join(".locagens"),
                 root.join(".git").join("hooks"),
-                root.join(".git").join("config")
+                root.join(".git").join("config"),
+                root.join(".git").join("commondir")
             ]
         );
         assert_eq!(plan.create_dirs, vec![temp_dir, root.join(".locagens")]);
-        assert_eq!(
-            plan.guarded_paths,
-            vec![
-                root.join(".git"),
-                root.join(".locagens"),
-                root.join(".git").join("hooks"),
-                root.join(".git").join("config")
-            ]
-        );
         assert!(plan.capability_sid.starts_with("S-1-5-21-"));
         assert_eq!(plan.capability_sid.split('-').count(), 8);
 
@@ -275,7 +259,6 @@ mod tests {
         let root = temp_workspace("nogit");
         let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir(), &[], &[]).unwrap();
         assert_eq!(plan.deny_write_paths, vec![root.join(".locagens")]);
-        assert_eq!(plan.guarded_paths, vec![root.join(".locagens")]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
