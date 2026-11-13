@@ -84,9 +84,64 @@ pub struct Endpoint {
     pub max_tokens: Option<i64>,
     /// Whether the model accepts a `reasoning_effort` parameter.
     pub reasoning_supported: bool,
+    /// Provider-specific request differences (headers, URLs, body fields).
+    pub quirk: ProviderQuirk,
+}
+
+/// Providers whose requests differ from the plain protocol.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProviderQuirk {
+    #[default]
+    None,
+    /// GitHub Copilot: editor identity headers, bearer auth for every API,
+    /// no `/v1` prefix on its chat and Responses URLs.
+    GithubCopilot,
+    /// "Sign in with ChatGPT" token against `api.openai.com/v1`: the
+    /// Responses body must be `store: false` without `max_output_tokens`.
+    ChatgptOauth,
+}
+
+const OPENAI_API_URL: &str = "https://api.openai.com/v1";
+
+impl ProviderQuirk {
+    /// Detects the quirk from the resolved provider, base URL and credential.
+    /// ChatGPT sign-in is `openai` on exactly `api.openai.com/v1` with a
+    /// bearer that is not an `sk-` API key (pi's detection).
+    pub fn detect(provider_id: &str, base_url: &str, api_key: &str) -> Self {
+        if provider_id == "github-copilot" {
+            Self::GithubCopilot
+        } else if provider_id == "openai"
+            && base_url.trim_end_matches('/') == OPENAI_API_URL
+            && !api_key.starts_with("sk-")
+        {
+            Self::ChatgptOauth
+        } else {
+            Self::None
+        }
+    }
 }
 
 impl Endpoint {
+    /// `{base}/messages`; Copilot serves Anthropic Messages at `/v1/messages`.
+    fn messages_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if self.quirk == ProviderQuirk::GithubCopilot {
+            format!("{base}/v1/messages")
+        } else {
+            format!("{base}/messages")
+        }
+    }
+
+    /// The Responses URL; Copilot has no `/v1` prefix.
+    fn responses_endpoint_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if self.quirk == ProviderQuirk::GithubCopilot {
+            format!("{base}/responses")
+        } else {
+            responses_url(base)
+        }
+    }
+
     pub fn is_anthropic(&self) -> bool {
         self.api == "anthropic"
             || self.api == "anthropic-messages"
@@ -396,11 +451,19 @@ fn apply_provider_headers(
     mut request: reqwest::RequestBuilder,
     endpoint: &Endpoint,
     base_url: &str,
+    quirk_headers: &[(&'static str, &'static str)],
 ) -> reqwest::RequestBuilder {
+    for (name, value) in quirk_headers {
+        request = request.header(*name, *value);
+    }
     if endpoint.is_anthropic() {
-        request = request
-            .header("x-api-key", &endpoint.api_key)
-            .header("anthropic-version", "2023-06-01");
+        // Copilot authenticates Anthropic requests with a bearer token too.
+        request = if endpoint.quirk == ProviderQuirk::GithubCopilot {
+            request.bearer_auth(&endpoint.api_key)
+        } else {
+            request.header("x-api-key", &endpoint.api_key)
+        };
+        request = request.header("anthropic-version", "2023-06-01");
     } else {
         if !endpoint.api_key.is_empty() {
             request = request.bearer_auth(&endpoint.api_key);
@@ -414,6 +477,21 @@ fn apply_provider_headers(
         }
     }
     request
+}
+
+/// Headers a provider quirk adds to every request: Copilot's editor identity
+/// plus who initiated the call and whether it carries images.
+fn quirk_headers(endpoint: &Endpoint, messages: &[LlmMessage]) -> Vec<(&'static str, &'static str)> {
+    if endpoint.quirk != ProviderQuirk::GithubCopilot {
+        return Vec::new();
+    }
+    let last_is_user = messages.last().map_or(true, |message| message.role == "user");
+    let has_images = messages
+        .iter()
+        .any(|message| message.role == "tool" && extract_tool_image(&message.content).is_some());
+    let mut headers = locagens_config::oauth::github_copilot::COPILOT_HEADERS.to_vec();
+    headers.extend(locagens_config::oauth::github_copilot::dynamic_headers(last_is_user, has_images));
+    headers
 }
 
 /// Total send attempts per request (1 initial call + 3 retries).
@@ -518,9 +596,10 @@ pub async fn stream_chat(
         request_body["stream_options"] = json!({ "include_usage": true });
     }
 
+    let extra_headers = quirk_headers(endpoint, messages);
     let response = send_with_retry(|| {
         let request = http.post(&url);
-        apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+        apply_provider_headers(request, endpoint, &base_url, &extra_headers).json(&request_body)
     })
     .await?;
 
@@ -532,7 +611,7 @@ pub async fn stream_chat(
             request_body.as_object_mut().unwrap().remove("stream_options");
             let retry = send_with_retry(|| {
                 let request = http.post(&url);
-                apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+                apply_provider_headers(request, endpoint, &base_url, &extra_headers).json(&request_body)
             })
             .await?;
             let retry_status = retry.status();
@@ -715,12 +794,12 @@ fn build_request(
     let base_url = endpoint.base_url.trim_end_matches('/');
     if endpoint.is_anthropic() {
         (
-            format!("{base_url}/messages"),
+            endpoint.messages_url(),
             anthropic_body(endpoint, system, messages, tools),
         )
     } else if endpoint.is_openai_responses() {
         (
-            responses_url(base_url),
+            endpoint.responses_endpoint_url(),
             build_responses_body(endpoint, system, messages, tools),
         )
     } else {
@@ -782,6 +861,10 @@ fn build_responses_body(
     let mut body = Map::new();
     body.insert("model".into(), json!(endpoint.model));
     body.insert("stream".into(), json!(true));
+    if endpoint.quirk == ProviderQuirk::ChatgptOauth {
+        // ChatGPT sign-in tokens: nothing is stored server side.
+        body.insert("store".into(), json!(false));
+    }
     if !system.trim().is_empty() {
         body.insert("instructions".into(), json!(system));
     }
@@ -865,7 +948,9 @@ fn build_responses_body(
             body.insert("reasoning".into(), json!({ "effort": effort }));
         }
     }
-    if let Some(max_tokens) = endpoint.max_tokens.filter(|t| *t > 0) {
+    // ChatGPT sign-in tokens reject `max_output_tokens`; the prompt-cache
+    // fields and `configuration_update` items pi omits are never built here.
+    if let Some(max_tokens) = endpoint.max_tokens.filter(|t| *t > 0 && endpoint.quirk != ProviderQuirk::ChatgptOauth) {
         body.insert("max_output_tokens".into(), json!(max_tokens));
     }
     Value::Object(body)
@@ -900,11 +985,12 @@ pub async fn stream_openai_responses(
         anyhow::bail!("No baseUrl configured for provider endpoint");
     }
 
-    let url = responses_url(&base_url);
+    let url = endpoint.responses_endpoint_url();
     let request_body = build_responses_body(endpoint, system, messages, tools);
+    let extra_headers = quirk_headers(endpoint, messages);
     let response = send_with_retry(|| {
         let request = http.post(&url);
-        apply_provider_headers(request, endpoint, &base_url).json(&request_body)
+        apply_provider_headers(request, endpoint, &base_url, &extra_headers).json(&request_body)
     })
     .await?;
 
@@ -1258,6 +1344,7 @@ mod tests {
             reasoning_effort: Some("high".into()),
             max_tokens: None,
             reasoning_supported: true,
+            quirk: ProviderQuirk::None,
         };
         let messages = vec![
             LlmMessage { role: "user".into(), content: "do it".into(), ..Default::default() },
@@ -1308,6 +1395,7 @@ mod tests {
             reasoning_effort: Some("high".into()),
             max_tokens: Some(1024),
             reasoning_supported: true,
+            quirk: ProviderQuirk::None,
         };
         let messages = vec![
             LlmMessage { role: "user".into(), content: "do it".into(), ..Default::default() },
@@ -1559,5 +1647,110 @@ mod tests {
         .unwrap();
         assert_eq!(event["type"], "response.output_text.delta");
         assert_eq!(event["delta"], "Hi");
+    }
+
+    fn quirk_endpoint(quirk: ProviderQuirk, api: &str, base_url: &str) -> Endpoint {
+        Endpoint {
+            base_url: base_url.into(),
+            api: api.into(),
+            api_key: "token-secret".into(),
+            model: "m".into(),
+            max_tokens: Some(4096),
+            quirk,
+            ..Default::default()
+        }
+    }
+
+    fn built_headers(endpoint: &Endpoint, messages: &[LlmMessage]) -> reqwest::header::HeaderMap {
+        let request = reqwest::Client::new().post("http://localhost/x");
+        let extra = quirk_headers(endpoint, messages);
+        apply_provider_headers(request, endpoint, endpoint.base_url.trim_end_matches('/'), &extra)
+            .build()
+            .unwrap()
+            .headers()
+            .clone()
+    }
+
+    #[test]
+    fn quirk_detection_follows_provider_base_url_and_key() {
+        let openai = "https://api.openai.com/v1";
+        assert_eq!(ProviderQuirk::detect("github-copilot", "https://x", "t"), ProviderQuirk::GithubCopilot);
+        assert_eq!(ProviderQuirk::detect("openai", openai, "eyJhbGciOi"), ProviderQuirk::ChatgptOauth);
+        assert_eq!(ProviderQuirk::detect("openai", "https://api.openai.com/v1/", "eyJ"), ProviderQuirk::ChatgptOauth);
+        assert_eq!(ProviderQuirk::detect("openai", openai, "sk-proj-123"), ProviderQuirk::None);
+        assert_eq!(ProviderQuirk::detect("openai", "https://proxy.example/v1", "eyJ"), ProviderQuirk::None);
+        assert_eq!(ProviderQuirk::detect("xai", openai, "eyJ"), ProviderQuirk::None);
+    }
+
+    #[test]
+    fn chatgpt_oauth_body_is_stateless_without_max_output_tokens() {
+        let plain = quirk_endpoint(ProviderQuirk::None, "openai-responses", "https://api.openai.com/v1");
+        let body = build_responses_body(&plain, "sys", &[], &[]);
+        assert_eq!(body["max_output_tokens"], 4096);
+        assert!(body.get("store").is_none(), "API-key behavior is unchanged");
+
+        let chatgpt = quirk_endpoint(ProviderQuirk::ChatgptOauth, "openai-responses", "https://api.openai.com/v1");
+        let body = build_responses_body(&chatgpt, "sys", &[], &[]);
+        assert_eq!(body["store"], false);
+        for omitted in ["max_output_tokens", "prompt_cache_retention", "prompt_cache_options", "configuration_update"] {
+            assert!(body.get(omitted).is_none(), "{omitted}");
+        }
+        assert!(body["input"].as_array().unwrap().iter().all(|item| item["type"] != "configuration_update"));
+        assert_eq!(body["instructions"], "sys");
+        assert_eq!(chatgpt.responses_endpoint_url(), "https://api.openai.com/v1/responses");
+        assert_eq!(built_headers(&chatgpt, &[])["authorization"], "Bearer token-secret");
+    }
+
+    #[test]
+    fn copilot_urls_have_no_version_prefix_except_messages() {
+        let base = "https://api.individual.githubcopilot.com";
+        let completions = quirk_endpoint(ProviderQuirk::GithubCopilot, "openai-completions", base);
+        assert_eq!(build_request(&completions, "", &[], &[]).0, format!("{base}/chat/completions"));
+        let responses = quirk_endpoint(ProviderQuirk::GithubCopilot, "openai-responses", base);
+        assert_eq!(build_request(&responses, "", &[], &[]).0, format!("{base}/responses"));
+        let messages = quirk_endpoint(ProviderQuirk::GithubCopilot, "anthropic-messages", base);
+        assert_eq!(build_request(&messages, "", &[], &[]).0, format!("{base}/v1/messages"));
+        // Other providers keep their URLs.
+        let anthropic = quirk_endpoint(ProviderQuirk::None, "anthropic", "https://api.anthropic.com/v1");
+        assert_eq!(build_request(&anthropic, "", &[], &[]).0, "https://api.anthropic.com/v1/messages");
+        let openai = quirk_endpoint(ProviderQuirk::None, "openai-responses", "https://codex.example.com");
+        assert_eq!(build_request(&openai, "", &[], &[]).0, "https://codex.example.com/v1/responses");
+    }
+
+    #[test]
+    fn copilot_headers_identify_the_editor_and_the_initiator() {
+        let endpoint = quirk_endpoint(ProviderQuirk::GithubCopilot, "openai-completions", "https://api.individual.githubcopilot.com");
+        let user_turn = vec![LlmMessage { role: "user".into(), content: "hi".into(), ..Default::default() }];
+        let headers = built_headers(&endpoint, &user_turn);
+        assert_eq!(headers["authorization"], "Bearer token-secret");
+        assert_eq!(headers["user-agent"], "GitHubCopilotChat/0.35.0");
+        assert_eq!(headers["editor-version"], "vscode/1.107.0");
+        assert_eq!(headers["editor-plugin-version"], "copilot-chat/0.35.0");
+        assert_eq!(headers["copilot-integration-id"], "vscode-chat");
+        assert_eq!(headers["x-initiator"], "user");
+        assert_eq!(headers["openai-intent"], "conversation-edits");
+        assert!(headers.get("copilot-vision-request").is_none());
+
+        let agent_turn = vec![
+            user_turn[0].clone(),
+            LlmMessage { role: "tool".into(), content: "done".into(), tool_call_id: Some("c1".into()), ..Default::default() },
+        ];
+        assert_eq!(built_headers(&endpoint, &agent_turn)["x-initiator"], "agent");
+        let with_image = vec![view_image_message()];
+        assert_eq!(built_headers(&endpoint, &with_image)["copilot-vision-request"], "true");
+    }
+
+    #[test]
+    fn copilot_anthropic_requests_use_a_bearer_not_an_api_key() {
+        let endpoint = quirk_endpoint(ProviderQuirk::GithubCopilot, "anthropic-messages", "https://api.individual.githubcopilot.com");
+        let headers = built_headers(&endpoint, &[]);
+        assert_eq!(headers["authorization"], "Bearer token-secret");
+        assert_eq!(headers["anthropic-version"], "2023-06-01");
+        assert!(headers.get("x-api-key").is_none());
+
+        let anthropic = quirk_endpoint(ProviderQuirk::None, "anthropic", "https://api.anthropic.com/v1");
+        let headers = built_headers(&anthropic, &[]);
+        assert_eq!(headers["x-api-key"], "token-secret");
+        assert!(headers.get("authorization").is_none() && headers.get("user-agent").is_none());
     }
 }

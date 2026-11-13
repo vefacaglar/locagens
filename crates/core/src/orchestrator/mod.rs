@@ -397,6 +397,11 @@ async fn resolve_endpoint(
     if let Some(model_api) = info.as_ref().and_then(|info| info.api.clone()).filter(|api| !api.is_empty()) {
         api = model_api;
     }
+    let quirk = llm::ProviderQuirk::detect(provider_id, &base_url, &api_key);
+    if quirk == llm::ProviderQuirk::GithubCopilot {
+        // The chat endpoint depends on the account: it is part of the token.
+        base_url = pm.copilot_base_url(&api_key);
+    }
     Ok(llm::Endpoint {
         base_url,
         api,
@@ -406,6 +411,7 @@ async fn resolve_endpoint(
         reasoning_effort: reasoning_effort.filter(|e| !e.is_empty()).map(str::to_string),
         max_tokens: info.as_ref().and_then(|info| info.max_tokens),
         reasoning_supported: reasoning_supported(model, info.as_ref()),
+        quirk,
     })
 }
 

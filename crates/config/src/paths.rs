@@ -149,6 +149,18 @@ pub fn codex_home() -> PathBuf {
     home_dir().join(".codex")
 }
 
+/// OpenCode's data directory: `$XDG_DATA_HOME/opencode`, else
+/// `~/.local/share/opencode` (OpenCode uses this path on every platform,
+/// Windows included). Its `auth.json` is a read-only credential fallback.
+pub fn opencode_data_dir() -> PathBuf {
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local").join("share"));
+    data_home.join("opencode")
+}
+
 /// `~/.codex/auth.json`.
 pub fn codex_auth_path() -> PathBuf {
     codex_home().join("auth.json")

@@ -3,12 +3,37 @@
 //! Cancellation: drop the returned future.
 
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::Instant;
 
 const TIMEOUT_MESSAGE: &str = "Device flow timed out";
 const SLOW_DOWN_TIMEOUT_MESSAGE: &str = "Device flow timed out after one or more slow_down responses. This is often caused by clock drift in WSL or VM environments. Please sync or restart the VM clock and try again.";
+
+/// A started device authorization. Show `user_code` and `verification_uri`
+/// to the user, then pass the session back to the provider's `poll`. The
+/// device code stays private and is redacted from `Debug` output.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeviceCodeSession {
+    pub user_code: String,
+    /// `verification_uri_complete` when the server sent one.
+    pub verification_uri: String,
+    pub interval_secs: Option<f64>,
+    pub expires_in_secs: f64,
+    pub(crate) device_code: String,
+    /// GitHub Enterprise domain (Copilot only).
+    pub(crate) enterprise_domain: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceCodeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCodeSession")
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Outcome of one poll request.
 pub enum PollStep<T> {

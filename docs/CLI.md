@@ -133,6 +133,10 @@ lcgn auth                       # provider table (id, name, sign-in method, stat
 lcgn auth login                 # numbered table; on a terminal, prompts for number or id
 lcgn auth login opencode-go [--api-key <key>]
 lcgn auth login xai             # OAuth device login (SuperGrok / X Premium)
+lcgn auth login openai          # Sign in with ChatGPT (browser + loopback redirect)
+lcgn auth login github-copilot  # GitHub device login (asks for an Enterprise domain on a terminal)
+lcgn auth login openrouter      # Sign in with OpenRouter (browser + loopback redirect)
+lcgn auth login kimi-coding     # Kimi Code device login
 lcgn auth logout opencode-go
 lcgn auth check                 # exit 0 ready / 1 not ready
 lcgn auth check --provider opencode-go --json
@@ -147,6 +151,27 @@ your browser (https only), and waits for approval (Ctrl+C cancels). The OAuth
 credential is written to `~/.locagens/auth.json` in pi's format
 (`type: "oauth"`, `access`, `refresh`, `expires`) and refreshed automatically
 before it expires. Pass `--api-key` to store an API key instead.
+
+Two OAuth flows exist, and the `sign-in` column of `lcgn auth` lists every
+provider that has one:
+
+- **Device code** (`xai`, `github-copilot`, `kimi-coding`): `lcgn` prints a URL
+  and a code and waits for approval.
+- **Authorization URL** (`openai`, `openrouter`): `lcgn` prints a URL, opens it,
+  and waits for the browser to be redirected to a loopback server on
+  `127.0.0.1` (`openai` needs port 1455 free; `openrouter` picks a free port).
+  On a terminal you can instead paste the final redirect URL (or, for
+  OpenRouter, the code) and press Enter, for a browser on another machine.
+  Ctrl+C cancels.
+
+Notes per provider: `openai` ("Sign in with ChatGPT") switches the `openai`
+provider to the Responses API with the ChatGPT model list; an API key set with
+`--api-key` keeps the normal behavior. `github-copilot` stores the Copilot token
+plus the GitHub token used to renew it, offers only the models your account may
+use, and picks the API host from the token. `openrouter` stores a permanent API
+key (never refreshed). OpenCode's `~/.local/share/opencode/auth.json`
+(`$XDG_DATA_HOME/opencode/auth.json`) is also read, API keys only, below every
+other source and never written.
 `lcgn auth check` reports OAuth credentials as valid/expired (never the
 tokens). Only providers you have configured (credential in `auth.json`, the
 provider's own env var, or an entry in `models.json` / Codex `config.toml`)
@@ -189,5 +214,6 @@ Per-run files under `sessions/<run_id>/` are private and need no locking.
 `lcgn auth login` stores credentials in `~/.locagens/auth.json`
 (`$LOCAGENS_HOME`). Reads fall back to Codex's `~/.codex/auth.json`
 (`OPENAI_API_KEY`, `config.toml` `[model_providers.*]`) and the legacy
-`~/.pi/agent/auth.json` / `models.json`, so existing credentials on the
-machine keep working out of the box.
+`~/.pi/agent/auth.json` / `models.json`, plus OpenCode's `auth.json` (API
+keys only, lowest precedence), so existing credentials on the machine keep
+working out of the box.

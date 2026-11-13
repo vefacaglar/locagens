@@ -142,6 +142,7 @@ fn AuthTab() -> Element {
     let accounts: Signal<Vec<Value>> = use_signal(Vec::new);
     let pending: Signal<Option<OAuthLoginStart>> = use_signal(|| None);
     let login_task: Signal<Option<dioxus::core::Task>> = use_signal(|| None);
+    let mut pasted_redirect = use_signal(String::new);
     let store: UiStore = use_context();
     use_effect(move || reload_accounts(accounts));
 
@@ -165,13 +166,17 @@ fn AuthTab() -> Element {
                 class: "settings-row",
                 div {
                     class: "grow",
-                    div { "Enter this code on the sign-in page:" }
-                    div { class: "mono", style: "font-size:20px;font-weight:600", "{start.user_code}" }
-                    div { class: "mono", style: "font-size:11px", "{start.verification_uri}" }
+                    if let Some(code) = start.user_code.clone() {
+                        div { "Enter this code on the sign-in page:" }
+                        div { class: "mono", style: "font-size:20px;font-weight:600", "{code}" }
+                    } else {
+                        div { "Complete the sign-in in your browser. It returns here automatically." }
+                    }
+                    div { class: "mono", style: "font-size:11px", "{start.url_to_open()}" }
                 }
                 button {
                     onclick: {
-                        let url = start.verification_uri.clone();
+                        let url = start.url_to_open().to_string();
                         move |_| {
                             if let Err(err) = locagens_core::api::providers::open_verification_url(&url) {
                                 store.toast(format!("{err}"));
@@ -191,6 +196,25 @@ fn AuthTab() -> Element {
                         pending.set(None);
                     },
                     "Cancel"
+                }
+            }
+            if start.auth_url.is_some() {
+                div {
+                    class: "settings-row",
+                    input {
+                        class: "grow",
+                        placeholder: "Browser on another machine? Paste the final redirect URL here…",
+                        value: "{pasted_redirect.read()}",
+                        oninput: move |event| pasted_redirect.set(event.value()),
+                    }
+                    button {
+                        disabled: pasted_redirect.read().trim().is_empty(),
+                        onclick: {
+                            let start = start.clone();
+                            move |_| submit_pasted_redirect(start.clone(), pasted_redirect, accounts, pending, login_task, store)
+                        },
+                        "Submit"
+                    }
                 }
             }
         }
@@ -220,7 +244,39 @@ fn reload_accounts(accounts: Signal<Vec<Value>>) {
     });
 }
 
-/// Requests a device code, shows it, then waits for approval in the background.
+/// Manual fallback of an authorization-URL login: completes it with the
+/// redirect URL the user pasted and stops the background wait.
+fn submit_pasted_redirect(
+    start: OAuthLoginStart,
+    pasted_redirect: Signal<String>,
+    accounts: Signal<Vec<Value>>,
+    pending: Signal<Option<OAuthLoginStart>>,
+    login_task: Signal<Option<dioxus::core::Task>>,
+    store: UiStore,
+) {
+    let mut pasted_redirect = pasted_redirect;
+    let mut pending = pending;
+    let mut login_task = login_task;
+    let pasted = pasted_redirect.read().trim().to_string();
+    spawn(async move {
+        let state = core();
+        match locagens_core::api::providers::submit_oauth_redirect(&state, &start, &pasted).await {
+            Ok(()) => {
+                if let Some(task) = login_task.take() {
+                    task.cancel();
+                }
+                pending.set(None);
+                pasted_redirect.set(String::new());
+                store.toast("Signed in.".to_string());
+                reload_accounts(accounts);
+            }
+            Err(err) => store.toast(format!("Sign-in failed: {err}")),
+        }
+    });
+}
+
+/// Starts a sign-in (device code or authorization URL), shows what the user
+/// needs, then waits for the approval or redirect in the background.
 fn begin_oauth_login(
     provider_id: &'static str,
     accounts: Signal<Vec<Value>>,

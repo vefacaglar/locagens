@@ -9,22 +9,25 @@
 //! - `models-store.json` — cached dynamic model catalog.
 //!
 //! Read-only credential fallbacks: `~/.codex` (`$CODEX_HOME`: `auth.json`
-//! `OPENAI_API_KEY` and `config.toml` `[model_providers.*]`) and the legacy
-//! `~/.pi/agent` directory, so existing credentials keep working.
+//! `OPENAI_API_KEY` and `config.toml` `[model_providers.*]`), the legacy
+//! `~/.pi/agent` directory and OpenCode's `auth.json` (API keys only, lowest
+//! precedence), so existing credentials keep working.
 //!
 //! Plus Locagens UI metadata under the app-support dir:
 //! `locagens-providers-meta.json` (display names / model settings).
 
 use crate::oauth::auth_lock::AuthFileLock;
-use crate::oauth::xai::{DeviceCodeSession, XaiOAuth};
-use crate::oauth::{self, OAuthTokens};
+use crate::oauth::callback_server::{CallbackParams, CallbackServer};
+use crate::oauth::catalog::{self, CatalogModel};
+use crate::oauth::xai::XaiOAuth;
+use crate::oauth::{self, AuthUrlSession, LoginSession, OAuthClients, OAuthTokens};
 use crate::paths;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Sentinel sent by the UI so existing API keys are never overwritten.
 pub const PRESERVE_API_KEY: &str = "__LOCAGENS_PRESERVE_API_KEY__";
@@ -280,6 +283,8 @@ pub struct LoginProvider {
     pub name: String,
     /// `Some(label)` when OAuth sign-in is supported.
     pub oauth_label: Option<String>,
+    /// How the OAuth sign-in is completed (device code or authorization URL).
+    pub oauth_flow: Option<oauth::OAuthFlow>,
     /// Built-in API-key environment variable; `None` for keyless providers.
     pub api_key_env: Option<String>,
     pub status: LoginStatus,
@@ -373,6 +378,23 @@ const BUILTINS: &[BuiltinProvider] = &[
         env_var: "XAI_API_KEY",
     },
     BuiltinProvider {
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        base_url: "https://api.individual.githubcopilot.com",
+        api: "openai-compatible",
+        // Models come from the Copilot catalog (each with its own API).
+        models: &[],
+        env_var: "COPILOT_GITHUB_TOKEN",
+    },
+    BuiltinProvider {
+        id: "kimi-coding",
+        name: "Kimi Code",
+        base_url: "https://api.kimi.com/coding/v1",
+        api: "openai-compatible",
+        models: &[],
+        env_var: "KIMI_API_KEY",
+    },
+    BuiltinProvider {
         id: "ollama",
         name: "Ollama",
         base_url: "http://localhost:11434/v1",
@@ -414,6 +436,17 @@ fn codex_credential(key: &str, value: &Value) -> Vec<(String, Value)> {
     }
 }
 
+/// Maps an OpenCode `auth.json` entry (`{ "type": "api", "key": "..." }`)
+/// onto an api-key credential. OpenCode's other entry types (`oauth`,
+/// `wellknown`) are not shared.
+fn opencode_credential(value: &Value) -> Option<Value> {
+    if value.get("type").and_then(Value::as_str) != Some("api") {
+        return None;
+    }
+    let key = value.get("key").and_then(Value::as_str).map(str::trim).filter(|key| !key.is_empty())?;
+    Some(json!({ "type": "api_key", "key": key }))
+}
+
 /// True when a provider talks the Anthropic Messages API.
 fn is_anthropic(provider_id: &str, api: &str, base_url: &str) -> bool {
     api == "anthropic"
@@ -441,11 +474,16 @@ pub struct PiProviderManager {
     primary_dir: PathBuf,
     /// Read-only credential/config fallbacks: `~/.codex`, `~/.pi/agent`.
     fallback_dirs: Vec<PathBuf>,
+    /// OpenCode's data directory (`auth.json` with `type: "api"` keys). Read
+    /// only, and below every other source in precedence.
+    opencode_dir: Option<PathBuf>,
     app_support_dir: PathBuf,
     http: reqwest::Client,
     /// Cache of `!command` stdout results, keyed by command string.
     command_cache: Mutex<HashMap<String, String>>,
-    xai_oauth: XaiOAuth,
+    oauth: OAuthClients,
+    /// Loopback receivers of started authorization-URL logins, by provider.
+    pending_logins: Mutex<HashMap<String, Arc<CallbackServer>>>,
 }
 
 impl PiProviderManager {
@@ -455,6 +493,7 @@ impl PiProviderManager {
             paths::app_support_dir(),
             vec![paths::codex_home(), paths::pi_agent_dir()],
         )
+        .with_opencode_dir(paths::opencode_data_dir())
     }
 
     /// Single-directory constructor (tests, CLI overrides).
@@ -472,16 +511,31 @@ impl PiProviderManager {
         Self {
             primary_dir,
             fallback_dirs,
+            opencode_dir: None,
             app_support_dir,
             http,
             command_cache: Mutex::new(HashMap::new()),
-            xai_oauth: XaiOAuth::default(),
+            oauth: OAuthClients::default(),
+            pending_logins: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Adds OpenCode's data directory as the lowest-precedence read-only
+    /// credential source.
+    pub fn with_opencode_dir(mut self, dir: PathBuf) -> Self {
+        self.opencode_dir = Some(dir);
+        self
     }
 
     /// Replaces the xAI OAuth endpoints (tests point them at a mock server).
     pub fn with_xai_oauth(mut self, xai_oauth: XaiOAuth) -> Self {
-        self.xai_oauth = xai_oauth;
+        self.oauth.xai = xai_oauth;
+        self
+    }
+
+    /// Replaces every OAuth client (tests point them at mock servers).
+    pub fn with_oauth_clients(mut self, oauth: OAuthClients) -> Self {
+        self.oauth = oauth;
         self
     }
 
@@ -529,6 +583,7 @@ impl PiProviderManager {
 
     fn read_auth_map(&self) -> Map<String, Value> {
         // Fallback chain first (codex + pi), primary last so it wins.
+        // Among the fallbacks the first listed directory wins a conflict.
         let mut merged = Map::new();
         for directory in self.fallback_dirs.iter() {
             let path = directory.join("auth.json");
@@ -541,6 +596,14 @@ impl PiProviderManager {
                     }
                 }
                 _ => continue,
+            }
+        }
+        // OpenCode last: it only fills providers nothing else knows.
+        if let Some(Value::Object(map)) = self.opencode_dir.as_ref().map(|dir| Self::read_json(&dir.join("auth.json"))) {
+            for (provider_id, entry) in map {
+                if let Some(credential) = opencode_credential(&entry) {
+                    merged.entry(provider_id).or_insert(credential);
+                }
             }
         }
         match Self::read_json(&self.auth_path()) {
@@ -746,26 +809,121 @@ impl PiProviderManager {
     // OAuth login & token refresh
     // ------------------------------------------------------------------
 
-    /// Starts an OAuth device login (`xai` only for now).
-    pub async fn start_oauth_login(&self, provider_id: &str) -> Result<DeviceCodeSession> {
+    /// Starts an OAuth login. Device-code providers return a code to show;
+    /// authorization-URL providers start a loopback receiver and return the
+    /// URL to open. `enterprise_domain` is only used by `github-copilot`.
+    pub async fn start_oauth_login(&self, provider_id: &str, enterprise_domain: Option<&str>) -> Result<LoginSession> {
         match provider_id {
-            "xai" => self.xai_oauth.start().await,
+            "xai" => Ok(LoginSession::DeviceCode(self.oauth.xai.start().await?)),
+            "github-copilot" => Ok(LoginSession::DeviceCode(self.oauth.copilot.start(enterprise_domain).await?)),
+            "kimi-coding" => Ok(LoginSession::DeviceCode(self.oauth.kimi.start().await?)),
+            "openai" => {
+                let (session, server) = self.oauth.chatgpt.start(&self.device_id()?).await?;
+                self.remember_login(provider_id, server);
+                Ok(LoginSession::AuthUrl(session))
+            }
+            "openrouter" => {
+                let (session, server) = self.oauth.openrouter.start().await?;
+                self.remember_login(provider_id, server);
+                Ok(LoginSession::AuthUrl(session))
+            }
             _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth login"),
         }
     }
 
-    /// Waits for the user to approve the device login, then stores the
-    /// tokens in the primary `auth.json`.
-    pub async fn finish_oauth_login(&self, provider_id: &str, session: &DeviceCodeSession) -> Result<()> {
-        let tokens = match provider_id {
-            "xai" => self.xai_oauth.poll(session).await?,
-            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth login"),
+    /// Waits for the user to complete the login (device approval or the
+    /// loopback redirect), then stores the tokens in the primary
+    /// `auth.json`. Cancel by dropping the future.
+    pub async fn finish_oauth_login(&self, provider_id: &str, session: &LoginSession) -> Result<()> {
+        let tokens = match session {
+            LoginSession::DeviceCode(device) => self.poll_device_login(provider_id, device).await?,
+            LoginSession::AuthUrl(auth) => self.await_redirect_login(provider_id, auth).await?,
         };
+        self.store_oauth_tokens(provider_id, &tokens).await
+    }
+
+    /// Manual fallback of an authorization-URL login: the user pasted the
+    /// redirect URL (or code) from the browser. Ends the loopback wait.
+    pub async fn submit_oauth_redirect(&self, provider_id: &str, session: &AuthUrlSession, pasted: &str) -> Result<()> {
+        let params = match provider_id {
+            "openai" => self.oauth.chatgpt.parse_pasted_redirect(session, pasted)?,
+            "openrouter" => self.oauth.openrouter.parse_pasted_redirect(pasted)?,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support pasting a redirect"),
+        };
+        let tokens = self.exchange_redirect(provider_id, session, &params).await?;
+        self.store_oauth_tokens(provider_id, &tokens).await?;
+        if let Some(server) = self.pending_logins.lock().expect("pending logins poisoned").remove(provider_id) {
+            server.shutdown();
+        }
+        Ok(())
+    }
+
+    async fn poll_device_login(&self, provider_id: &str, session: &oauth::device_code::DeviceCodeSession) -> Result<OAuthTokens> {
+        match provider_id {
+            "xai" => self.oauth.xai.poll(session).await,
+            "github-copilot" => self.oauth.copilot.poll(session).await,
+            "kimi-coding" => self.oauth.kimi.poll(session).await,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth device login"),
+        }
+    }
+
+    async fn await_redirect_login(&self, provider_id: &str, session: &AuthUrlSession) -> Result<OAuthTokens> {
+        let server = self
+            .pending_logins
+            .lock()
+            .expect("pending logins poisoned")
+            .get(provider_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No sign-in is waiting for a redirect; start the login again"))?;
+        let _forget_on_exit = PendingLoginGuard { manager: self, provider_id, server: server.clone() };
+        let params = server.wait().await?;
+        self.exchange_redirect(provider_id, session, &params).await
+    }
+
+    async fn exchange_redirect(&self, provider_id: &str, session: &AuthUrlSession, params: &CallbackParams) -> Result<OAuthTokens> {
+        match provider_id {
+            "openai" => self.oauth.chatgpt.exchange(session, params).await,
+            "openrouter" => self.oauth.openrouter.exchange(session, params).await,
+            _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth redirect login"),
+        }
+    }
+
+    /// Keeps the loopback receiver of a started login; a receiver left over
+    /// from an earlier attempt is stopped.
+    fn remember_login(&self, provider_id: &str, server: CallbackServer) {
+        let previous = self
+            .pending_logins
+            .lock()
+            .expect("pending logins poisoned")
+            .insert(provider_id.to_string(), Arc::new(server));
+        if let Some(previous) = previous {
+            previous.shutdown();
+        }
+    }
+
+    async fn store_oauth_tokens(&self, provider_id: &str, tokens: &OAuthTokens) -> Result<()> {
         let path = self.auth_path();
         let _lock = AuthFileLock::acquire(&path).await?;
         let mut map = Self::read_auth_file(&path)?;
         map.insert(provider_id.to_string(), tokens.to_credential());
         Self::write_json(&path, &Value::Object(map))
+    }
+
+    /// Per-installation UUID sent as the host id of "Sign in with ChatGPT";
+    /// created once next to `auth.json` (`<primary dir>/device-id`).
+    pub fn device_id(&self) -> Result<String> {
+        let path = self.primary_dir.join("device-id");
+        if let Some(existing) = std::fs::read_to_string(&path)
+            .ok()
+            .map(|text| text.trim().to_lowercase())
+            .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
+        {
+            return Ok(existing);
+        }
+        let created = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(&self.primary_dir)?;
+        std::fs::write(&path, &created)?;
+        Ok(created)
     }
 
     /// Access token of an OAuth credential, refreshing it when expired.
@@ -804,7 +962,7 @@ impl PiProviderManager {
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .ok_or_else(|| anyhow::anyhow!("stored OAuth credential has no refresh token"))?;
-        let tokens = self.refresh_tokens(provider_id, refresh_token).await?;
+        let tokens = self.refresh_tokens(provider_id, refresh_token, &entry).await?;
         let mut updated = entry;
         tokens.apply_to(&mut updated);
         map.insert(provider_id.to_string(), Value::Object(updated));
@@ -812,10 +970,49 @@ impl PiProviderManager {
         Ok(tokens.access)
     }
 
-    async fn refresh_tokens(&self, provider_id: &str, refresh_token: &str) -> Result<OAuthTokens> {
+    async fn refresh_tokens(&self, provider_id: &str, refresh_token: &str, entry: &Map<String, Value>) -> Result<OAuthTokens> {
         match provider_id {
-            "xai" => self.xai_oauth.refresh(refresh_token).await,
+            "xai" => self.oauth.xai.refresh(refresh_token).await,
+            "openai" => self.oauth.chatgpt.refresh(entry).await,
+            "github-copilot" => self.oauth.copilot.refresh(entry).await,
+            "kimi-coding" => self.oauth.kimi.refresh(refresh_token).await,
+            "openrouter" => anyhow::bail!("OpenRouter keys do not refresh; sign in again"),
             _ => anyhow::bail!("Provider \"{provider_id}\" does not support OAuth refresh"),
+        }
+    }
+
+    /// The winning OAuth credential of a provider, if it signed in with OAuth.
+    fn oauth_credential(&self, provider_id: &str) -> Option<Value> {
+        self.read_auth_map()
+            .remove(provider_id)
+            .filter(|credential| credential.get("type").and_then(Value::as_str) == Some("oauth"))
+    }
+
+    /// Chat API base URL for a Copilot access token: its `proxy-ep` host, else
+    /// the enterprise or individual endpoint of the stored credential.
+    pub fn copilot_base_url(&self, access_token: &str) -> String {
+        let domain = self
+            .oauth_credential("github-copilot")
+            .and_then(|credential| credential.get("enterpriseUrl").and_then(Value::as_str).and_then(oauth::github_copilot::normalize_domain));
+        oauth::github_copilot::base_url_from_token(access_token, domain.as_deref())
+    }
+
+    /// Models an OAuth login unlocks, when the provider has a fixed list:
+    /// the ChatGPT chat models (`openai` OAuth only), the Copilot models the
+    /// account may use, and the Kimi Code models.
+    fn oauth_catalog(&self, provider_id: &str) -> Option<Vec<CatalogModel>> {
+        match provider_id {
+            "openai" => self.oauth_credential("openai").map(|_| catalog::CHATGPT_MODELS.to_vec()),
+            "github-copilot" => {
+                let allowed: Option<Vec<String>> = self
+                    .oauth_credential("github-copilot")
+                    .and_then(|credential| credential.get("availableModelIds").cloned())
+                    .and_then(|ids| serde_json::from_value(ids).ok());
+                let models = catalog::COPILOT_MODELS.iter().filter(|model| allowed.as_ref().map_or(true, |ids| ids.iter().any(|id| id == model.id)));
+                Some(models.copied().collect())
+            }
+            "kimi-coding" => Some(catalog::KIMI_MODELS.to_vec()),
+            _ => None,
         }
     }
 
@@ -1185,6 +1382,10 @@ impl PiProviderManager {
         {
             return api.to_string();
         }
+        // "Sign in with ChatGPT" tokens only work against the Responses API.
+        if provider_id == "openai" && self.oauth_credential("openai").is_some() {
+            return "openai-responses".to_string();
+        }
         if let Some(builtin) = builtin(provider_id) {
             return builtin.api.to_string();
         }
@@ -1219,6 +1420,9 @@ impl PiProviderManager {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(catalog_models) = self.oauth_catalog(provider_id) {
+            models = catalog_models.into_iter().map(catalog_model_info).collect();
+        }
 
         for store_model in self.models_store_models(provider_id) {
             if let Some(existing) = models.iter_mut().find(|m| m.id == store_model.id) {
@@ -1268,6 +1472,7 @@ impl PiProviderManager {
             .map(|id| LoginProvider {
                 name: self.display_name(&id),
                 oauth_label: oauth::oauth_provider_info(&id).map(|info| info.login_label.to_string()),
+                oauth_flow: oauth::oauth_provider_info(&id).map(|info| info.flow),
                 api_key_env: builtin(&id).map(|p| p.env_var).filter(|var| !var.is_empty()).map(str::to_string),
                 status: self.login_status(&id, auth.get(&id)),
                 id,
@@ -1856,6 +2061,34 @@ impl PiProviderManager {
         }
     }
 
+}
+
+fn catalog_model_info(model: CatalogModel) -> ModelInfo {
+    ModelInfo {
+        id: model.id.to_string(),
+        name: model.id.to_string(),
+        api: Some(model.api.to_string()),
+        context_window: Some(model.context_window),
+        ..ModelInfo::default()
+    }
+}
+
+/// Drops the loopback receiver of a login when its wait ends (success,
+/// failure or cancellation), unless a newer login replaced it already.
+struct PendingLoginGuard<'a> {
+    manager: &'a PiProviderManager,
+    provider_id: &'a str,
+    server: Arc<CallbackServer>,
+}
+
+impl Drop for PendingLoginGuard<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.manager.pending_logins.lock().expect("pending logins poisoned");
+        if pending.get(self.provider_id).is_some_and(|current| Arc::ptr_eq(current, &self.server)) {
+            pending.remove(self.provider_id);
+        }
+        self.server.shutdown();
+    }
 }
 
 /// `access` of an OAuth credential whose `expires` (epoch ms) is still ahead.
@@ -2582,8 +2815,11 @@ wire_api = "chat"
         let manager =
             PiProviderManager::with_chain(agent.clone(), support, vec![pi_dir.clone()]).with_xai_oauth(xai);
 
-        let session = manager.start_oauth_login("xai").await.unwrap();
-        assert_eq!(session.user_code, "WXYZ-0001");
+        let session = manager.start_oauth_login("xai", None).await.unwrap();
+        match &session {
+            LoginSession::DeviceCode(device) => assert_eq!(device.user_code, "WXYZ-0001"),
+            LoginSession::AuthUrl(_) => panic!("xai is a device-code login"),
+        }
         manager.finish_oauth_login("xai", &session).await.unwrap();
 
         let primary = read_auth(&agent);
@@ -2591,7 +2827,7 @@ wire_api = "chat"
         assert_eq!(primary["xai"]["access"], "acc-login");
         assert_eq!(primary["xai"]["refresh"], "ref-login");
         assert!(primary.get("other").is_none());
-        assert!(manager.start_oauth_login("acme").await.is_err());
+        assert!(manager.start_oauth_login("acme", None).await.is_err());
     }
 
     #[test]
@@ -2740,18 +2976,251 @@ wire_api = "chat"
         std::env::remove_var("ACME_TEST_KEY");
 
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(&ids[..9], ["opencode-go", "anthropic", "openai", "google", "openrouter", "deepseek", "groq", "xai", "ollama"]);
-        assert_eq!(ids[9], "acme");
+        assert_eq!(
+            &ids[..11],
+            ["opencode-go", "anthropic", "openai", "google", "openrouter", "deepseek", "groq", "xai", "github-copilot", "kimi-coding", "ollama"]
+        );
+        assert_eq!(ids[11], "acme");
         let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap();
         assert_eq!(row("anthropic").status, LoginStatus::ApiKey);
         assert_eq!(row("xai").status, LoginStatus::OAuth);
         assert_eq!(row("groq").status, LoginStatus::Env("GROQ_API_KEY".into()));
         assert_eq!(row("acme").status, LoginStatus::Env("ACME_TEST_KEY".into()));
         assert_eq!(row("openai").status, LoginStatus::SignedOut);
-        assert!(row("xai").oauth_label.is_some() && row("openai").oauth_label.is_none());
+        assert!(row("xai").oauth_label.is_some() && row("groq").oauth_label.is_none());
+        assert_eq!(row("openai").oauth_flow, Some(oauth::OAuthFlow::AuthUrl));
+        assert_eq!(row("github-copilot").oauth_flow, Some(oauth::OAuthFlow::DeviceCode));
         assert_eq!(row("ollama").api_key_env, None);
 
         let raw = serde_json::to_string(&rows).unwrap();
         assert!(!raw.contains("secret"), "{raw}");
+    }
+
+    // ------------------------------------------------------------------
+    // ChatGPT / Copilot / OpenRouter / Kimi / OpenCode through the manager
+    // ------------------------------------------------------------------
+
+    use crate::oauth::openai::ChatgptOAuth;
+    use crate::oauth::openrouter::OpenRouterOAuth;
+
+    /// Mock answering `/token` (form) and `/keys` (JSON) with `(status, body)`.
+    async fn spawn_token_mock(status: u16, body: Value) -> String {
+        use axum::{routing::post, Router};
+        let answer = move || {
+            let body = body.clone();
+            async move { (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(body)) }
+        };
+        let app = Router::new().route("/token", post(answer.clone())).route("/keys", post(answer));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    fn chatgpt_grant() -> Value {
+        json!({ "id_token": "idt", "access_token": "acc-gpt", "refresh_token": "ref-gpt", "scope": "openid chatgpt.tokens.use.direct", "expires_in": 3600 })
+    }
+
+    fn chatgpt_clients(base: &str) -> OAuthClients {
+        OAuthClients {
+            chatgpt: ChatgptOAuth::with_endpoints("https://auth.example.test/authorize", &format!("{base}/token"), 0),
+            ..OAuthClients::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn chatgpt_login_over_loopback_unlocks_the_responses_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        let base = spawn_token_mock(200, chatgpt_grant()).await;
+        let manager = PiProviderManager::with_dirs(agent.clone(), support).with_oauth_clients(chatgpt_clients(&base));
+        assert_eq!(manager.resolve_api("openai"), "openai-compatible", "API-key behavior before sign-in");
+
+        let LoginSession::AuthUrl(session) = manager.start_oauth_login("openai", None).await.unwrap() else {
+            panic!("ChatGPT sign-in is an authorization-URL login");
+        };
+        assert!(session.auth_url.contains("agent_name_hint=Locagens"));
+        let redirect = format!("{}?code=c1&state={}&client_id=issued", session.redirect_uri, session.state.clone().unwrap());
+        let login = LoginSession::AuthUrl(session);
+        let finish = manager.finish_oauth_login("openai", &login);
+        let browser = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            reqwest::get(redirect).await.unwrap().status()
+        };
+        let (result, browser_status) = tokio::join!(finish, browser);
+        result.unwrap();
+        assert_eq!(browser_status, 200);
+
+        let stored = read_auth(&agent);
+        assert_eq!(stored["openai"]["type"], "oauth");
+        assert_eq!(stored["openai"]["clientId"], "issued");
+        assert_eq!(manager.resolve_api_key("openai", None).await.as_deref(), Some("acc-gpt"));
+        assert!(manager.pending_logins.lock().unwrap().is_empty(), "receiver released");
+        assert_eq!(manager.device_id().unwrap().len(), 36);
+
+        assert_eq!(manager.resolve_api("openai"), "openai-responses");
+        let model = manager.model_info("openai", "gpt-5.5").unwrap();
+        assert_eq!(model.api.as_deref(), Some("openai-responses"));
+        assert_eq!(model.context_window, Some(272_000));
+        assert!(manager.model_info("openai", "o4-mini").is_some());
+        assert_eq!(manager.merged_models("openai").len(), 44);
+    }
+
+    #[tokio::test]
+    async fn pasted_redirect_completes_openrouter_login_and_stops_the_receiver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        let base = spawn_token_mock(200, json!({ "key": "sk-or-secret" })).await;
+        let clients = OAuthClients {
+            openrouter: OpenRouterOAuth::with_endpoints("https://openrouter.example.test/auth", &format!("{base}/keys")),
+            ..OAuthClients::default()
+        };
+        let manager = PiProviderManager::with_dirs(agent.clone(), support).with_oauth_clients(clients);
+        let LoginSession::AuthUrl(session) = manager.start_oauth_login("openrouter", None).await.unwrap() else {
+            panic!("OpenRouter sign-in is an authorization-URL login");
+        };
+        manager.submit_oauth_redirect("openrouter", &session, "paste-code").await.unwrap();
+
+        let stored = read_auth(&agent);
+        assert_eq!(stored["openrouter"], json!({ "type": "oauth", "access": "sk-or-secret", "refresh": "", "expires": 9_007_199_254_740_991_i64 }));
+        assert_eq!(manager.resolve_api_key("openrouter", None).await.as_deref(), Some("sk-or-secret"));
+        assert!(manager.pending_logins.lock().unwrap().is_empty());
+        assert!(manager.submit_oauth_redirect("groq", &session, "x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chatgpt_refresh_dispatches_with_the_stored_client_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        let mut entry = oauth_entry("acc-old", "ref-old", 1);
+        entry["clientId"] = json!("issued");
+        write_auth(&agent, json!({ "openai": entry }));
+        let base = spawn_token_mock(200, chatgpt_grant()).await;
+        let manager = PiProviderManager::with_dirs(agent.clone(), support).with_oauth_clients(chatgpt_clients(&base));
+        assert_eq!(manager.resolve_api_key("openai", None).await.as_deref(), Some("acc-gpt"));
+        let stored = read_auth(&agent);
+        assert_eq!(stored["openai"]["refresh"], "ref-gpt");
+        assert_eq!(stored["openai"]["clientId"], "issued");
+        assert_eq!(stored["openai"]["accountId"], "acct-1", "unrelated fields survive a refresh");
+
+        // Without the issued client id the credential cannot refresh.
+        write_auth(&agent, json!({ "openai": oauth_entry("acc-old", "ref-old", 1) }));
+        assert_eq!(manager.resolve_api_key("openai", None).await, None);
+    }
+
+    #[tokio::test]
+    async fn openrouter_keys_never_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        let permanent = json!({ "type": "oauth", "access": "sk-or-1", "refresh": "", "expires": 9_007_199_254_740_991_i64 });
+        write_auth(&agent, json!({ "openrouter": permanent }));
+        let manager = PiProviderManager::with_dirs(agent.clone(), support);
+        assert_eq!(manager.resolve_api_key("openrouter", None).await.as_deref(), Some("sk-or-1"));
+        assert!(manager.refresh_tokens("openrouter", "", &Map::new()).await.is_err());
+    }
+
+    #[test]
+    fn device_id_is_created_once_and_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PiProviderManager::with_dirs(tmp.path().join("agent"), tmp.path().join("support"));
+        let first = manager.device_id().unwrap();
+        assert_eq!(manager.device_id().unwrap(), first);
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+        std::fs::write(tmp.path().join("agent").join("device-id"), "garbage").unwrap();
+        assert_ne!(manager.device_id().unwrap(), "garbage");
+    }
+
+    #[tokio::test]
+    async fn opencode_api_keys_are_the_lowest_precedence_read_only_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support, pi_dir, opencode) =
+            (tmp.path().join("agent"), tmp.path().join("support"), tmp.path().join("pi"), tmp.path().join("opencode"));
+        write_auth(&opencode, json!({
+            "opencode-go": { "type": "api", "key": "oc-go-key" },
+            "huggingface": { "type": "api", "key": "oc-hf-key" },
+            "blank": { "type": "api", "key": "  " },
+            "mixed-oauth": { "type": "oauth", "access": "oc-acc", "refresh": "oc-ref", "expires": 1 },
+            "wellknown-co": { "type": "wellknown", "key": "X", "token": "t" },
+        }));
+        write_auth(&pi_dir, json!({ "opencode-go": { "type": "api_key", "key": "pi-key" } }));
+        write_auth(&agent, json!({ "groq": { "type": "api_key", "key": "primary-key" } }));
+        let manager = PiProviderManager::with_chain(agent.clone(), support, vec![pi_dir]).with_opencode_dir(opencode.clone());
+
+        assert_eq!(manager.resolve_api_key("opencode-go", None).await.as_deref(), Some("pi-key"), "pi overrides OpenCode");
+        assert_eq!(manager.resolve_api_key("huggingface", None).await.as_deref(), Some("oc-hf-key"));
+        assert_eq!(manager.read_auth_map()["huggingface"], json!({ "type": "api_key", "key": "oc-hf-key" }));
+        for ignored in ["blank", "mixed-oauth", "wellknown-co"] {
+            assert!(!manager.has_api_key(ignored), "{ignored}");
+        }
+        assert_eq!(manager.resolve_api_key("groq", None).await.as_deref(), Some("primary-key"));
+
+        // Saving a key writes the primary file only; OpenCode's file is untouched.
+        let before = std::fs::read_to_string(opencode.join("auth.json")).unwrap();
+        manager
+            .set_pi_auth(&SetPiAuthInput { provider_id: "huggingface".into(), action: "set".into(), api_key: Some("new-key-12345".into()) })
+            .unwrap();
+        assert_eq!(manager.resolve_api_key("huggingface", None).await.as_deref(), Some("new-key-12345"));
+        assert_eq!(std::fs::read_to_string(opencode.join("auth.json")).unwrap(), before);
+        assert!(read_auth(&agent).get("mixed-oauth").is_none());
+    }
+
+    #[tokio::test]
+    async fn copilot_credential_narrows_models_and_picks_the_base_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+        let manager = PiProviderManager::with_dirs(agent.clone(), support);
+        assert_eq!(manager.merged_models("github-copilot").len(), 27, "everything before sign-in");
+
+        let mut entry = oauth_entry("tid=1;proxy-ep=proxy.business.githubcopilot.com", "gho-ref", oauth::now_ms() + 600_000);
+        entry["availableModelIds"] = json!(["claude-sonnet-5", "gpt-6-sol", "gemini-4-argon"]);
+        write_auth(&agent, json!({ "github-copilot": entry }));
+        let ids: Vec<String> = manager.merged_models("github-copilot").into_iter().map(|model| model.id).collect();
+        assert_eq!(ids, ["claude-sonnet-5", "gemini-4-argon", "gpt-6-sol"]);
+        assert_eq!(manager.model_info("github-copilot", "claude-sonnet-5").unwrap().api.as_deref(), Some("anthropic-messages"));
+        assert_eq!(manager.model_info("github-copilot", "gemini-4-argon").unwrap().api.as_deref(), Some("openai-completions"));
+        assert_eq!(manager.model_info("github-copilot", "gpt-6-sol").unwrap().api.as_deref(), Some("openai-responses"));
+        assert_eq!(
+            manager.copilot_base_url("tid=1;proxy-ep=proxy.business.githubcopilot.com"),
+            "https://api.business.githubcopilot.com"
+        );
+
+        let mut enterprise = oauth_entry("tid=1", "gho-ref", oauth::now_ms() + 600_000);
+        enterprise["enterpriseUrl"] = json!("co.ghe.com");
+        write_auth(&agent, json!({ "github-copilot": enterprise }));
+        assert_eq!(manager.copilot_base_url("tid=1"), "https://copilot-api.co.ghe.com");
+    }
+
+    #[test]
+    fn kimi_coding_builtin_serves_the_subscription_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = PiProviderManager::with_dirs(tmp.path().join("agent"), tmp.path().join("support"));
+        assert_eq!(
+            manager.resolve_endpoint("kimi-coding"),
+            ("https://api.kimi.com/coding/v1".to_string(), "openai-compatible".to_string())
+        );
+        let model = manager.model_info("kimi-coding", "kimi-for-coding").unwrap();
+        assert_eq!(model.context_window, Some(1_048_576));
+        assert_eq!(manager.merged_models("kimi-coding").len(), 6);
+    }
+
+    #[test]
+    fn auth_status_for_the_new_oauth_providers_never_contains_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("agent");
+        let expires = oauth::now_ms() + 600_000;
+        let mut chatgpt = oauth_entry("gpt-access-secret", "gpt-refresh-secret", expires);
+        chatgpt["clientId"] = json!("client-secret-id");
+        let mut copilot = oauth_entry("tid=copilot-secret", "gho-github-secret", expires);
+        copilot["enterpriseUrl"] = json!("co.ghe.com");
+        write_auth(&agent, json!({
+            "openai": chatgpt,
+            "github-copilot": copilot,
+            "openrouter": { "type": "oauth", "access": "sk-or-secret", "refresh": "", "expires": 9_007_199_254_740_991_i64 },
+            "kimi-coding": oauth_entry("kimi-access-secret", "kimi-refresh-secret", expires),
+        }));
+        let manager = PiProviderManager::with_dirs(agent, tmp.path().join("support"));
+        let raw = serde_json::to_string(&manager.pi_auth_status()).unwrap() + &serde_json::to_string(&manager.login_providers()).unwrap();
+        assert!(!raw.contains("secret"), "{raw}");
+        assert!(raw.contains("github-copilot") && raw.contains("kimi-coding"));
     }
 }
