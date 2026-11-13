@@ -312,7 +312,20 @@ workspace tools:
 | `update_plan` | Codex `{ explanation?, plan: [{step, status}] }` **or** Locagens `{ title, body?, tasks }` | Normalized into the same `db::Plan` + `plan_updated` event. |
 | `request_user_input` | Codex `{ questions: [{ id?, header?, question, options? }] }` | Routed through the QuestionCard flow (`question_requested`). |
 | `compact_context` | `{}` | Summarizes older history into a `[Compacted context summary]` block. |
-| `spawn_agent` / `send_input` / `wait_agent` / `close_agent` / `list_agents` | Codex interactive sub-agents | Background sub-agents with ids, input delivery, completion waiting and termination. |
+| `spawn_agent` | `{ task_name, message, agent_type? }` (`name` / `task` / `role` aliases accepted) | Starts a persistent background sub-agent (Codex multi-agent v2). Returns `{ agent_id, task_name, nickname, role }`. `agent_type` is a role: `explorer` (read-only, default), `worker`, or a custom role from `agents/*.toml` (see below). |
+| `send_message` | `{ target, message }` | Queues a message on the agent; does **not** start a turn. `target` is an agent id, task name or nickname. |
+| `followup_task` | `{ target, message }` | Starts a new turn on an idle agent; for a running agent the task is folded in at its next round boundary. |
+| `wait_agent` | `{ timeout_ms? }` (default 30 s, min 10 s, max 1 h) | Waits for a mailbox update from any agent. Returns `{ message, timed_out, updates: [{ agent_id, task_name, status, output }] }` (Codex returns only a summary; Locagens includes the content so it persists in the tool message). Returns at once when nothing is running. |
+| `interrupt_agent` | `{ target }` | Ends the agent's current turn; the agent stays alive. Returns `{ previous_status }`. |
+| `close_agent` | `{ target }` | Shuts the agent down, frees its slot. Max 4 live agents; completed agents hold a slot until closed. |
+| `list_agents` | `{ path_prefix? }` | Live agents: `{ agent_id, task_name, nickname, role, status, unread_update }`. |
+| `tool_search` | `{ query, limit? }` (default 8) | Present only when more than 8 MCP tools are connected: all MCP tools are then deferred, and each search (BM25 over name, description and argument names) appends the best matches to the tools of the next model request. |
+| `get_context_remaining` | `{}` | `{ tokens_left, context_window, estimated_tokens_used, percent_remaining, tokens_until_auto_compact }`; `tokens_left` is the smaller of window-left and auto-compact-left, estimated with the compactor's ~4 chars/token. |
+| `host_executable` | `{ name, all? }` | Locates an executable on `PATH` (Windows: `PATHEXT`). `{ name, lookup_key, found, path, paths, total_matches }`. |
+
+Custom agent roles are TOML files (`name`, `description`, `developer_instructions`,
+`nickname_candidates`, `sandbox_mode = "read-only"`) in
+`<project>/.locagens/agents/` (highest precedence) and `<agent dir>/agents/`.
 
 Approval/sandbox policy (Codex-compatible):
 
@@ -325,7 +338,24 @@ auto (Full Access)     → never + danger-full-access
 ```
 
 Events added: `turn_diff_updated` (`{ diff, filesChanged }`),
-`context_compacted`, `agent_spawned`.
+`context_compacted`, `agent_spawned` (`{ agentId, name, taskName, role }`),
+`patch_progress`.
+
+`patch_progress` is emitted (throttled to ~60 ms) while the model is still
+streaming an `apply_patch` call, so a UI can show the file list before the
+call completes:
+
+```json
+{ "type": "patch_progress", "runId": "…", "messageId": "msg-…", "callId": "call_…",
+  "agentName": null, "complete": false,
+  "files": [ { "path": "src/a.rs", "op": "update", "added": 3, "removed": 1 } ] }
+```
+
+`op` is `add | update | delete` (`move_to` appears for renames); `added`/`removed` count the `+`/`-` lines
+seen so far; `complete` becomes true at `*** End Patch`. The event is
+advisory — the final `apply_patch` tool result and `turn_diff_updated` remain
+authoritative. `permission_requested` additionally carries `agentRole` /
+`agentName` when a sub-agent asked.
 
 Auth & provider config: primary directory `~/.locagens` (`$LOCAGENS_HOME`);
 fallback reads from `~/.codex` (`$CODEX_HOME`: `auth.json` `OPENAI_API_KEY`,
