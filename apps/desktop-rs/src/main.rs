@@ -167,6 +167,7 @@ fn App() -> Element {
                             div {
                                 class: "chat-area",
                                 components::message_thread::MessageThread {}
+                                components::trust_banner::TrustBanner {}
                                 components::cards::PendingCards {}
                                 components::composer::Composer {}
                             }

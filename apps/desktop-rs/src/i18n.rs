@@ -184,6 +184,13 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("starter.plan.title", "Draft a step-by-step plan", "Adım adım bir plan hazırla"),
     ("starter.plan.prompt", "Turn my task into an ordered, checkable plan before making changes.", "Değişiklik yapmadan önce görevimi sıralı, işaretlenebilir bir plana dönüştür."),
     // --- permission / question cards ---
+    // --- project trust banner ---
+    ("trust.title", "Untrusted project", "Güvenilmeyen proje"),
+    ("trust.body", "This folder ships configuration that can run code on your machine (hooks, MCP servers, plugins, rules or agent roles). It is ignored until you trust the folder.", "Bu klasör makinende kod çalıştırabilecek yapılandırma içeriyor (hook'lar, MCP sunucuları, eklentiler, kurallar veya ajan rolleri). Klasöre güvenene kadar yok sayılır."),
+    ("trust.trust", "Trust folder", "Klasöre güven"),
+    ("trust.not_now", "Not now", "Şimdi değil"),
+    ("trust.done", "Folder trusted: its project configuration loads from the next run.", "Klasöre güvenildi: proje yapılandırması bir sonraki çalıştırmadan itibaren yüklenir."),
+    ("trust.failed", "Could not trust the folder: {0}", "Klasöre güvenilemedi: {0}"),
     ("perm.allow_once", "Allow Once", "Bir kez izin ver"),
     ("perm.allow_run", "Allow for Run", "Bu oturum için izin ver"),
     ("perm.allow_project", "Allow in Project", "Projede izin ver"),

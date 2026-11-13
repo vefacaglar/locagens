@@ -256,6 +256,11 @@ fn static_headers_resolve_env_and_bearer() {
     assert!(headers.contains(&("X-Env".to_string(), "from-env".to_string())));
     assert!(headers.contains(&("Authorization".to_string(), "Bearer s3cret".to_string())));
     assert!(!headers.iter().any(|(name, _)| name == "X-Missing"));
+
+    // A project's mcp.json never reads environment variables into headers.
+    config.scope = "project".to_string();
+    let headers = static_headers(&config, &env);
+    assert_eq!(headers, vec![("X-Test".to_string(), "abc".to_string())]);
 }
 
 #[tokio::test]

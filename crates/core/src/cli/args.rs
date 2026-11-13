@@ -73,6 +73,11 @@ pub struct Cli {
     /// Project directory (default: current directory)
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<String>,
+    /// Trust the project folder for this invocation only: load its
+    /// .locagens hooks, MCP servers, plugins, rules and agent roles
+    /// (`lcgn trust` saves the decision)
+    #[arg(long)]
+    pub trust: bool,
     /// Print authenticated models as a table, optionally filtered
     #[arg(
         long,
@@ -124,6 +129,18 @@ pub enum Command {
     },
     /// Review code changes (read-only): uncommitted changes (default), a base branch, a commit, or custom instructions
     Review(ReviewArgs),
+    /// Trust a project folder so its .locagens hooks, MCP servers, plugins,
+    /// rules and agent roles load (saved in ~/.locagens/config.toml)
+    Trust {
+        /// Folder to trust (default: --cwd or the current directory)
+        path: Option<String>,
+        /// Mark the folder untrusted instead
+        #[arg(long)]
+        revoke: bool,
+        /// Only print whether the folder is trusted
+        #[arg(long, conflicts_with = "revoke")]
+        status: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -485,6 +502,16 @@ hide_agent_reasoning = true
             Some(Command::Mcp { action: McpAction::Logout { .. } })
         ));
         assert!(matches!(cli(&["mcp", "list"]).command, Some(Command::Mcp { action: McpAction::List })));
+        assert!(matches!(
+            cli(&["trust"]).command,
+            Some(Command::Trust { path: None, revoke: false, status: false })
+        ));
+        assert!(matches!(
+            cli(&["trust", "../repo", "--revoke"]).command,
+            Some(Command::Trust { path: Some(ref p), revoke: true, .. }) if p == "../repo"
+        ));
+        let once = cli(&["--trust", "-p", "hi"]);
+        assert!(once.trust && once.print && once.command.is_none());
     }
 
     #[test]

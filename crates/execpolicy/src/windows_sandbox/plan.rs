@@ -75,12 +75,16 @@ pub fn build_plan(
     let temp_dir = temp_base
         .join("locagens-sandbox")
         .join(format!("tmp-{:016x}", fnv1a64(key.as_bytes(), FNV_OFFSET)));
-    let locagens_dir = root.join(".locagens");
-
-    let mut deny_write_paths = vec![locagens_dir.clone()];
-    for carve_out in ["hooks", "config"] {
-        let path = root.join(".git").join(carve_out);
-        if path.exists() {
+    // Shared with the file tools (`protected_paths`): pre-created entries
+    // are always denied, the git ones when they exist.
+    let mut deny_write_paths = Vec::new();
+    let mut create_dirs = vec![temp_dir.clone()];
+    for entry in crate::protected_paths::SANDBOX_PROTECTED_PATHS {
+        let path = entry.under(&root);
+        if entry.pre_create {
+            create_dirs.push(path.clone());
+            deny_write_paths.push(path);
+        } else if path.exists() {
             deny_write_paths.push(path);
         }
     }
@@ -98,7 +102,7 @@ pub fn build_plan(
             )
             .collect(),
         deny_write_paths,
-        create_dirs: vec![temp_dir.clone(), locagens_dir],
+        create_dirs,
         temp_dir: Some(temp_dir),
     })
 }

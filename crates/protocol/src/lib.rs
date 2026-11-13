@@ -105,15 +105,25 @@ impl fmt::Display for SandboxMode {
     }
 }
 
+/// The run modes Locagens knows (`RUN_MODES[0]` is the default, Build).
+pub const RUN_MODES: [&str; 5] = ["accept_edits", "plan", "chat", "ask_permissions", "auto"];
+
+/// Whether `mode` is one of [`RUN_MODES`] (exact, case-sensitive).
+pub fn is_run_mode(mode: &str) -> bool {
+    RUN_MODES.contains(&mode)
+}
+
 /// Resolves the Locagens run `mode` into Codex approval/sandbox semantics.
+/// An unknown mode fails closed: every action prompts and the sandbox is
+/// read-only (only the exact `"auto"` grants full access).
 pub fn from_run_mode(mode: &str) -> (ApprovalPolicy, SandboxMode) {
     match mode {
         "chat" => (ApprovalPolicy::OnRequest, SandboxMode::ReadOnly),
         "plan" => (ApprovalPolicy::OnRequest, SandboxMode::ReadOnly),
         "accept_edits" => (ApprovalPolicy::OnRequest, SandboxMode::WorkspaceWrite),
         "ask_permissions" => (ApprovalPolicy::Untrusted, SandboxMode::WorkspaceWrite),
-        // auto
-        _ => (ApprovalPolicy::Never, SandboxMode::DangerFullAccess),
+        "auto" => (ApprovalPolicy::Never, SandboxMode::DangerFullAccess),
+        _ => (ApprovalPolicy::Untrusted, SandboxMode::ReadOnly),
     }
 }
 
@@ -275,8 +285,12 @@ mod tests {
             from_run_mode("auto"),
             (ApprovalPolicy::Never, SandboxMode::DangerFullAccess)
         );
-        // Unknown modes fall back to the autonomous default.
-        assert_eq!(from_run_mode("whatever"), from_run_mode("auto"));
+        // Unknown modes fail closed (QA-011): never full access.
+        for unknown in ["whatever", "build", "Auto", "", " auto"] {
+            assert_eq!(from_run_mode(unknown), (ApprovalPolicy::Untrusted, SandboxMode::ReadOnly), "{unknown:?}");
+            assert!(!is_run_mode(unknown));
+        }
+        assert!(RUN_MODES.iter().all(|mode| is_run_mode(mode)));
     }
 
     #[test]

@@ -77,11 +77,25 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   offers Build (`accept_edits`), Plan and Full Access (`auto`). Modes map to
   Codex `ApprovalPolicy` / `SandboxMode` in `locagens-protocol`.
 - Tools live in `orchestrator/tools.rs`. All paths must stay inside the
-  project workspace. Commands (`exec_command`, `run_command`) and `fetch_url`
-  are permission-gated unless a standing grant matches or the command is
-  known-safe; dangerous commands always prompt. Sub-agent depth is capped at 1.
+  project workspace (dangling symlinks are refused). Commands (`exec_command`,
+  `run_command`) are permission-gated outside Full Access unless a standing
+  grant matches or the command is known-safe; `fetch_url` prompts in every
+  mode except Full Access and only reaches public addresses (redirects are
+  re-validated, DNS is pinned). Outside Full Access, dangerous commands and
+  mutations of protected paths (`.git`, `.locagens`, `.codex`, `.agents`;
+  `execpolicy::protected_paths`) always prompt; no grant or Allow-for-Run
+  covers them. Calls to tools that were not offered to the agent are
+  rejected. Unknown modes are rejected by the api facade and fail closed to
+  read-only in `locagens-protocol`. Sub-agent depth is capped at 1.
 - Permission answers: `allow_once | allow_project | allow_always | allow_run |
-  deny`; standing grants persist in `permissions.json`.
+  deny`; anything else is `deny`. `allow_run` covers only that tool for the
+  rest of the run. Standing grants persist in `permissions.json`; the project
+  `.rules` files are never written.
+- Project trust (Codex-style): `[projects."<path>"] trust_level` in
+  `~/.locagens/config.toml` (`services/project_trust.rs`, nearest ancestor
+  wins). Untrusted projects load no project hooks, MCP servers, plugins,
+  `.rules` or agent roles. Hooks and stdio MCP servers get the stripped
+  exec-session environment, not the app's env.
 - Run states: `created generating awaiting_permission awaiting_input done
   failed cancelled`.
 - Context is auto-compacted above ~90k estimated input tokens (last 8

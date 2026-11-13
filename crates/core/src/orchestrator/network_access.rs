@@ -161,8 +161,10 @@ impl NetworkApproval {
             slot.sender = None;
         }
         self.set_status("generating");
-        let allowed = matches!(decision.as_deref(), Some(d) if d != "deny");
-        if decision.as_deref() == Some("allow_run") {
+        // Unknown answers deny (QA-006).
+        let decision = decision.as_deref().map(crate::orchestrator::permission_decision::PermissionDecision::parse_or_deny);
+        let allowed = decision.is_some_and(|decision| decision.allows());
+        if decision == Some(crate::orchestrator::permission_decision::PermissionDecision::AllowRun) {
             RUN_APPROVED_HOSTS
                 .lock()
                 .expect("run hosts poisoned")

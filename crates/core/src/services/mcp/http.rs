@@ -44,6 +44,12 @@ pub(super) fn static_headers(
     for (name, value) in config.http_headers.iter().flatten() {
         out.push((name.clone(), value.clone()));
     }
+    // Only user-scope config may turn environment variables into request
+    // headers: a project's `mcp.json` could otherwise send any secret of
+    // the user's environment to any URL it names.
+    if config.scope == "project" {
+        return out;
+    }
     for (name, var) in config.env_http_headers.iter().flatten() {
         if let Some(value) = env(var).filter(|v| !v.is_empty()) {
             out.push((name.clone(), value));

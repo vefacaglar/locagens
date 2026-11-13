@@ -7,6 +7,7 @@ pub mod command_safety;
 pub mod env_policy;
 pub mod network_proxy;
 pub mod processes;
+pub mod protected_paths;
 pub mod rules;
 pub mod sandbox;
 pub mod windows_sandbox;

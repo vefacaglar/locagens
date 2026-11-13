@@ -341,9 +341,12 @@ pub fn delete(id: &str, scope: &str, project_path: Option<&str>) -> Result<bool,
 
 /// Manifests of every enabled plugin (project plugins override user ones).
 /// Used by the MCP client (`mcpServers`), the hooks engine (`hooks`) and the
-/// system-prompt builder (`systemPrompt`).
+/// system-prompt builder (`systemPrompt`). Project plugins count only when
+/// the project folder is trusted (`project_trust`).
 pub fn enabled_manifests(project_path: Option<&str>) -> Vec<Value> {
-    discover(project_path)
+    let project_trusted = crate::services::project_trust::is_trusted_str(project_path);
+    let discovered = if project_trusted { discover(project_path) } else { discover(None) };
+    discovered
         .into_iter()
         .filter(|manifest| manifest.get("enabled").and_then(Value::as_bool).unwrap_or(false))
         .collect()

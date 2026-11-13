@@ -93,28 +93,137 @@ pub struct Evaluation {
 // Compound shell command splitting
 // ----------------------------------------------------------------------
 
-/// Splits a compound shell command into segments of argv tokens.
+/// The shell grammar a command string is parsed with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellDialect {
+    /// `sh -c`: single/double quotes, backslash escapes, `;` separators.
+    Posix,
+    /// `cmd /C`: only `"` quotes (backslash is literal), `^` escapes,
+    /// `%VAR%` / `!VAR!` expansion, `&` / `|` separators.
+    Cmd,
+}
+
+impl ShellDialect {
+    /// The dialect commands actually run with on this platform
+    /// (`cmd /C` on Windows, `sh -c` elsewhere).
+    pub fn platform() -> Self {
+        if cfg!(windows) {
+            Self::Cmd
+        } else {
+            Self::Posix
+        }
+    }
+}
+
+/// Splits a compound shell command into segments of argv tokens, using the
+/// platform's shell grammar ([`ShellDialect::platform`]).
 ///
+/// POSIX (`sh -c`):
 /// - Lexes single quotes, double quotes (handling `\"`, `\\`, `\$`, `` \` ``)
 ///   and unquoted backslash escapes.
 /// - Splits on unquoted `;`, `&&`, `||`, `|` and newlines.
 /// - Rejects redirections, subshell parens, command substitution and process
 ///   substitution outside single quotes.
-/// - Unwraps nested shells (`sh -c <inner>`, `cmd /C <inner>`) by recursively
-///   splitting the inner command and splicing its segments in place.
-/// - Returns `Ok(vec![])` for empty commands (callers treat that as unsafe).
+///
+/// cmd.exe (`cmd /C`): see [`split_cmd_segments`].
+///
+/// Both unwrap nested shells (`sh -c <inner>`, `cmd /C <inner>`) by
+/// recursively splitting the inner command with the inner shell's grammar.
+/// Returns `Ok(vec![])` for empty commands (callers treat that as unsafe).
 pub fn split_shell_commands(command: &str) -> Result<Vec<Vec<String>>, String> {
-    let segments = split_shell_segments(command)?;
+    split_shell_commands_in(command, ShellDialect::platform())
+}
+
+/// [`split_shell_commands`] with an explicit dialect.
+pub fn split_shell_commands_in(command: &str, dialect: ShellDialect) -> Result<Vec<Vec<String>>, String> {
+    let segments = match dialect {
+        ShellDialect::Posix => split_shell_segments(command)?,
+        ShellDialect::Cmd => split_cmd_segments(command)?,
+    };
     // Unwrap nested shells: `sh -c <inner>` / `cmd /C <inner>`.
     let mut unwrapped: Vec<Vec<String>> = Vec::new();
     for segment in segments {
-        if let Some(inner) = nested_shell_inner(&segment) {
-            unwrapped.extend(split_shell_commands(&inner)?);
+        if let Some((inner, inner_dialect)) = nested_shell_inner(&segment) {
+            unwrapped.extend(split_shell_commands_in(&inner, inner_dialect)?);
         } else {
             unwrapped.push(segment);
         }
     }
     Ok(unwrapped)
+}
+
+/// Splits a `cmd /C` command line the way cmd.exe parses it, rejecting
+/// everything whose meaning cmd decides at run time:
+///
+/// - `"` toggles quoting; a backslash never escapes anything (so `\"` ends a
+///   quoted run, unlike POSIX), and an unterminated quote is rejected.
+/// - Outside quotes `&`, `&&`, `|` and `||` separate segments; `^` (escape),
+///   `<` / `>` (redirection), `(` / `)` (blocks), `'` and line breaks are
+///   rejected.
+/// - `%` and `!` (variable expansion, also inside quotes) are rejected:
+///   cmd expands them before it looks for separators.
+pub fn split_cmd_segments(command: &str) -> Result<Vec<Vec<String>>, String> {
+    const REJECT: &str =
+        "Command contains cmd.exe escapes, variables, redirection or blocks that cannot be classified.";
+    let chars: Vec<char> = command.chars().collect();
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut token = String::new();
+    let mut has_token = false;
+    let mut in_quotes = false;
+    let mut i = 0usize;
+
+    let push_token = |current: &mut Vec<String>, token: &mut String, has_token: &mut bool| {
+        if *has_token {
+            current.push(std::mem::take(token));
+            *has_token = false;
+        }
+    };
+
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, '%' | '!' | '\n' | '\r') {
+            return Err(REJECT.to_string());
+        }
+        if c == '"' {
+            in_quotes = !in_quotes;
+            has_token = true;
+            i += 1;
+            continue;
+        }
+        if in_quotes {
+            token.push(c);
+            i += 1;
+            continue;
+        }
+        match c {
+            '^' | '<' | '>' | '(' | ')' | '\'' => return Err(REJECT.to_string()),
+            '&' | '|' => {
+                push_token(&mut current, &mut token, &mut has_token);
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+                i += if chars.get(i + 1) == Some(&c) { 2 } else { 1 };
+            }
+            whitespace if whitespace.is_whitespace() => {
+                push_token(&mut current, &mut token, &mut has_token);
+                i += 1;
+            }
+            other => {
+                token.push(other);
+                has_token = true;
+                i += 1;
+            }
+        }
+    }
+    if in_quotes {
+        return Err(REJECT.to_string());
+    }
+    push_token(&mut current, &mut token, &mut has_token);
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    Ok(segments)
 }
 
 /// Splits a command into raw segments without unwrapping nested shells.
@@ -269,8 +378,9 @@ fn split_shell_segments(command: &str) -> Result<Vec<Vec<String>>, String> {
     Ok(segments)
 }
 
-/// Returns the inner command of `sh -c <inner>` / `cmd /C <inner>` shapes.
-fn nested_shell_inner(segment: &[String]) -> Option<String> {
+/// Returns the inner command (and its grammar) of `sh -c <inner>` /
+/// `cmd /C <inner>` shapes.
+fn nested_shell_inner(segment: &[String]) -> Option<(String, ShellDialect)> {
     if segment.len() != 3 {
         return None;
     }
@@ -284,14 +394,14 @@ fn nested_shell_inner(segment: &[String]) -> Option<String> {
     match program {
         "sh" | "bash" | "zsh" => {
             if flag == "-c" || flag == "-lc" {
-                Some(segment[2].clone())
+                Some((segment[2].clone(), ShellDialect::Posix))
             } else {
                 None
             }
         }
         "cmd" | "cmd.exe" => {
             if flag == "/c" {
-                Some(segment[2].clone())
+                Some((segment[2].clone(), ShellDialect::Cmd))
             } else {
                 None
             }
@@ -627,8 +737,7 @@ impl Policy {
             let (seg_decision, seg_justification, seg_matched) = match segment_decision {
                 Some((decision, justification)) => (decision, justification, true),
                 None => {
-                    let joined = tokens.join(" ");
-                    match crate::command_safety::classify_single_segment(&joined) {
+                    match crate::command_safety::classify_segment_tokens(tokens) {
                         crate::command_safety::CommandSafety::KnownSafeReadOnly => {
                             (Decision::Allow, None, false)
                         }
@@ -910,7 +1019,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cmd_dialect_follows_cmd_exe_quoting() {
+        let cmd = |command: &str| split_shell_commands_in(command, ShellDialect::Cmd);
+        // Each of these runs `calc` under `cmd /C`; POSIX rules would see
+        // one harmless `echo` segment.
+        for command in [
+            "echo '&calc&'",
+            "echo ^& calc",
+            "echo %COMSPEC%",
+            "echo !x!",
+            "echo \"a %PATH% b\"",
+            "echo hi > out.txt",
+            "(echo hi)",
+            "echo \"unclosed",
+        ] {
+            assert!(cmd(command).is_err(), "{command} must be rejected");
+        }
+        // A backslash does not escape a quote or a separator in cmd.
+        assert_eq!(
+            cmd("echo \"a\\\" & calc & \\\"b\"").unwrap(),
+            vec![
+                vec!["echo".to_string(), "a\\".to_string()],
+                vec!["calc".to_string()],
+                vec!["\\b".to_string()],
+            ]
+        );
+        assert_eq!(
+            cmd("echo \\& calc").unwrap(),
+            vec![vec!["echo".to_string(), "\\".to_string()], vec!["calc".to_string()]]
+        );
+        // Quoted separators stay literal; `&`, `&&`, `|`, `||` all split.
+        assert_eq!(
+            cmd("type \"a & b.txt\" & dir src\\x | find \"y\" || git status && echo ok").unwrap(),
+            vec![
+                vec!["type".to_string(), "a & b.txt".to_string()],
+                vec!["dir".to_string(), "src\\x".to_string()],
+                vec!["find".to_string(), "y".to_string()],
+                vec!["git".to_string(), "status".to_string()],
+                vec!["echo".to_string(), "ok".to_string()],
+            ]
+        );
+        // Nested `cmd /C` uses cmd rules, nested `sh -c` POSIX rules.
+        assert_eq!(cmd("cmd /c \"echo a & calc\"").unwrap().len(), 2);
+        assert!(cmd("cmd /c \"echo ^& calc\"").is_err());
+    }
+
+    #[test]
     fn compound_commands_split_and_reject_unsafe_constructs() {
+        let split_shell_commands = |command: &str| split_shell_commands_in(command, ShellDialect::Posix);
         let segments =
             split_shell_commands("cargo check && echo done; git status | head -n 3").unwrap();
         assert_eq!(

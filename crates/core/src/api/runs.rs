@@ -172,20 +172,29 @@ fn truncate_title(task: &str) -> String {
     title
 }
 
-/// The run's effective mode: explicit bypass wins over a milder mode.
-fn effective_mode(mode: Option<&str>, bypass: bool) -> String {
+/// The run's effective mode: explicit bypass wins over a milder mode. An
+/// unknown mode string is rejected (QA-011) instead of silently meaning
+/// Full Access or anything else.
+fn effective_mode(mode: Option<&str>, bypass: bool) -> ApiResult<String> {
     // Unset mode falls back to config.toml (`approval_policy` / `sandbox_mode`),
     // then to Build (`accept_edits`).
     let configured = crate::config_runtime::current().default_run_mode();
     let mode = mode
-        .filter(|mode| !mode.trim().is_empty())
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
         .or(configured.as_deref())
         .unwrap_or("accept_edits");
-    if bypass && !matches!(mode, "chat" | "plan") {
+    if !locagens_protocol::is_run_mode(mode) {
+        return Err(ApiError::bad_request(format!(
+            "Unknown run mode \"{mode}\" (expected one of: {}).",
+            locagens_protocol::RUN_MODES.join(", ")
+        )));
+    }
+    Ok(if bypass && !matches!(mode, "chat" | "plan") {
         "auto".to_string()
     } else {
         mode.to_string()
-    }
+    })
 }
 
 /// Clones the shared state for the spawned drive task.
@@ -300,7 +309,7 @@ pub async fn create_run(
                 .map(|project| project.name)
                 .unwrap_or_default()
         });
-    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions);
+    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions)?;
     let run_id = format!("run-{}", uuid::Uuid::new_v4());
 
     let run = Run {
@@ -376,7 +385,7 @@ pub async fn continue_run(
         return Err(ApiError::bad_request("Task is required."));
     }
 
-    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions);
+    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions)?;
     let message = RunMessage {
         id: format!("msg-{}", uuid::Uuid::new_v4()),
         run_id: run_id.to_string(),
@@ -511,57 +520,41 @@ pub async fn queue_message(state: &AppState, run_id: &str, content: &str) -> Api
 /// Applies a permission decision to a run's pending request
 /// (`POST /api/runs/:id/permission`). Returns `false` when nothing was
 /// pending. Also used directly by the `lcgn` interactive prompt.
+///
+/// The decision is parsed here: anything but the five known answers is a
+/// denial. Tool grants (`allow_run`, standing grants) are recorded by the
+/// orchestrator, which knows whether the call may be granted beyond once;
+/// only network-host grants are persisted here.
 pub async fn apply_permission_decision(
     state: &AppState,
     handle: &Arc<RunHandle>,
     decision: &str,
 ) -> bool {
+    use crate::orchestrator::network_access::NETWORK_ACCESS_TOOL;
+    use crate::orchestrator::permission_decision::PermissionDecision;
+
+    let decision = PermissionDecision::parse_or_deny(decision.trim());
     let mut slot = handle.permission.lock().await;
     let (pending, sender) = (slot.pending.take(), slot.sender.take());
     drop(slot);
 
-    if decision == "allow_run" {
-        handle.allow_run.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    if let Some(pending) = pending {
+    if let (Some(pending), Some(scope)) = (pending, decision.standing_scope()) {
         let tool_call = pending.tool_call;
-        if tool_call.is_object() {
-            let name = tool_call
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+        let name = tool_call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
+        if name == NETWORK_ACCESS_TOOL {
             let args: Value = serde_json::from_str(
-                tool_call
-                    .pointer("/function/arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("{}"),
+                tool_call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}"),
             )
             .unwrap_or_else(|_| json!({}));
-            if matches!(decision, "allow_project" | "allow_always") {
-                if let Some(run) = state.db.get_run_full(&handle.run_id) {
-                    let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
-                    let domains = args
-                        .get("network_domains")
-                        .or_else(|| args.get("networkDomains"))
-                        .and_then(Value::as_array)
-                        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                        .unwrap_or_default();
-                    state.db.upsert_permission(
-                        if decision == "allow_project" { "project" } else { "global" },
-                        &run.project_path,
-                        &name,
-                        &command,
-                        domains,
-                        decision,
-                    );
-                }
+            if let Some(run) = state.db.get_run_full(&handle.run_id) {
+                let domains = crate::orchestrator::network_access::requested_domains(&args);
+                state.db.upsert_permission(scope, &run.project_path, name, "", domains, decision.as_str());
             }
         }
     }
     match sender {
         Some(sender) => {
-            let _ = sender.send(decision.to_string());
+            let _ = sender.send(decision.as_str().to_string());
             true
         }
         None => false,
@@ -572,9 +565,7 @@ pub async fn apply_permission_decision(
 /// (`POST /api/runs/:id/permission`).
 pub async fn permission_decision(state: &AppState, run_id: &str, decision: &str) -> ApiResult<()> {
     let decision = decision.trim();
-    if !["allow_once", "allow_project", "allow_always", "allow_run", "deny"]
-        .contains(&decision)
-    {
+    if crate::orchestrator::permission_decision::PermissionDecision::parse(decision).is_none() {
         return Err(ApiError::bad_request("Invalid permission decision."));
     }
     let Some(handle) = state.orchestrator.handle(run_id) else {
@@ -910,6 +901,40 @@ mod tests {
         assert_eq!(summary.by_role[0].agent_role, "planner");
         assert_eq!(summary.by_role[1].agent_role, "coder");
         assert_eq!(summary.by_role[1].calls, 2);
+    }
+
+    #[test]
+    fn effective_mode_rejects_unknown_modes_and_bypass_upgrades_to_auto() {
+        assert_eq!(effective_mode(Some("plan"), false).unwrap(), "plan");
+        assert_eq!(effective_mode(Some(" accept_edits "), false).unwrap(), "accept_edits");
+        assert_eq!(effective_mode(Some("accept_edits"), true).unwrap(), "auto");
+        assert_eq!(effective_mode(Some("plan"), true).unwrap(), "plan");
+        for unknown in ["build", "Auto", "full_access"] {
+            assert!(effective_mode(Some(unknown), false).is_err(), "{unknown}");
+            assert!(effective_mode(Some(unknown), true).is_err(), "{unknown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_permission_decisions_are_sent_as_deny() {
+        let data = std::env::temp_dir().join(format!("locagens-decision-{}", uuid::Uuid::new_v4().simple()));
+        let state = AppState {
+            db: Arc::new(crate::db::Db::open(&data).unwrap()),
+            pi: Arc::new(crate::pi_providers::PiProviderManager::with_dirs(data.join("agent"), data.clone())),
+            orchestrator: Arc::new(crate::orchestrator::Orchestrator::new()),
+            settings_path: data.join("settings.json"),
+            default_project_path: data.clone(),
+            processes: Arc::new(crate::services::processes::ProcessManager::new()),
+        };
+        for (sent, received) in [("Deny", "deny"), ("", "deny"), ("denied", "deny"), ("allow_once", "allow_once")] {
+            let handle = state.orchestrator.ensure_handle(&format!("run-{sent}"));
+            let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+            handle.permission.lock().await.sender = Some(sender);
+            assert!(apply_permission_decision(&state, &handle, sent).await);
+            assert_eq!(receiver.await.unwrap(), received, "{sent:?}");
+        }
+        assert!(permission_decision(&state, "run-x", "Deny").await.is_err());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

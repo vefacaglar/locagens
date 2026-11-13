@@ -39,6 +39,29 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
   standing grant exists in `permissions.json`. Use `-a/--approve` for full
   access, or drop `-p` to approve interactively.
 
+## Project trust
+
+Project configuration under `<project>/.locagens/` (`hooks.json`, `mcp.json`,
+`rules/*.rules`, `agents/*.toml`, `plugins/`) runs code or changes policy, so
+it is only loaded for trusted folders. Trust is stored Codex-style in
+`~/.locagens/config.toml`:
+
+```toml
+[projects."C:/repos/app"]
+trust_level = "trusted"   # or "untrusted"
+```
+
+The nearest ancestor entry wins. When an untrusted folder ships such files,
+the interactive UI asks once (`Trust <path> and load it? [y/N]`); `-p` runs print a
+one-line notice on stderr and continue without them. `--trust` trusts the
+folder for this invocation only.
+
+```bash
+lcgn trust [PATH]            # trust PATH (default: --cwd / cwd) and persist it
+lcgn trust [PATH] --revoke   # mark it untrusted
+lcgn trust [PATH] --status   # print trusted/untrusted and the ignored files
+```
+
 ## Interactive terminal UI
 
 ```powershell
@@ -242,9 +265,11 @@ lcgn [options] [@files...] [messages...]
   --system-prompt <text>       Replace the built-in system prompt
   --append-system-prompt <t>   Append text to the system prompt
   --cwd <dir>                  Project directory (default: cwd)
+  --trust                      Trust the project folder for this invocation
   --list-models [search]       Table of authenticated models
   --profile <name>             Config profile from config.toml [profiles.<name>]
   config [show]                Print the effective config.toml (secrets masked)
+  trust [PATH] [--revoke|--status]  Persist or inspect project trust
   -v, --version, -h, --help
 ```
 

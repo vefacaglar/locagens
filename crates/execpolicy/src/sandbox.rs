@@ -391,12 +391,8 @@ pub fn build_linux_bwrap_args(
         }
         // Carve-outs stay read-only so hooks/config/tool state cannot be
         // rewritten by sandboxed commands.
-        for carve_out in [
-            ".git/hooks",
-            ".git/config",
-            ".locagens",
-        ] {
-            let path = format!("{root}/{carve_out}");
+        for entry in crate::protected_paths::SANDBOX_PROTECTED_PATHS {
+            let path = format!("{root}/{}", entry.relative);
             if Path::new(&path).exists() {
                 out.push("--ro-bind".to_string());
                 out.push(path.clone());
