@@ -93,10 +93,38 @@ Slash commands (TUI and REPL):
 /undo                  undo the last turn (git snapshot restore)
 /diff                  working-tree diff
 /mcp, /skills          list MCP servers / skills
+/review [target]       code review (see "Code review" below); `/review ` opens a
+                       popup of targets: uncommitted changes, branches, commits
 /sessions              list sessions for this directory
 /usage                 usage/cost of the current session
 /help, /exit
 ```
+
+## Code review
+
+`lcgn review` reviews code changes on the selected model in a read-only run
+(chat mode: file read/search tools only, no edits, no commands; the diff is
+gathered with read-only `git` and handed to the model). The result is
+structured: findings with title, priority (`P0`..`P3`), confidence, file and
+line range, plus an overall verdict.
+
+```powershell
+lcgn review --model opencode-go/glm-5.3-flash                 # uncommitted changes (default)
+lcgn review --uncommitted                                     # staged + unstaged + untracked
+lcgn review --base main                                       # changes since the merge base with main
+lcgn review --commit 1b27d87                                  # one commit
+lcgn review "focus on error handling in the parser"           # custom instructions
+lcgn review --base main --mode json                           # events as JSON lines + a final review_completed line
+```
+
+Findings print to stdout (progress on stderr); the exit code is 0 when the
+review ran, whatever it found. `--model`, `--provider`, `--thinking`, `--cwd`
+and `--mode` work before or after `review`. The review is stored as a normal
+session titled `Review: ...`; the last assistant message carries the
+structured result in `rawResponse` (`{"kind":"review_output", ...}`), so it
+reopens after a restart. In the REPL/TUI, `/review` starts a review the same
+way (`/review base <branch>`, `/review commit <sha>`, `/review <text>`); in the
+TUI the review becomes the current session.
 
 ## Plain REPL (`--no-tui`)
 

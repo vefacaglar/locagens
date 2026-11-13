@@ -17,6 +17,9 @@ pub mod services;
 pub mod state;
 pub mod util;
 
+/// Shared protocol types (review findings etc.) for the UIs.
+pub use locagens_protocol as protocol;
+
 /// Re-exported so consumers can keep referring to `crate::AppState`.
 pub use state::AppState;
 

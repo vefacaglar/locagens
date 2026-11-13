@@ -10,6 +10,8 @@
 //! (`camelCase` keys, `default` on every field) so the JSON on disk keeps
 //! round-tripping unchanged.
 
+pub mod review;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;

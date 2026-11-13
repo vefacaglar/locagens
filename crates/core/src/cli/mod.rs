@@ -6,6 +6,7 @@ pub mod auth;
 pub mod models;
 pub mod render;
 pub mod repl;
+pub mod review;
 pub mod runner;
 pub mod tui;
 
@@ -59,6 +60,7 @@ async fn run(cli: Cli) -> i32 {
                 };
                 auth::sessions_command(&state, &project, json)
             }
+            Command::Review(args) => return review_main(&state, &cli, &args).await,
         };
     }
 
@@ -188,4 +190,41 @@ async fn resolve_initial_session(
         };
     }
     Ok(None)
+}
+
+/// `lcgn review`: subcommand flags win over the global ones.
+async fn review_main(state: &Arc<crate::state::AppState>, cli: &Cli, args: &args::ReviewArgs) -> i32 {
+    let cwd = args.cwd.clone().or_else(|| cli.cwd.clone());
+    let project = match cwd.as_deref().filter(|dir| !dir.trim().is_empty()) {
+        Some(dir) => crate::util::canonical_project_path(dir),
+        None => std::env::current_dir().map_err(|err| format!("Cannot resolve the current directory: {err}")),
+    };
+    let project = match project {
+        Ok(project) => project,
+        Err(message) => {
+            eprintln!("lcgn: {message}");
+            return 2;
+        }
+    };
+    let model_flag = args.model.as_deref().or(cli.model.as_deref());
+    let provider_flag = args.provider.as_deref().or(cli.provider.as_deref());
+    let model = if model_flag.is_some() || provider_flag.is_some() {
+        match models::resolve_model(&state.pi, model_flag, provider_flag).await {
+            Ok(model) => Some(model),
+            Err(message) => {
+                eprintln!("lcgn: {message}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    let thinking = args
+        .thinking
+        .as_deref()
+        .or(cli.thinking.as_deref())
+        .filter(|level| !level.is_empty() && *level != "off")
+        .map(str::to_string);
+    let json_mode = args.mode.as_deref().or(cli.mode.as_deref()) == Some("json");
+    review::review_command(state, &project, model, thinking, args, json_mode).await
 }

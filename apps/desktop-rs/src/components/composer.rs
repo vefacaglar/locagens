@@ -719,6 +719,10 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                     store.toast("Select a project first.".to_string());
                 }
             }
+            "/review" => {
+                let argument = prompt.trim_start_matches(head.as_str()).trim().to_string();
+                super::review::start_from_command(&store, &argument);
+            }
             "/plan" | "/build" | "/auto" | "/chat" => {
                 let mode = match head.as_str() {
                     "/plan" => "plan",
@@ -731,7 +735,7 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                 store.toast(format!("Mode set to {mode}"));
             }
             _ => {
-                store.toast(format!("Unknown command {head} — try /new /fork /undo /plan /build /auto /chat"));
+                store.toast(format!("Unknown command {head} — try /new /fork /undo /review /plan /build /auto /chat"));
             }
         }
         return;

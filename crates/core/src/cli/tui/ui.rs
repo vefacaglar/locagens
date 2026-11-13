@@ -280,6 +280,7 @@ fn draw_popup(f: &mut Frame, popup: &Popup, composer: Rect, transcript: Rect) {
     let title = match popup.kind {
         PopupKind::Slash => " Commands · Tab complete ",
         PopupKind::File => " Files · Tab insert ",
+        PopupKind::Review => " Review target · Enter run ",
     };
     let block = Block::default()
         .borders(Borders::ALL)

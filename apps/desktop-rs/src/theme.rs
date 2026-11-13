@@ -142,8 +142,9 @@ pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
         ("0 12px 0 14px", "144px")
     };
 
+    let review_css = crate::components::review::REVIEW_CSS;
     format!(
-        ":root {{\n  color-scheme: {color_scheme};\n  --font-ui: {font_ui};\n  --font-mono: {font_mono};\n  --brand-pad: {brand_pad};\n  --controls-w: {controls_w};{tokens}}}\n{BASE_CSS}"
+        ":root {{\n  color-scheme: {color_scheme};\n  --font-ui: {font_ui};\n  --font-mono: {font_mono};\n  --brand-pad: {brand_pad};\n  --controls-w: {controls_w};{tokens}}}\n{BASE_CSS}\n{review_css}"
     )
 }
 

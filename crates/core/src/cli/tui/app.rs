@@ -7,7 +7,7 @@
 use super::composer::Composer;
 use super::overlay::{Approval, Overlay, QuestionAnswer, QuestionFlow};
 use super::popup::{
-    command_takes_no_args, completion_text, detect_trigger, file_items, slash_items, Popup,
+    command_takes_no_args, completion_text, detect_trigger, file_items, review_items, slash_items, Popup,
     PopupKind,
 };
 use super::transcript::{tool_status_label, Cell, CellKind, ToolResult};
@@ -110,6 +110,8 @@ pub struct App {
     pub cells: Vec<Cell>,
     pub composer: Composer,
     pub popup: Option<Popup>,
+    /// Targets offered after `/review ` (filled by the driver from git).
+    pub review_targets: Vec<super::popup::PopupItem>,
     pub overlay: Option<Overlay>,
     pub busy: bool,
     pub busy_since: Option<Instant>,
@@ -170,6 +172,7 @@ impl App {
             cells: Vec::new(),
             composer: Composer::default(),
             popup: None,
+            review_targets: Vec::new(),
             overlay: None,
             busy: false,
             busy_since: None,
@@ -799,15 +802,22 @@ impl App {
             return Vec::new();
         };
         let run_now = run_if_complete
-            && popup.kind == PopupKind::Slash
-            && command_takes_no_args(&item.value);
+            && match popup.kind {
+                PopupKind::Slash => command_takes_no_args(&item.value),
+                PopupKind::Review => true,
+                PopupKind::File => false,
+            };
         self.composer
             .replace_range_to_cursor(popup.token_start, &completion_text(popup.kind, &item));
         if run_now {
             return self.submit_composer();
         }
         let mut actions = Vec::new();
-        self.popup_dismissed_for = Some(self.composer.text().to_string());
+        // `/review ` keeps the popup open to pick the target.
+        let opens_review = popup.kind == PopupKind::Slash && item.value == "/review";
+        if !opens_review {
+            self.popup_dismissed_for = Some(self.composer.text().to_string());
+        }
         self.refresh_popup(&mut actions);
         actions
     }
@@ -913,6 +923,16 @@ impl App {
                     token_start: trigger.start,
                 });
             }
+            PopupKind::Review => {
+                let items = review_items(&self.review_targets, &trigger.query);
+                self.popup = (!items.is_empty()).then(|| Popup {
+                    kind: PopupKind::Review,
+                    items,
+                    selected: 0,
+                    query: trigger.query,
+                    token_start: trigger.start,
+                });
+            }
             PopupKind::File => {
                 let changed = self.last_file_query.as_deref() != Some(trigger.query.as_str());
                 if changed {
@@ -952,7 +972,7 @@ impl App {
     // ---- misc ---------------------------------------------------------------
 
     pub fn help_text() -> String {
-        "Commands: /model /thinking /plan /build /new /fork /undo /diff /mcp /skills /sessions /usage /exit\n\
+        "Commands: /model /thinking /plan /build /new /fork /undo /diff /review /mcp /skills /sessions /usage /exit\n\
          Keys: Enter send · Shift+Enter, Ctrl+J, Alt+Enter or trailing \\ newline · Up/Down history\n\
          Esc interrupt · Ctrl+C clear/interrupt/quit · Ctrl+D quit · Ctrl+O reasoning · Shift+Tab plan/build\n\
          PageUp/PageDown/wheel scroll · End follow · @ file mention · / commands"
@@ -1260,6 +1280,29 @@ mod tests {
         app.composer.clear();
         type_text(&mut app, "/pla");
         assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/plan"));
+    }
+
+    #[test]
+    fn review_popup_lists_targets_and_enter_runs_the_review() {
+        use super::super::popup::PopupItem;
+        let mut app = app();
+        app.review_targets = vec![
+            PopupItem { value: "uncommitted".into(), label: "uncommitted".into(), detail: "changes".into() },
+            PopupItem { value: "base main".into(), label: "base main".into(), detail: String::new() },
+        ];
+        type_text(&mut app, "/revi");
+        // Tab completes the command and immediately opens the target list.
+        assert!(app.on_key(press(KeyCode::Tab)).is_empty());
+        assert_eq!(app.composer.text(), "/review ");
+        let popup = app.popup.as_ref().expect("target popup");
+        assert_eq!(popup.kind, PopupKind::Review);
+        assert_eq!(popup.items.len(), 2);
+        app.on_key(press(KeyCode::Down));
+        assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/review base main"));
+        // Free text matches no target: no popup, Enter submits it as custom instructions.
+        type_text(&mut app, "/review check the parser");
+        assert!(app.popup.is_none());
+        assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/review check the parser"));
     }
 
     #[test]

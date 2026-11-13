@@ -16,6 +16,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "fork", args: "", description: "fork the current session" },
     SlashCommand { name: "undo", args: "", description: "undo the last turn (git snapshot)" },
     SlashCommand { name: "diff", args: "", description: "show the working-tree diff" },
+    SlashCommand { name: "review", args: "[target]", description: "code review: changes, a branch or a commit" },
     SlashCommand { name: "mcp", args: "", description: "list MCP servers and status" },
     SlashCommand { name: "skills", args: "", description: "list discovered skills" },
     SlashCommand { name: "sessions", args: "", description: "list sessions for this directory" },
@@ -39,6 +40,8 @@ pub fn filter_commands(query: &str) -> Vec<&'static SlashCommand> {
 pub enum PopupKind {
     Slash,
     File,
+    /// Targets of `/review ` (uncommitted changes, branches, commits).
+    Review,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +91,16 @@ pub fn slash_items(query: &str) -> Vec<PopupItem> {
         .collect()
 }
 
+/// Review targets matching `query` (case-insensitive substring of the label).
+pub fn review_items(targets: &[PopupItem], query: &str) -> Vec<PopupItem> {
+    let query = query.trim().to_lowercase();
+    targets
+        .iter()
+        .filter(|item| item.label.to_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
 pub fn file_items(paths: &[String]) -> Vec<PopupItem> {
     paths
         .iter()
@@ -111,6 +124,15 @@ pub struct Trigger {
 /// `@file` token ending at `cursor`.
 pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
     let before = &text[..cursor];
+    if let Some(rest) = before.strip_prefix("/review ") {
+        if !rest.contains('\n') {
+            return Some(Trigger {
+                kind: PopupKind::Review,
+                start: "/review ".len(),
+                query: rest.to_string(),
+            });
+        }
+    }
     if let Some(rest) = before.strip_prefix('/') {
         if !rest.contains(char::is_whitespace) {
             return Some(Trigger {
@@ -137,6 +159,7 @@ pub fn completion_text(kind: PopupKind, item: &PopupItem) -> String {
     match kind {
         PopupKind::Slash => format!("{} ", item.value),
         PopupKind::File => format!("@{} ", item.value),
+        PopupKind::Review => item.value.clone(),
     }
 }
 
@@ -189,6 +212,24 @@ mod tests {
         assert!(detect_trigger("email a@b.com", 13).is_none());
         let multiline = "first\n@rea";
         assert_eq!(detect_trigger(multiline, multiline.len()).unwrap().query, "rea");
+    }
+
+    #[test]
+    fn review_arguments_trigger_the_target_popup() {
+        let trigger = detect_trigger("/review ba", 10).unwrap();
+        assert_eq!(trigger.kind, PopupKind::Review);
+        assert_eq!(trigger.start, 8);
+        assert_eq!(trigger.query, "ba");
+        // Without the space it is still the command popup.
+        assert_eq!(detect_trigger("/review", 7).unwrap().kind, PopupKind::Slash);
+        let targets = vec![
+            PopupItem { value: "uncommitted".into(), label: "uncommitted".into(), detail: String::new() },
+            PopupItem { value: "base main".into(), label: "base main".into(), detail: String::new() },
+        ];
+        assert_eq!(review_items(&targets, "").len(), 2);
+        assert_eq!(review_items(&targets, "BASE")[0].value, "base main");
+        assert!(review_items(&targets, "fix the parser").is_empty());
+        assert_eq!(completion_text(PopupKind::Review, &targets[1]), "base main");
     }
 
     #[test]

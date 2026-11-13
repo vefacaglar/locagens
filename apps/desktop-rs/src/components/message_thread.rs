@@ -3,7 +3,7 @@
 
 use super::icons::*;
 use super::*;
-use crate::markdown::{parse_diff, render_markdown, summarize_args, DiffLine};
+use crate::markdown::{parse_diff, summarize_args, DiffLine};
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 use locagens_core::db::RunMessage;
@@ -173,12 +173,7 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
                 if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
                     ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
                 }
-                if !message.content.is_empty() {
-                    div {
-                        class: "bubble md",
-                        dangerous_inner_html: render_markdown(&message.content),
-                    }
-                }
+                super::review::AssistantBody { message: message.clone() }
                 if !tool_calls.is_empty() {
                     ToolActivity { calls: tool_calls.clone(), depth: depth as u8 }
                 }
@@ -467,12 +462,7 @@ fn render_group_owned(group: &Group, depth: u8) -> Element {
                 if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
                     ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
                 }
-                if !message.content.is_empty() {
-                    div {
-                        class: "bubble md",
-                        dangerous_inner_html: render_markdown(&message.content),
-                    }
-                }
+                super::review::AssistantBody { message: message.clone() }
                 if !tool_calls.is_empty() {
                     ToolActivity { calls: tool_calls.clone(), depth }
                 }
