@@ -1094,6 +1094,14 @@ async fn opencode_api_keys_are_the_lowest_precedence_read_only_fallback() {
     assert_eq!(manager.resolve_api_key("huggingface", None).await.as_deref(), Some("new-key-12345"));
     assert_eq!(std::fs::read_to_string(opencode.join("auth.json")).unwrap(), before);
     assert!(read_auth(&agent).get("mixed-oauth").is_none());
+
+    // A key for a provider Locagens cannot call (no base URL anywhere) is not
+    // offered in the model picker; opencode-go (built-in) and groq are.
+    let listed: Vec<String> = manager.list_providers().await.into_iter().map(|p| p.id).collect();
+    assert!(!listed.contains(&"huggingface".to_string()), "{listed:?}");
+    assert!(listed.contains(&"opencode-go".to_string()) && listed.contains(&"groq".to_string()), "{listed:?}");
+    let logins: Vec<String> = manager.login_providers().into_iter().map(|p| p.id).collect();
+    assert!(!logins.contains(&"huggingface".to_string()), "{logins:?}");
 }
 
 #[tokio::test]

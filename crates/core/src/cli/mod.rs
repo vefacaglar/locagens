@@ -141,9 +141,25 @@ async fn run(mut cli: Cli) -> i32 {
     };
 
     let json_mode = cli.json_mode();
+    // Interactive TUI (or the plain REPL with --no-tui) when there is a TTY
+    // and no -p / --mode json.
+    let interactive = !cli.print && !json_mode && args::stdin_is_tty();
     let model = if cli.model.is_some() || cli.provider.is_some() {
         match models::resolve_model(&state.pi, cli.model.as_deref(), cli.provider.as_deref()).await {
             Ok(model) => Some(model),
+            // A stale config.toml default (e.g. Codex's own `model` in
+            // ~/.codex/config.toml) must not keep the interactive UI from
+            // opening: start without a model and let the user pick one.
+            Err(message) if cli.model_from_config && interactive => {
+                eprintln!("lcgn: config.toml default model unavailable: {message} Pick one with /model.");
+                None
+            }
+            Err(message) if cli.model_from_config => {
+                eprintln!(
+                    "lcgn: config.toml default model unavailable: {message} Pass --model provider/model or set `model` in ~/.locagens/config.toml."
+                );
+                return 2;
+            }
             Err(message) => {
                 eprintln!("lcgn: {message}");
                 return 2;
@@ -167,9 +183,6 @@ async fn run(mut cli: Cli) -> i32 {
         append_system_prompt: cli.append_system_prompt.clone(),
     };
 
-    // Interactive TUI (or the plain REPL with --no-tui) when there is a TTY
-    // and no -p / --mode json.
-    let interactive = !cli.print && !json_mode && args::stdin_is_tty();
     // Project hooks / MCP / plugins / rules / roles load only for a trusted
     // folder: ask once on a terminal, otherwise print a one-line notice.
     trust::ensure_project_trust(&project, cli.trust, interactive);

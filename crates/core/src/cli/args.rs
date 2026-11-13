@@ -99,6 +99,9 @@ pub struct Cli {
     pub default_thinking: Option<String>,
     #[arg(skip)]
     pub hide_reasoning: bool,
+    /// `model` was filled from config.toml, not given as a flag.
+    #[arg(skip)]
+    pub model_from_config: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -242,6 +245,7 @@ impl Cli {
     pub fn apply_config_defaults(&mut self, config: &locagens_config::config_toml::Config) {
         if self.model.is_none() {
             let (model, provider) = config_model_for(self.provider.as_deref(), config);
+            self.model_from_config = model.is_some();
             self.model = model;
             if self.provider.is_none() {
                 self.provider = provider;
@@ -426,6 +430,11 @@ hide_agent_reasoning = true
         let mut none = cli(&[]);
         none.apply_config_defaults(&config);
         assert_eq!((none.model.as_deref(), none.provider.as_deref()), (Some("gpt-5"), Some("openai")));
+        assert!(none.model_from_config, "filled from config.toml");
+
+        let mut flagged = cli(&["--model", "x/y"]);
+        flagged.apply_config_defaults(&config);
+        assert!(!flagged.model_from_config, "an explicit --model is not a config default");
 
         assert_eq!(config_model_for(Some("anthropic"), &config), (None, None));
     }

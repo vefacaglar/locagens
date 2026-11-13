@@ -695,8 +695,11 @@ impl PiProviderManager {
     /// Statuses carry no key or token values.
     pub fn login_providers(&self) -> Vec<LoginProvider> {
         let mut ids: Vec<String> = BUILTINS.iter().map(|p| p.id.to_string()).collect();
+        // Non-built-ins only when Locagens can call them (same rule as
+        // `list_providers`): an OpenCode-only key for an unknown provider is
+        // neither usable nor removable here.
         for id in self.provider_ids() {
-            if !ids.contains(&id) {
+            if !ids.contains(&id) && !self.resolve_base_url(&id).trim().is_empty() {
                 ids.push(id);
             }
         }
@@ -742,6 +745,10 @@ impl PiProviderManager {
     pub async fn list_providers(&self) -> Vec<ProviderMetadata> {
         self.provider_ids()
             .into_iter()
+            // A credential alone is not a usable provider: without a base URL
+            // (built-in, `models.json`, `config.toml` or a stored model) a
+            // call cannot be made, e.g. an OpenCode-only `huggingface` key.
+            .filter(|id| !self.resolve_base_url(id).trim().is_empty())
             .map(|id| {
                 let api = self.resolve_api(&id);
                 let models = self.merged_models(&id);
