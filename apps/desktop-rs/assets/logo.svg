@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Locagens mark: graphite tile with a hairline edge, a soft off-white "L"
+       built from two rounded bars and a muted indigo node (the agent). -->
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="#131317"/>
+  <rect x="17.5" y="17.5" width="221" height="221" rx="54.5" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+  <rect x="78" y="62" width="36" height="132" rx="18" fill="#e6e6ea"/>
+  <rect x="78" y="158" width="100" height="36" rx="18" fill="#e6e6ea"/>
+  <circle cx="176" cy="84" r="18" fill="#7f89c8"/>
+</svg>

@@ -6,6 +6,7 @@
 //! the desktop runtime with the root `App` component.
 
 mod components;
+mod logo;
 mod markdown;
 mod state_ui;
 mod theme;
@@ -23,7 +24,19 @@ fn main() {
     let mut window = WindowBuilder::new()
         .with_title("Locagens")
         .with_resizable(true)
-        .with_inner_size(LogicalSize::new(1380.0, 860.0));
+        .with_inner_size(LogicalSize::new(1380.0, 860.0))
+        .with_window_icon(logo::window_icon());
+    // Custom title bar: the header strips drag the window and `WindowControls`
+    // draws minimize / maximize / close (macOS keeps its traffic lights).
+    #[cfg(not(target_os = "macos"))]
+    {
+        window = window.with_decorations(false);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
+        window = window.with_undecorated_shadow(true);
+    }
     #[cfg(target_os = "macos")]
     {
         use dioxus::desktop::tao::dpi::LogicalPosition;
@@ -98,6 +111,11 @@ fn App() -> Element {
     };
     use_context_provider(|| store);
 
+    // Clipboard handler used by the copy buttons inside rendered code blocks.
+    use_effect(|| {
+        dioxus::document::eval(markdown::COPY_SCRIPT);
+    });
+
     // Load projects, runs and the provider catalog once at startup.
     use_hook(move || {
         let store = store;
@@ -108,11 +126,13 @@ fn App() -> Element {
     let stylesheet = theme::build_stylesheet(*dark_mode.read());
 
     let show_right_panel = *store.right_panel_open.read();
+    // The main column clears the window controls only while it is rightmost.
+    let shell_inspector_class = if show_right_panel { "with-inspector" } else { "no-inspector" };
 
     rsx! {
         style { dangerous_inner_html: stylesheet }
         div {
-            class: "app-shell {theme::theme_class(*dark_mode.read())}",
+            class: "app-shell {theme::theme_class(*dark_mode.read())} {shell_inspector_class}",
             components::sidebar::Sidebar {}
             div {
                 class: "main-column",
@@ -143,6 +163,9 @@ fn App() -> Element {
                 }
             }
             components::Toast {}
+            if !cfg!(target_os = "macos") {
+                components::WindowControls {}
+            }
         }
     }
 }

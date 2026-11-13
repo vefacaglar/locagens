@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use super::icons::*;
 use super::*;
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
@@ -66,147 +67,6 @@ pub fn relative_age(iso: &str) -> String {
     }
 }
 
-/* ---------------- 15x15 monochrome outline icons ---------------- */
-
-fn icon_sidebar() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            rect { x: "3", y: "3", width: "18", height: "18", rx: "2.5" }
-            path { d: "M9.5 3v18" }
-        }
-    }
-}
-
-fn icon_arrow_left() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M19 12H5" }
-            path { d: "m12 19-7-7 7-7" }
-        }
-    }
-}
-
-fn icon_arrow_right() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M5 12h14" }
-            path { d: "m12 5 7 7-7 7" }
-        }
-    }
-}
-
-fn icon_search() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            circle { cx: "11", cy: "11", r: "7" }
-            path { d: "m21 21-4.3-4.3" }
-        }
-    }
-}
-
-fn icon_plus() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M5 12h14" }
-            path { d: "M12 5v14" }
-        }
-    }
-}
-
-fn icon_clock() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            circle { cx: "12", cy: "12", r: "9" }
-            path { d: "M12 7v5l3.5 2" }
-        }
-    }
-}
-
-fn icon_briefcase() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            rect { x: "3", y: "7", width: "18", height: "14", rx: "2.5" }
-            path { d: "M9 7V5.5A2.5 2.5 0 0 1 11.5 3h1A2.5 2.5 0 0 1 15 5.5V7" }
-            path { d: "M3 13h18" }
-        }
-    }
-}
-
-fn icon_filter() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M4 6h16" }
-            path { d: "M7 12h10" }
-            path { d: "M10 18h4" }
-        }
-    }
-}
-
-fn icon_folder_plus() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M12 10v6" }
-            path { d: "M9 13h6" }
-            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
-        }
-    }
-}
-
-fn icon_folder(open: bool) -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            if open {
-                path { d: "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" }
-            } else {
-                path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
-            }
-        }
-    }
-}
-
-fn icon_dots_vertical() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            circle { cx: "12", cy: "5", r: "1.3", fill: "currentColor", stroke: "none" }
-            circle { cx: "12", cy: "12", r: "1.3", fill: "currentColor", stroke: "none" }
-            circle { cx: "12", cy: "19", r: "1.3", fill: "currentColor", stroke: "none" }
-        }
-    }
-}
-
-fn icon_gear() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
-            circle { cx: "12", cy: "12", r: "3" }
-        }
-    }
-}
-
 #[component]
 pub fn Sidebar() -> Element {
     let store: UiStore = use_context();
@@ -262,15 +122,16 @@ pub fn Sidebar() -> Element {
             div {
                 class: "sidebar-brand",
                 // Draggable window titlebar strip (double-click to maximize).
-                onmousedown: move |_| {
-                    dioxus::desktop::use_window().drag();
-                },
+                onmousedown: start_window_drag,
                 ondoubleclick: move |_| {
                     dioxus::desktop::use_window().toggle_maximized();
                 },
-                span { class: "brand-mark", "◆" }
-                span { class: "brand-title", "Locagens" }
+                div { class: "brand",
+                    {logo_mark()}
+                    span { class: "brand-title", "Locagens" }
+                }
                 div { class: "sidebar-toolbar",
+                    ondoubleclick: move |event| event.stop_propagation(),
                     button {
                         class: "toolbar-btn",
                         title: "Toggle sidebar",
@@ -445,7 +306,7 @@ pub fn Sidebar() -> Element {
                                             collapsed.insert(path_toggle.clone());
                                         }
                                     },
-                                    span { class: "project-folder-icon", {icon_folder(!is_collapsed)} }
+                                    span { class: "project-folder-icon", if is_collapsed { {icon_folder()} } else { {icon_folder_open()} } }
                                     span { class: "project-name", "{project.name}" }
                                     button {
                                         class: "subtle icon-btn project-menu-btn",
@@ -597,7 +458,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
             onclick: move |_| store.select_run(run_id_select.clone()),
             span { class: "run-title", "{run_title}" }
             if is_live {
-                span { class: "status-dot generating", title: "{status_label(&status)}" }
+                {status_dot(&status)}
             }
             span { class: "run-age", "{age}" }
             button {

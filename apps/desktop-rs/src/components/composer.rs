@@ -2,116 +2,11 @@
 //! attachments, @file / @symbol quick-inserts, mode / provider / model /
 //! effort selectors and the Send / Continue / Queue action.
 
+use super::icons::*;
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload};
 use locagens_core::pi_providers::ProviderMetadata;
-
-/* ---------------- 15x15 monochrome outline icons ---------------- */
-
-fn icon_plus() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M5 12h14" }
-            path { d: "M12 5v14" }
-        }
-    }
-}
-
-fn icon_paperclip() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" }
-        }
-    }
-}
-
-fn icon_folder() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
-        }
-    }
-}
-
-fn icon_at() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            circle { cx: "12", cy: "12", r: "4" }
-            path { d: "M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" }
-        }
-    }
-}
-
-fn icon_actions() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }
-            path { d: "M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z" }
-        }
-    }
-}
-
-fn icon_chevron_up() -> Element {
-    rsx! {
-        svg {
-            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "m18 15-6-6-6 6" }
-        }
-    }
-}
-
-fn icon_chevron_right() -> Element {
-    rsx! {
-        svg {
-            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "m9 18 6-6-6-6" }
-        }
-    }
-}
-
-fn icon_shield() -> Element {
-    rsx! {
-        svg {
-            width: "13", height: "13", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }
-        }
-    }
-}
-
-fn icon_check() -> Element {
-    rsx! {
-        svg {
-            width: "13", height: "13", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M20 6 9 17l-5-5" }
-        }
-    }
-}
-
-fn icon_arrow_right() -> Element {
-    rsx! {
-        svg {
-            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
-            stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-            path { d: "M5 12h14" }
-            path { d: "m12 5 7 7-7 7" }
-        }
-    }
-}
 
 /// Concise display label for a reasoning-effort value.
 fn effort_display_label(effort: &str) -> &'static str {
@@ -265,6 +160,16 @@ pub fn Composer() -> Element {
     } else {
         selected_model.clone()
     };
+    // Reasoning effort shown muted next to the model when it supports one.
+    let effort_hint: Option<String> = {
+        let efforts = model_efforts(current_provider, &selected_model);
+        if efforts.is_empty() {
+            None
+        } else {
+            let active = effective_effort(&selected_effort, &efforts).unwrap_or("medium");
+            Some(effort_display_label(active).to_string())
+        }
+    };
     let mode_label = match selected_mode.as_str() {
         "plan" => "Plan",
         "auto" => "Full Access",
@@ -319,7 +224,7 @@ pub fn Composer() -> Element {
             }
             // Full-width borderless prompt input.
             textarea {
-                placeholder: "Describe a task… (Enter to send, Shift+Enter for newline)",
+                placeholder: "Ask anything, @ to mention, / for commands",
                 value: "{prompt_text}",
                 rows: "2",
                 oninput: move |event| {
@@ -525,7 +430,7 @@ pub fn Composer() -> Element {
                             context_menu.set(next);
                         },
                         span { "{provider_label}" }
-                        {icon_chevron_up()}
+                        {icon_chevron_down()}
                     }
                     if *context_menu.read() == Some("provider") {
                         div {
@@ -577,8 +482,11 @@ pub fn Composer() -> Element {
                             hovered_model.set(None);
                             context_menu.set(next);
                         },
-                        span { "{model_label}" }
-                        {icon_chevron_up()}
+                        span { class: "ccm-model-name", "{model_label}" }
+                        if let Some(effort) = effort_hint.clone() {
+                            span { class: "ccm-model-effort", "{effort}" }
+                        }
+                        {icon_chevron_down()}
                     }
                     if *context_menu.read() == Some("model") {
                         div {
@@ -679,7 +587,7 @@ pub fn Composer() -> Element {
                         },
                         {icon_shield()}
                         span { "{mode_label}" }
-                        {icon_chevron_up()}
+                        {icon_chevron_down()}
                     }
                     if *context_menu.read() == Some("mode") {
                         div {
@@ -712,7 +620,7 @@ pub fn Composer() -> Element {
                 }
                 if is_generating {
                     button {
-                        class: "danger",
+                        class: "icon-btn danger",
                         title: "Stop the running turn",
                         onclick: move |_| {
                             let Some(run_id) = run.as_ref().map(|run| run.id.clone()) else {
@@ -723,7 +631,7 @@ pub fn Composer() -> Element {
                                 let _ = locagens_core::api::runs::cancel_run(&state, &run_id).await;
                             });
                         },
-                        "Stop"
+                        {icon_stop()}
                     }
                 }
                 button {
@@ -735,7 +643,7 @@ pub fn Composer() -> Element {
                         send_label.to_string()
                     },
                     onclick: move |_| submit(&store, busy),
-                    {icon_arrow_right()}
+                    {icon_arrow_up()}
                 }
             }
         }

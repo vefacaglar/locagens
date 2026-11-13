@@ -1,6 +1,7 @@
 //! Message thread: renders user messages, assistant Markdown answers with
 //! collapsible reasoning, tool-call cards and sub-agent groups.
 
+use super::icons::*;
 use super::*;
 use crate::markdown::{parse_diff, render_markdown, summarize_args, DiffLine};
 use crate::state_ui::UiStore;
@@ -112,6 +113,16 @@ pub fn MessageThread() -> Element {
     let groups = build_groups(&messages);
     let is_empty = groups.is_empty();
     let has_active = run_active(store.active_run.read().as_ref());
+    let project_name = store
+        .selected_project
+        .read()
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string());
+    let empty_title = match project_name {
+        Some(name) => format!("What should we build in {name}?"),
+        None => "What should we build?".to_string(),
+    };
 
     rsx! {
         div {
@@ -119,8 +130,9 @@ pub fn MessageThread() -> Element {
             if is_empty {
                 div {
                     class: "msg-empty",
-                    div { class: "big", "What should we build?" }
-                    div { "Pick a workspace and ask the agent to explore, plan, or make changes." }
+                    {logo_mark()}
+                    div { class: "big", "{empty_title}" }
+                    div { "Ask the agent to explore, plan, or make changes." }
                     { starter_cards(&store) }
                 }
             }
@@ -130,8 +142,8 @@ pub fn MessageThread() -> Element {
             if has_active && !groups.is_empty() {
                 div {
                     class: "msg-meta",
-                    span { class: "status-dot generating" }
-                    "working…"
+                    {status_dot("generating")}
+                    "Working…"
                 }
             }
         }
@@ -153,8 +165,7 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
                 key: "{message.id}",
                 div {
                     class: "msg-meta",
-                    span { class: "status-dot done" }
-                    span { "{message.model.clone().unwrap_or_else(|| \"assistant\".to_string())}" }
+                    span { class: "model-label", "{message.model.clone().unwrap_or_else(|| \"assistant\".to_string())}" }
                 }
                 if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
                     ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
@@ -166,12 +177,10 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
                     }
                 }
                 if !tool_calls.is_empty() {
-                    div {
-                        class: "tool-group",
-                        for call in tool_calls.iter() {
-                            ToolGroupCard { call: call.clone(), depth: depth as u8 }
-                        }
-                    }
+                    ToolActivity { calls: tool_calls.clone(), depth: depth as u8 }
+                }
+                if !message.content.is_empty() {
+                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
                 }
             }
         },
@@ -215,7 +224,6 @@ fn starter_cards(store: &UiStore) -> Element {
 #[component]
 fn ReasoningPanel(reasoning: String) -> Element {
     let open = use_signal(|| false);
-    let arrow = if *open.read() { "▾" } else { "▸" };
     rsx! {
         div {
             class: "collapsible reasoning-panel",
@@ -226,13 +234,108 @@ fn ReasoningPanel(reasoning: String) -> Element {
                     let is_open = *open.read();
                     open.set(!is_open);
                 },
-                span { "{arrow}" }
+                {chevron(*open.read())}
                 span { "Thought · {reasoning.split_whitespace().count()} words" }
             }
             if *open.read() {
                 div {
                     class: "collapsible-body",
                     "{reasoning}"
+                }
+            }
+        }
+    }
+}
+
+/// Footer under an assistant answer: relative age plus a copy button, both
+/// quiet until the message is hovered.
+#[component]
+fn MessageFooter(text: String, created_at: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let age = super::sidebar::relative_age(&created_at);
+    rsx! {
+        div {
+            class: "msg-footer",
+            span { class: "msg-time", "{age}" }
+            button {
+                class: "icon-btn",
+                title: "Copy message",
+                onclick: move |_| {
+                    // The text travels as a JSON string literal, never concatenated raw.
+                    let literal = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string());
+                    dioxus::document::eval(&format!("navigator.clipboard.writeText({literal})"));
+                    copied.set(true);
+                    spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        copied.set(false);
+                    });
+                },
+                if *copied.read() { {icon_check()} } else { {icon_copy()} }
+            }
+        }
+    }
+}
+
+/// Chevron that points right when collapsed and rotates down when open.
+fn chevron(open: bool) -> Element {
+    rsx! {
+        span { class: if open { "chev open" } else { "chev" }, {icon_chevron_right()} }
+    }
+}
+
+/// One-line summary of a turn's tool calls ("Ran 3 commands, edited 2 files").
+fn activity_summary(calls: &[ToolCallView]) -> String {
+    let count = |names: &[&str]| calls.iter().filter(|call| names.contains(&call.name.as_str())).count();
+    let commands = count(&["run_command", "exec_command", "write_stdin"]);
+    let edits = count(&["write_file", "edit_file", "apply_patch", "delete_file", "move_file"]);
+    let other = calls.len() - commands - edits;
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut parts = Vec::new();
+    if commands > 0 {
+        parts.push(("Ran", plural(commands, "command", "commands")));
+    }
+    if edits > 0 {
+        parts.push(("Edited", plural(edits, "file", "files")));
+    }
+    if other > 0 {
+        parts.push(("Used", plural(other, "tool", "tools")));
+    }
+    let mut text = String::new();
+    for (index, (verb, what)) in parts.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+            text.push_str(&verb.to_lowercase());
+        } else {
+            text.push_str(verb);
+        }
+        text.push(' ');
+        text.push_str(what);
+    }
+    text
+}
+
+/// Agent activity of one assistant turn, collapsed into a muted one-line row
+/// that expands into the individual tool cards.
+#[component]
+fn ToolActivity(calls: Vec<ToolCallView>, depth: u8) -> Element {
+    let running = calls.iter().any(|call| call.response.is_none());
+    let mut open = use_signal(|| running);
+    let summary = activity_summary(&calls);
+    rsx! {
+        div {
+            class: "tool-group",
+            button {
+                class: "activity-row",
+                onclick: move |_| {
+                    let is_open = *open.read();
+                    open.set(!is_open);
+                },
+                span { "{summary}" }
+                {chevron(*open.read())}
+            }
+            if *open.read() {
+                for call in calls.iter() {
+                    ToolGroupCard { call: call.clone(), depth }
                 }
             }
         }
@@ -282,10 +385,14 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
                     let is_open = *open.read();
                     open.set(!is_open);
                 },
-                span { if *open.read() { "▾" } else { "▸" } }
+                {chevron(*open.read())}
                 span { class: "tool-name", "{call.name}" }
                 span { class: "tool-args", "{args_summary}" }
-                span { class: "tool-status", "{status_text}" }
+                span {
+                    class: "tool-status",
+                    {status_dot(if done { "done" } else { "generating" })}
+                    "{status_text}"
+                }
             }
             if *open.read() {
                 div {
@@ -309,7 +416,6 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
 fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> Element {
     let open = use_signal(|| true);
     let is_explorer = role == "explorer";
-    let arrow = if *open.read() { "▲" } else { "▼" };
     rsx! {
         div {
             class: "coder-group",
@@ -320,9 +426,12 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
                     let is_open = *open.read();
                     open.set(!is_open);
                 },
-                span { class: "badge accent", if is_explorer { "🔎 explorer" } else { "🛠 worker" } }
+                span {
+                    class: "badge",
+                    if is_explorer { {icon_search()} "explorer" } else { {icon_wrench()} "worker" }
+                }
                 span { "{name}" }
-                span { style: "margin-left:auto", "{arrow}" }
+                span { class: "spacer", {chevron(*open.read())} }
             }
             if *open.read() {
                 div {
@@ -361,12 +470,7 @@ fn render_group_owned(group: &Group, depth: u8) -> Element {
                     }
                 }
                 if !tool_calls.is_empty() {
-                    div {
-                        class: "tool-group",
-                        for call in tool_calls.iter() {
-                            ToolGroupCard { call: call.clone(), depth }
-                        }
-                    }
+                    ToolActivity { calls: tool_calls.clone(), depth }
                 }
             }
         },

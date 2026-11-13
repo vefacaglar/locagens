@@ -1,14 +1,126 @@
 //! Markdown → HTML rendering and unified-diff parsing used by the chat
 //! thread, plan panel and permission cards.
 
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use std::sync::OnceLock;
+use syntect::html::{ClassStyle, ClassedHTMLGenerator};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
+
+/// Code blocks above this size are shown as plain text (highlighting cost).
+const MAX_HIGHLIGHT_BYTES: usize = 64 * 1024;
+
+fn syntax_set() -> &'static SyntaxSet {
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+/// Escapes text for HTML element content and double-quoted attributes.
+pub fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Highlights `code` as `lang` into classed `<span>`s (`s-keyword`, `s-string`
+/// ...; colours come from the theme stylesheet). `None` for unknown languages
+/// or oversized input, so callers fall back to escaped plain text.
+fn highlight_code(code: &str, lang: &str) -> Option<String> {
+    if lang.is_empty() || code.len() > MAX_HIGHLIGHT_BYTES {
+        return None;
+    }
+    let syntaxes = syntax_set();
+    let syntax = syntaxes.find_syntax_by_token(lang)?;
+    let mut generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, syntaxes, ClassStyle::SpacedPrefixed { prefix: "s-" });
+    for line in LinesWithEndings::from(code) {
+        generator.parse_html_for_line_which_includes_newline(line).ok()?;
+    }
+    Some(generator.finalize())
+}
+
+/// HTML of one fenced / indented code block: a card whose copy button lives
+/// on the non-scrolling wrapper and carries the raw code (escaped) for the
+/// clipboard handler.
+fn code_block_html(code: &str, lang: &str) -> String {
+    let body = highlight_code(code, lang).unwrap_or_else(|| escape_html(code));
+    let lang_class = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{}\"", escape_html(lang))
+    };
+    format!(
+        "<div class=\"code-block\"><button class=\"code-copy\" type=\"button\" title=\"Copy\" data-code=\"{raw}\" onclick=\"locagensCopy(this)\"><span class=\"ico-copy\">{copy}</span><span class=\"ico-check\">{check}</span></button><pre><code{lang_class}>{body}</code></pre></div>",
+        raw = escape_html(code),
+        copy = crate::components::icons::COPY_SVG,
+        check = crate::components::icons::CHECK_SVG,
+    )
+}
+
+/// JavaScript installed once at startup: copies a code block's raw text and
+/// flips its button to a check mark for 1.5 seconds.
+pub const COPY_SCRIPT: &str = r#"
+window.locagensCopy = function (button) {
+  var done = function () {
+    button.classList.add('copied');
+    setTimeout(function () { button.classList.remove('copied'); }, 1500);
+  };
+  navigator.clipboard.writeText(button.dataset.code || '').then(done, function () {});
+};
+"#;
 
 /// Renders Markdown (tables, strikethrough, task lists enabled) to HTML.
+///
+/// Raw HTML in the source is treated as text (model output is untrusted),
+/// tables get a scroll wrapper and code blocks become highlighted cards with
+/// a copy button.
 pub fn render_markdown(md: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let parser = Parser::new_ext(md, options);
+    let mut events: Vec<Event> = Vec::new();
+    let mut code: Option<(String, String)> = None;
+    for event in Parser::new_ext(md, options) {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                code = Some((lang, String::new()));
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((lang, text)) = code.take() {
+                    events.push(Event::Html(code_block_html(&text, &lang).into()));
+                }
+            }
+            Event::Text(text) if code.is_some() => {
+                if let Some((_, buffer)) = code.as_mut() {
+                    buffer.push_str(&text);
+                }
+            }
+            Event::Start(Tag::Table(alignments)) => {
+                events.push(Event::Html("<div class=\"table-wrap\">".into()));
+                events.push(Event::Start(Tag::Table(alignments)));
+            }
+            Event::End(TagEnd::Table) => {
+                events.push(Event::End(TagEnd::Table));
+                events.push(Event::Html("</div>".into()));
+            }
+            // Never pass model-provided HTML through.
+            Event::Html(raw) | Event::InlineHtml(raw) => events.push(Event::Text(raw)),
+            other => events.push(other),
+        }
+    }
     let mut html_out = String::with_capacity(md.len() + 32);
-    html::push_html(&mut html_out, parser);
+    html::push_html(&mut html_out, events.into_iter());
     html_out
 }
 
@@ -207,5 +319,51 @@ mod tests {
     fn falls_back_to_json_serialization() {
         let args: Value = serde_json::json!({ "custom_key": 42 });
         assert_eq!(summarize_args(&args), r#"{"custom_key":42}"#);
+    }
+
+    #[test]
+    fn table_has_header_body_and_scroll_wrapper() {
+        let html = render_markdown("| A | B |\n|---|---|\n| 1 | 2 |\n");
+        assert!(html.starts_with("<div class=\"table-wrap\"><table>"), "{html}");
+        assert!(html.contains("<thead>") && html.contains("<th>A</th>"));
+        assert!(html.contains("<tbody>") && html.contains("<td>1</td>"));
+        assert!(html.trim_end().ends_with("</table>\n</div>") || html.trim_end().ends_with("</div>"));
+    }
+
+    #[test]
+    fn fenced_code_gets_wrapper_copy_button_and_highlighting() {
+        for (lang, code) in [("rust", "fn main() { let x = 1; }"), ("python", "def f():\n    return 1")] {
+            let html = render_markdown(&format!("```{lang}\n{code}\n```\n"));
+            assert!(html.contains("<div class=\"code-block\">"), "{html}");
+            assert!(html.contains("class=\"code-copy\""), "{html}");
+            assert!(html.contains("<span class=\"s-"), "no highlight spans for {lang}: {html}");
+            assert!(html.contains(&format!("language-{lang}")));
+        }
+    }
+
+    #[test]
+    fn copy_button_carries_the_raw_code_not_the_html() {
+        let html = render_markdown("```rust\nlet a = \"<b>\";\n```\n");
+        assert!(html.contains("data-code=\"let a = &quot;&lt;b&gt;&quot;;\n\""), "{html}");
+    }
+
+    #[test]
+    fn unknown_language_falls_back_to_escaped_plain_text() {
+        let html = render_markdown("```nosuchlang\n<script>alert(1)</script>\n```\n");
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{html}");
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<span class=\"s-"));
+    }
+
+    #[test]
+    fn raw_html_from_the_model_is_escaped() {
+        let html = render_markdown("hello <img src=x onerror=alert(1)> <b>bold</b>\n\n<div>block</div>\n");
+        assert!(!html.contains("<img") && !html.contains("<b>") && !html.contains("<div>block"));
+        assert!(html.contains("&lt;img"));
+    }
+
+    #[test]
+    fn inline_code_stays_a_code_element() {
+        assert!(render_markdown("use `x < y`").contains("<code>x &lt; y</code>"));
     }
 }
