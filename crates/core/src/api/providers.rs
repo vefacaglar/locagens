@@ -11,7 +11,7 @@ use crate::pi_providers::{
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Result of `fetch_models`: remote + cached models, or a
 /// soft error (never a hard failure).
@@ -105,6 +105,18 @@ pub async fn list_providers(state: &AppState) -> ApiResult<Vec<ProviderMetadata>
 pub async fn refresh_model_lists(state: &AppState) -> usize {
     let outcomes = state.pi.refresh_stale_model_lists(crate::pi_providers::MODEL_LIST_MAX_AGE).await;
     outcomes.iter().filter(|(_, outcome)| outcome.is_ok()).count()
+}
+
+/// `provider/model` ids the user switched off in Settings → Providers.
+pub fn hidden_models(state: &AppState) -> HashSet<String> {
+    crate::services::hidden_models::load(&state.settings_path).into_iter().collect()
+}
+
+/// Shows (`hidden = false`) or hides one model in the model pickers.
+pub fn set_model_hidden(state: &AppState, provider_id: &str, model: &str, hidden: bool) -> ApiResult<()> {
+    let key = crate::services::hidden_models::model_key(provider_id, model);
+    crate::services::hidden_models::set_hidden(&state.settings_path, &key, hidden)
+        .map_err(|err| ApiError::bad_request(format!("Failed to save model visibility: {err}")))
 }
 
 /// Returns editable provider configs with masked API keys.

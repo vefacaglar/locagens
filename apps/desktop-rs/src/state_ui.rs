@@ -106,6 +106,22 @@ impl RightPanelTab {
     }
 }
 
+/// `catalog` minus hidden `provider/model` ids; providers with no model left
+/// are dropped.
+pub fn visible_catalog(
+    catalog: &[ProviderMetadata],
+    hidden: &std::collections::HashSet<String>,
+) -> Vec<ProviderMetadata> {
+    catalog
+        .iter()
+        .filter_map(|provider| {
+            let mut provider = provider.clone();
+            provider.models.retain(|model| !hidden.contains(&format!("{}/{model}", provider.id)));
+            (!provider.models.is_empty()).then_some(provider)
+        })
+        .collect()
+}
+
 /// Where a run event lands: the visible conversation or only the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventScope {
@@ -177,6 +193,8 @@ pub struct UiStore {
     pub appearance: Signal<Appearance>,
     /// Live OS dark-mode state (only consulted for `ThemeChoice::System`).
     pub system_dark: Signal<bool>,
+    /// Persisted widths of the sidebar and the right panel.
+    pub layout: Signal<prefs::Layout>,
     pub page: Signal<AppPage>,
     pub projects: Signal<Vec<Project>>,
     pub selected_project: Signal<Option<String>>,
@@ -192,6 +210,10 @@ pub struct UiStore {
     pub pending_permission: Signal<Option<Value>>,
     pub pending_question: Signal<Option<Value>>,
     pub providers_catalog: Signal<Vec<ProviderMetadata>>,
+    /// `provider/model` ids switched off in Settings → Providers.
+    pub hidden_models: Signal<std::collections::HashSet<String>>,
+    /// Bumped when usage lands or a run ends; the usage page reloads on it.
+    pub usage_epoch: Signal<u64>,
     pub selected_provider: Signal<String>,
     pub selected_model: Signal<String>,
     pub selected_effort: Signal<String>,
@@ -215,6 +237,7 @@ pub struct UiStore {
 pub fn use_ui_store() -> UiStore {
     UiStore {
         appearance: use_signal(prefs::load),
+        layout: use_signal(prefs::load_layout),
         system_dark: use_signal(|| true),
         page: use_signal(|| AppPage::Chat),
         projects: use_signal(Vec::new),
@@ -230,6 +253,8 @@ pub fn use_ui_store() -> UiStore {
         pending_permission: use_signal(|| None),
         pending_question: use_signal(|| None),
         providers_catalog: use_signal(Vec::new),
+        hidden_models: use_signal(Default::default),
+        usage_epoch: use_signal(|| 0),
         selected_provider: use_signal(String::new),
         selected_model: use_signal(String::new),
         selected_effort: use_signal(|| "medium".to_string()),
@@ -291,15 +316,27 @@ impl UiStore {
     /// API key in Settings, so the model picker shows it without a restart.
     pub fn refresh_providers(&self) {
         let store = *self;
-        spawn(async move { store.load_providers().await });
+        spawn(async move {
+            store.load_providers().await;
+            store.refresh_model_lists().await;
+        });
+    }
+
+    /// Re-fetches stale provider `/models` lists in the background and
+    /// reloads the catalog when one changed.
+    async fn refresh_model_lists(&self) {
+        if api::providers::refresh_model_lists(&core()).await > 0 {
+            self.load_providers().await;
+        }
     }
 
     /// Loads the provider catalog and picks a default model when none is set.
     async fn load_providers(&self) {
         let mut store = *self;
         let Ok(providers) = api::providers::list_providers(&core()).await else { return };
-        let first = providers.iter().find(|provider| !provider.models.is_empty()).cloned();
+        store.hidden_models.set(api::providers::hidden_models(&core()));
         store.providers_catalog.set(providers);
+        let first = store.visible_catalog().into_iter().next();
         if let Some(provider) = first {
             if store.selected_provider.read().is_empty() {
                 store.selected_provider.set(provider.id.clone());
@@ -308,6 +345,22 @@ impl UiStore {
                 store.selected_model.set(provider.models.first().cloned().unwrap_or_default());
             }
         }
+    }
+
+    /// The provider catalog without hidden models; providers left with no
+    /// visible model are dropped (the model pickers use this).
+    pub fn visible_catalog(&self) -> Vec<ProviderMetadata> {
+        visible_catalog(&self.providers_catalog.read(), &self.hidden_models.read())
+    }
+
+    /// Switches one model on or off and persists it through the api facade.
+    pub fn set_model_hidden(&self, provider_id: &str, model: &str, hidden: bool) {
+        let mut store = *self;
+        if api::providers::set_model_hidden(&core(), provider_id, model, hidden).is_err() {
+            store.toast(store.t("toast.model_visibility_failed").to_string());
+            return;
+        }
+        store.hidden_models.set(api::providers::hidden_models(&core()));
     }
 
     pub fn refresh_initial(&self) {
@@ -328,6 +381,7 @@ impl UiStore {
             if let Some(run) = latest_run {
                 store.select_run(run.id);
             }
+            store.refresh_model_lists().await;
         });
     }
 
@@ -452,6 +506,10 @@ impl UiStore {
     fn process_event(&self, run_id: &str, event: Value) -> bool {
         let mut store = *self;
         let kind = event.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+        // New usage anywhere (any run, any agent) makes the usage page stale.
+        if matches!(kind.as_str(), "usage_recorded" | "run_completed" | "run_failed") {
+            store.usage_epoch.with_mut(|epoch| *epoch += 1);
+        }
         // Events of a run that is not in view may only touch its sidebar entry.
         let foreground = event_scope(store.active_run_id.peek().as_deref(), run_id) == EventScope::Foreground;
         if !foreground && !applies_in_background(&kind) {

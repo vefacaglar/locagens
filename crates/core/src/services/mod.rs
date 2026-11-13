@@ -1,6 +1,7 @@
 //! Long-lived services backing the Settings tabs and background tooling.
 
 pub mod git;
+pub mod hidden_models;
 pub mod hooks;
 pub mod mcp;
 pub mod processes;

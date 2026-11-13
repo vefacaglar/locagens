@@ -35,16 +35,6 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
             // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
             onmousedown: super::start_window_drag,
             h2 { "{store.t(\"settings.title\")}" }
-            button {
-                class: "subtle icon-btn",
-                // Clicks on the button must not start a window drag.
-                onmousedown: move |e| e.stop_propagation(),
-                onclick: move |_| {
-                    let mut store: UiStore = use_context();
-                    store.page.set(crate::state_ui::AppPage::Chat);
-                },
-                "← {store.t(\"common.back_to_chat\")}"
-            }
         }
         div {
             class: "settings-layout",

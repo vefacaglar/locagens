@@ -6,6 +6,7 @@ pub mod chat_header;
 pub mod composer;
 pub mod icons;
 pub mod message_thread;
+pub mod resize;
 pub mod review;
 pub mod right_panel;
 pub mod settings;

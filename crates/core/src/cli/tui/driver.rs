@@ -320,6 +320,8 @@ impl Driver {
     /// Loads the persisted transcript and run details of `run_id`.
     /// Fills the `/model ` popup with every model of the callable providers.
     pub async fn load_model_choices(&mut self) {
+        // Models switched off in the desktop's Settings → Providers stay hidden.
+        let hidden = crate::api::providers::hidden_models(&self.state);
         self.app.model_choices = self
             .state
             .pi
@@ -334,6 +336,7 @@ impl Driver {
                     detail: name.clone(),
                 })
             })
+            .filter(|item| !hidden.contains(&item.value))
             .collect();
     }
 
