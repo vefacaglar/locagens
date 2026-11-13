@@ -52,11 +52,8 @@ pub fn ChatHeader() -> Element {
     rsx! {
         header {
             class: "chat-header",
-            // Draggable window titlebar strip (double-click to maximize).
+            // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
             onmousedown: start_window_drag,
-            ondoubleclick: move |_| {
-                dioxus::desktop::use_window().toggle_maximized();
-            },
             div {
                 class: "chat-header-meta",
                 {status_dot(&status)}

@@ -32,13 +32,8 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
     rsx! {
         div {
             class: "page-header",
-            // Draggable window titlebar strip (double-click to maximize).
-            onmousedown: move |_| {
-                dioxus::desktop::use_window().drag();
-            },
-            ondoubleclick: move |_| {
-                dioxus::desktop::use_window().toggle_maximized();
-            },
+            // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
+            onmousedown: super::start_window_drag,
             h2 { "{store.t(\"settings.title\")}" }
             button {
                 class: "subtle icon-btn",

@@ -52,10 +52,60 @@ pub fn status_dot(status: &str) -> Element {
 }
 
 /// `onmousedown` handler of draggable header strips: a primary-button press
-/// starts dragging the (undecorated) window.
+/// starts dragging the (undecorated) window, a second press within the
+/// double-click interval toggles maximize.
+///
+/// `ondoubleclick` cannot be used: the first press hands the mouse to the
+/// OS move loop (`drag()`), so the webview never sees the second click.
 pub fn start_window_drag(event: Event<MouseData>) {
-    if event.trigger_button() == Some(dioxus::html::input_data::MouseButton::Primary) {
-        dioxus::desktop::use_window().drag();
+    if event.trigger_button() != Some(dioxus::html::input_data::MouseButton::Primary) {
+        return;
+    }
+    let point = event.screen_coordinates();
+    let window = dioxus::desktop::use_window();
+    if is_double_press(std::time::Instant::now(), (point.x, point.y)) {
+        window.toggle_maximized();
+    } else {
+        window.drag();
+    }
+}
+
+/// Last primary press on a drag strip: time and screen position.
+static LAST_DRAG_PRESS: std::sync::Mutex<Option<(std::time::Instant, (f64, f64))>> = std::sync::Mutex::new(None);
+
+/// Windows' default double-click time and a few pixels of slack.
+const DOUBLE_PRESS_MS: u128 = 500;
+const DOUBLE_PRESS_SLOP: f64 = 6.0;
+
+/// Records a press and says whether it completes a double press (the pair is
+/// consumed, so a triple press does not toggle twice).
+fn is_double_press(now: std::time::Instant, point: (f64, f64)) -> bool {
+    let mut last = LAST_DRAG_PRESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let double = last.is_some_and(|(at, (x, y))| {
+        now.duration_since(at).as_millis() <= DOUBLE_PRESS_MS
+            && (point.0 - x).abs() <= DOUBLE_PRESS_SLOP
+            && (point.1 - y).abs() <= DOUBLE_PRESS_SLOP
+    });
+    *last = if double { None } else { Some((now, point)) };
+    double
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn second_press_nearby_and_soon_is_a_double_press() {
+        let start = Instant::now();
+        *LAST_DRAG_PRESS.lock().unwrap() = None;
+        assert!(!is_double_press(start, (100.0, 10.0)));
+        assert!(is_double_press(start + Duration::from_millis(200), (102.0, 11.0)));
+        // Consumed: a third quick press starts a new pair.
+        assert!(!is_double_press(start + Duration::from_millis(300), (102.0, 11.0)));
+        // Too slow or too far is not a double press.
+        assert!(!is_double_press(start + Duration::from_millis(1000), (102.0, 11.0)));
+        assert!(!is_double_press(start + Duration::from_millis(1100), (300.0, 11.0)));
     }
 }
 

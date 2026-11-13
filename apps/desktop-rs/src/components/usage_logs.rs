@@ -46,11 +46,8 @@ pub fn UsageLogsPage() -> Element {
     rsx! {
         div {
             class: "page-header",
-            // Draggable window titlebar strip (double-click to maximize).
+            // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
             onmousedown: super::start_window_drag,
-            ondoubleclick: move |_| {
-                dioxus::desktop::use_window().toggle_maximized();
-            },
             h2 { "{store.t(\"usage.title\")}" }
             input {
                 r#type: "search",

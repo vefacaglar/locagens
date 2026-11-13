@@ -721,6 +721,7 @@ fn run_slash(mut store: UiStore, action: SlashAction) {
             store.messages.set(Vec::new());
             store.plan.set(None);
             store.run_usage.set(None);
+            store.context_usage.set(None);
             store.pending_permission.set(None);
             store.pending_question.set(None);
             store.turn_diff.set(None);
@@ -894,6 +895,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
                 store.messages.set(initial_msgs);
                 store.plan.set(None);
                 store.run_usage.set(None);
+                store.context_usage.set(None);
                 store.pending_permission.set(None);
                 store.pending_question.set(None);
                 store.turn_diff.set(None);

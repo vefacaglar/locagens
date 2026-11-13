@@ -199,9 +199,10 @@ bun.lockb
 
 .deno/
 
-# rust
+# rust (also side build dirs such as target-cross/ or target-review/)
 target/
 **/target/
+target-*/
 **/*.rs.bk
 *.pdb
 
@@ -234,6 +235,7 @@ PLAN.local.md
 
 .claude/settings.local.json
 .claude/local/
+.claude/worktrees/
 .cursor/
 .aider*
 .continue/
@@ -258,3 +260,5 @@ usage.log
 .locagens/snapshots.json
 .locagens/snapshots/
 .locagens/worktrees/
+# entries the sandbox metadata guard moved aside (.git / .locagens swaps)
+*.locagens-quarantine-*

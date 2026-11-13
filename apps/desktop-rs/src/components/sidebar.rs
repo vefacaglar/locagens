@@ -121,11 +121,8 @@ pub fn Sidebar() -> Element {
             }
             div {
                 class: "sidebar-brand",
-                // Draggable window titlebar strip (double-click to maximize).
+                // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
                 onmousedown: start_window_drag,
-                ondoubleclick: move |_| {
-                    dioxus::desktop::use_window().toggle_maximized();
-                },
                 div { class: "brand",
                     {logo_mark()}
                     span { class: "brand-title", "Locagens" }
@@ -596,6 +593,7 @@ fn new_chat(store: &UiStore) {
     store.messages.set(Vec::new());
     store.plan.set(None);
     store.run_usage.set(None);
+    store.context_usage.set(None);
     store.pending_permission.set(None);
     store.pending_question.set(None);
     store.turn_diff.set(None);
@@ -655,6 +653,7 @@ fn delete_run(store: &UiStore, run_id: &str) {
             store.messages.set(Vec::new());
             store.plan.set(None);
             store.run_usage.set(None);
+            store.context_usage.set(None);
             store.pending_permission.set(None);
             store.pending_question.set(None);
             store.turn_diff.set(None);

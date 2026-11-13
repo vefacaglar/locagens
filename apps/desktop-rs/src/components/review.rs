@@ -223,6 +223,7 @@ pub fn start(store: &UiStore, target: ReviewTarget) {
                 store.messages.set(messages);
                 store.plan.set(None);
                 store.run_usage.set(None);
+                store.context_usage.set(None);
                 store.pending_permission.set(None);
                 store.pending_question.set(None);
                 store.turn_diff.set(None);

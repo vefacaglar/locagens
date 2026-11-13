@@ -41,6 +41,8 @@ const DARK_TOKENS: &str = "
   --active: rgba(255, 255, 255, 0.07);
   --border: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.13);
+  /* Focused text fields: a neutral, slightly brighter edge (no colored glow). */
+  --border-focus: rgba(255, 255, 255, 0.24);
   --text: #ececef;
   --text-2: #a4a4ad;
   --text-3: #6f6f79;
@@ -86,6 +88,7 @@ const LIGHT_TOKENS: &str = "
   --active: rgba(0, 0, 0, 0.075);
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.15);
+  --border-focus: rgba(0, 0, 0, 0.3);
   --text: #18181b;
   --text-2: #52525b;
   --text-3: #8b8b95;
@@ -401,8 +404,8 @@ input, textarea, select {
 }
 input:hover, select:hover { border-color: var(--border-strong); }
 input:focus, textarea:focus, select:focus {
-  border-color: var(--accent-ring);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--border-focus);
+  box-shadow: none;
 }
 input::placeholder, textarea::placeholder { color: var(--text-3); }
 select { color: var(--text-2); font-size: 12px; padding: 4px 8px; cursor: pointer; }
@@ -753,7 +756,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
   display: flex; flex-direction: column; gap: 8px;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
-.composer:focus-within { border-color: var(--accent-ring); box-shadow: 0 0 0 3px var(--accent-soft); }
+.composer:focus-within { border-color: var(--border-focus); box-shadow: none; }
 .composer textarea {
   flex: 1; background: transparent; border: none; box-shadow: none;
   padding: 4px 4px; min-height: 44px; max-height: 180px;
@@ -861,6 +864,9 @@ button.section-head:hover { color: var(--text-2); }
 .list-row:hover { background: var(--hover); }
 .meter { height: 3px; border-radius: 2px; background: var(--active); overflow: hidden; }
 .meter-fill { height: 100%; background: var(--text-3); border-radius: 2px; }
+.meter-fill.warn { background: var(--warn); }
+.meter-fill.danger { background: var(--err); }
+.info-row .mono.muted { color: var(--text-3); }
 .empty-hint.inline { font-size: 12px; color: var(--text-3); padding: 2px 0; }
 .clickable { cursor: pointer; }
 .proc-command { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }

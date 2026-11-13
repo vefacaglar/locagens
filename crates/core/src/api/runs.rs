@@ -711,6 +711,54 @@ pub async fn list_messages(state: &AppState, run_id: &str) -> ApiResult<Vec<RunM
     Ok(state.db.list_messages(run_id))
 }
 
+/// How full a run's context window is: the size of the main agent's latest
+/// model call (its input plus the answer it produced, i.e. what the next call
+/// starts from) against the model's window.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Tokens in the context after the latest main-agent call; 0 before the
+    /// first call.
+    pub used_tokens: i64,
+    /// The model's context window (provider catalog, else
+    /// `model_context_window` from config.toml); `None` when unknown.
+    pub context_window: Option<i64>,
+    /// `used_tokens` as a percentage of `context_window` (0-100).
+    pub percent: Option<u8>,
+}
+
+impl ContextUsage {
+    fn new(used_tokens: i64, context_window: Option<i64>) -> Self {
+        let context_window = context_window.filter(|window| *window > 0);
+        let percent = context_window.map(|window| ((used_tokens.max(0) * 100) / window).clamp(0, 100) as u8);
+        Self { used_tokens: used_tokens.max(0), context_window, percent }
+    }
+}
+
+/// Context-window fill of a run (see [`ContextUsage`]).
+pub async fn context_usage(state: &AppState, run_id: &str) -> ApiResult<ContextUsage> {
+    let run = state.db.get_run_full(run_id).ok_or_else(|| ApiError::not_found("Run not found."))?;
+    let used = state
+        .db
+        .list_usage(Some(run_id))
+        .iter()
+        .rev()
+        .find(|entry| entry.role() == crate::db::MAIN_AGENT_ROLE)
+        .map(|entry| entry.input_tokens + entry.output_tokens)
+        .unwrap_or(0);
+    let window = state
+        .pi
+        .model_info(&run.provider_id, &run.model)
+        .and_then(|info| info.context_window)
+        .filter(|window| *window > 0)
+        .or_else(|| {
+            crate::config_runtime::current()
+                .model_context_window
+                .and_then(|window| i64::try_from(window).ok())
+        });
+    Ok(ContextUsage::new(used, window))
+}
+
 /// Aggregated usage for one run.
 pub async fn run_usage(state: &AppState, run_id: &str) -> ApiResult<RunUsageSummary> {
     if state.db.get_run_full(run_id).is_none() {
@@ -978,6 +1026,15 @@ pub async fn subscribe_run_events(state: &AppState, run_id: &str) -> EventRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_usage_percent_is_clamped_and_needs_a_window() {
+        assert_eq!(ContextUsage::new(50_000, Some(200_000)).percent, Some(25));
+        assert_eq!(ContextUsage::new(300_000, Some(200_000)).percent, Some(100));
+        assert_eq!(ContextUsage::new(10, None).percent, None);
+        assert_eq!(ContextUsage::new(10, Some(0)), ContextUsage { used_tokens: 10, context_window: None, percent: None });
+        assert_eq!(ContextUsage::new(-5, Some(100)).used_tokens, 0);
+    }
 
     #[test]
     fn usage_summary_aggregates_by_role() {

@@ -187,6 +187,8 @@ pub struct UiStore {
     pub messages: Signal<Vec<RunMessage>>,
     pub plan: Signal<Option<Plan>>,
     pub run_usage: Signal<Option<api::runs::RunUsageSummary>>,
+    /// Context-window fill of the active run (inspector "Context").
+    pub context_usage: Signal<Option<api::runs::ContextUsage>>,
     pub pending_permission: Signal<Option<Value>>,
     pub pending_question: Signal<Option<Value>>,
     pub providers_catalog: Signal<Vec<ProviderMetadata>>,
@@ -224,6 +226,7 @@ pub fn use_ui_store() -> UiStore {
         messages: use_signal(Vec::new),
         plan: use_signal(|| None),
         run_usage: use_signal(|| None),
+        context_usage: use_signal(|| None),
         pending_permission: use_signal(|| None),
         pending_question: use_signal(|| None),
         providers_catalog: use_signal(Vec::new),
@@ -368,6 +371,7 @@ impl UiStore {
             let messages = api::runs::list_messages(&state, &run_id).await.unwrap_or_default();
             let plan = api::runs::run_plan(&state, &run_id).await.unwrap_or(None);
             let usage = api::runs::run_usage(&state, &run_id).await.ok();
+            let context = api::runs::context_usage(&state, &run_id).await.ok();
             let pending = api::runs::run_pending(&state, &run_id).await.ok();
             if event_scope(store.active_run_id.peek().as_deref(), &run_id) == EventScope::Background {
                 return;
@@ -378,6 +382,7 @@ impl UiStore {
             store.messages.set(messages);
             store.plan.set(plan);
             store.run_usage.set(usage);
+            store.context_usage.set(context);
             if let Some(pending) = pending {
                 store.pending_permission.set(pending.permission_request);
                 store.pending_question.set(pending.question_request);
@@ -564,6 +569,12 @@ impl UiStore {
                     }
                 }
             }
+            // A model call was accounted: refresh cost/tokens and context fill.
+            "usage_recorded" => {
+                if foreground {
+                    store.reload_usage(run_id);
+                }
+            }
             "patch_progress" => {
                 let complete = event.get("complete").and_then(Value::as_bool).unwrap_or(true);
                 store.patch_progress.set((!complete).then(|| event.clone()));
@@ -575,13 +586,13 @@ impl UiStore {
                     return true;
                 }
                 store.patch_progress.set(None);
+                store.reload_usage(&run_id);
                 spawn(async move {
                     let state = core();
                     if let Ok(run) = api::runs::get_run(&state, &run_id).await {
                         store.active_run.set(Some(run));
                     }
                     store.refresh_runs();
-                    store.run_usage.set(api::runs::run_usage(&state, &run_id).await.ok());
                 });
                 store.pending_permission.set(None);
                 store.pending_question.set(None);
@@ -593,6 +604,23 @@ impl UiStore {
             _ => {}
         }
         true
+    }
+
+    /// Reloads the usage summary and context fill of `run_id` (dropped when
+    /// another run was selected meanwhile).
+    pub fn reload_usage(&self, run_id: &str) {
+        let mut store = *self;
+        let run_id = run_id.to_string();
+        spawn(async move {
+            let state = core();
+            let usage = api::runs::run_usage(&state, &run_id).await.ok();
+            let context = api::runs::context_usage(&state, &run_id).await.ok();
+            if store.active_run_id.peek().as_deref() != Some(run_id.as_str()) {
+                return;
+            }
+            store.run_usage.set(usage);
+            store.context_usage.set(context);
+        });
     }
 
     /// Shows a transient toast message that auto-clears after 4 s.

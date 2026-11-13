@@ -211,6 +211,13 @@ impl AgentLoop {
                     created_at: crate::util::now_iso(),
                     duration_ms: None,
                 });
+                // Lets frontends refresh usage / context fill while the run is
+                // still going (not only when it ends).
+                self.handle.emit(json!({
+                    "type": "usage_recorded",
+                    "runId": self.run_id,
+                    "agentRole": self.agent_role.as_deref().unwrap_or(crate::db::MAIN_AGENT_ROLE),
+                }));
             }
 
             if tool_calls.is_empty() {

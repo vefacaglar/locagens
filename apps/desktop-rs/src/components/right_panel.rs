@@ -59,11 +59,8 @@ pub fn RightPanel() -> Element {
     rsx! {
         div {
             class: "right-panel-head",
-            // Draggable window titlebar strip (double-click to maximize).
+            // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
             onmousedown: start_window_drag,
-            ondoubleclick: move |_| {
-                dioxus::desktop::use_window().toggle_maximized();
-            },
             span { class: "head-title", "{store.t(\"inspector.title\")}" }
         }
         div {
@@ -205,32 +202,26 @@ fn EnvironmentSection() -> Element {
     }
 }
 
-/// Context usage of the conversation: average input tokens per model call
-/// against the selected model's context window, when the catalog knows it.
+/// Context-window fill of the active run: tokens after the main agent's
+/// latest model call against the model's window (`api::runs::context_usage`,
+/// refreshed on every `usage_recorded` event).
 #[component]
 fn ContextSection() -> Element {
     let store: UiStore = use_context();
-    let Some(usage) = store.run_usage.read().clone() else {
+    if store.active_run_id.read().is_none() {
         return rsx! {};
+    }
+    let context = store.context_usage.read().clone().unwrap_or_default();
+    let used = crate::state_ui::fmt_tokens(context.used_tokens);
+    let amount = match context.context_window {
+        Some(window) => format!("{used} / {}", crate::state_ui::fmt_tokens(window)),
+        None => store.tf("header.tokens", &[&used]),
     };
-    let selected_provider = store.selected_provider.read().clone();
-    let selected_model = store.selected_model.read().clone();
-    let limit = store
-        .providers_catalog
-        .read()
-        .iter()
-        .find(|provider| provider.id == selected_provider)
-        .and_then(|provider| provider.model_settings.as_ref())
-        .and_then(|settings| settings.get(selected_model.as_str()))
-        .and_then(|entry| entry.get("contextLimit"))
-        .and_then(Value::as_i64)
-        .filter(|limit| *limit > 0);
-    let per_call = if usage.total_calls > 0 {
-        usage.total_input_tokens / usage.total_calls as i64
-    } else {
-        0
+    let meter_class = match context.percent {
+        Some(percent) if percent >= 90 => "meter-fill danger",
+        Some(percent) if percent >= 75 => "meter-fill warn",
+        _ => "meter-fill",
     };
-    let percent = limit.map(|limit| ((per_call * 100) / limit).clamp(0, 100));
     rsx! {
         section {
             class: "inspector-section",
@@ -240,16 +231,20 @@ fn ContextSection() -> Element {
                 div {
                     class: "info-row",
                     span { class: "grow", "{store.t(\"inspector.window_used\")}" }
-                    if let Some(percent) = percent {
-                        span { class: "mono", "{percent}%" }
-                    } else {
-                        span { class: "mono", "{store.tf(\"header.tokens\", &[&crate::state_ui::fmt_tokens(per_call)])}" }
+                    span { class: "mono", "{amount}" }
+                    if let Some(percent) = context.percent {
+                        span { class: "mono muted", "{percent}%" }
                     }
                 }
-                if let Some(percent) = percent {
+                if let Some(percent) = context.percent {
                     div {
                         class: "meter",
-                        div { class: "meter-fill", style: "width: {percent}%" }
+                        role: "progressbar",
+                        "aria-valuemin": "0",
+                        "aria-valuemax": "100",
+                        "aria-valuenow": "{percent}",
+                        "aria-label": "{store.t(\"inspector.window_used\")}",
+                        div { class: "{meter_class}", style: "width: {percent}%" }
                     }
                 }
             }
