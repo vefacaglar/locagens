@@ -580,10 +580,20 @@ impl Driver {
     async fn undo(&mut self, project: &str) {
         let session = self.app.session.clone();
         match crate::api::projects::undo_last_turn(&self.state, project, session.as_deref()).await {
-            Ok(snapshot) => self.app.push_notice(format!(
-                "Restored snapshot {} (HEAD {}).",
-                snapshot.id, snapshot.head_sha
-            )),
+            Ok(snapshot) => {
+                self.app.push_notice(format!(
+                    "Restored snapshot {} (HEAD {}, {} file(s)).",
+                    snapshot.id,
+                    snapshot.head_sha,
+                    snapshot.restored.len()
+                ));
+                if !snapshot.skipped.is_empty() {
+                    self.app.push_notice(format!(
+                        "Left alone (changed after that turn): {}",
+                        snapshot.skipped.join(", ")
+                    ));
+                }
+            }
             Err(err) => self.app.push_error(format!("undo failed: {err}")),
         }
     }

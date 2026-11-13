@@ -7,7 +7,7 @@
 //! on a real pseudo-terminal (PTY) so TTY-aware programs behave.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,16 +100,87 @@ pub struct ProcessLogEntry {
 
 struct Managed {
     info: ProcessInfo,
-    logs: Vec<ProcessLogEntry>,
+    /// Bounded log ring; `logs[0]` has the absolute sequence `first_seq`.
+    logs: VecDeque<ProcessLogEntry>,
+    first_seq: u64,
     command: String,
     project_path: PathBuf,
     options: SpawnOptions,
     /// Writable stdin end (pipe or PTY writer) for interactive sessions.
     stdin: Option<StdinSink>,
-    /// Read cursor into `logs` for incremental `poll_output` calls.
-    read_cursor: usize,
+    /// Absolute sequence of the next entry `poll_output` returns. Absolute
+    /// so it stays valid once old entries fall out of the ring (QA-026).
+    read_cursor: u64,
+    /// Stream tag state of the last poll, so chunks continuing a line are
+    /// not re-tagged mid-line.
+    poll_tag: PollTag,
     /// Job Object + network proxy of a natively sandboxed (Windows) child.
     sandbox: Option<crate::sandbox::SandboxSession>,
+}
+
+/// `[stream] ` tags are written when the stream changes, never mid-line.
+#[derive(Default)]
+struct PollTag {
+    stream: Option<String>,
+    at_line_start: bool,
+}
+
+impl PollTag {
+    /// Appends one log entry to `output`, tagging it only when it starts a
+    /// different stream than the text before it.
+    fn render(&mut self, output: &mut String, entry: &ProcessLogEntry) {
+        if self.stream.as_deref() != Some(entry.stream.as_str()) {
+            if !self.at_line_start && self.stream.is_some() {
+                output.push('\n');
+            }
+            output.push_str(&format!("[{}] ", entry.stream));
+            self.stream = Some(entry.stream.clone());
+        }
+        output.push_str(&entry.text);
+        self.at_line_start = entry.text.ends_with('\n');
+    }
+}
+
+/// Decodes a byte stream chunk by chunk without turning a multibyte UTF-8
+/// character split across two reads into `U+FFFD`.
+#[derive(Default)]
+struct Utf8Chunks {
+    pending: Vec<u8>,
+}
+
+impl Utf8Chunks {
+    fn decode(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let keep = incomplete_utf8_tail(&self.pending);
+        let tail = self.pending.split_off(self.pending.len() - keep);
+        let text = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending = tail;
+        text
+    }
+
+    fn finish(&mut self) -> String {
+        let text = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        text
+    }
+}
+
+/// Number of trailing bytes that start a UTF-8 sequence not yet complete.
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0xC0 == 0x80 {
+            continue; // continuation byte: keep looking for the lead byte
+        }
+        let needed = match byte {
+            0xF0..=0xFF => 4,
+            0xE0..=0xEF => 3,
+            0xC0..=0xDF => 2,
+            _ => 1,
+        };
+        return if needed > back { back } else { 0 };
+    }
+    0
 }
 
 pub struct ProcessManager {
@@ -136,14 +207,22 @@ impl ProcessManager {
     fn append_log(&self, id: &str, stream: &str, text: &str) {
         if let Some(managed) = self.get_arc(id) {
             let mut m = managed.lock().expect("managed process poisoned");
-            m.logs.push(ProcessLogEntry {
+            m.logs.push_back(ProcessLogEntry {
                 timestamp: now_iso(),
                 stream: stream.to_string(),
                 text: text.to_string(),
             });
             if m.logs.len() > MAX_LOGS_PER_PROCESS {
-                m.logs.remove(0);
+                m.logs.pop_front();
+                m.first_seq += 1;
             }
+        }
+    }
+
+    /// Appends decoded reader output (empty text is skipped).
+    fn append_decoded(&self, id: &str, stream: &str, text: String) {
+        if !text.is_empty() {
+            self.append_log(id, stream, &text);
         }
     }
 
@@ -210,12 +289,14 @@ impl ProcessManager {
 
         let managed = Arc::new(Mutex::new(Managed {
             info: info.clone(),
-            logs: Vec::new(),
+            logs: VecDeque::new(),
+            first_seq: 0,
             command: command.trim().to_string(),
             project_path,
             options,
             stdin: None,
             read_cursor: 0,
+            poll_tag: PollTag { stream: None, at_line_start: true },
             sandbox: None,
         }));
         self.lock_processes().insert(id.clone(), managed);
@@ -255,25 +336,61 @@ impl ProcessManager {
 
     /// Drains new output for `id` since the last poll and reports the current
     /// status (`running` / `exited` from the exec-session point of view).
+    ///
+    /// The cursor only advances past what was returned: output beyond
+    /// `max_chars` stays queued for the next poll (a single oversized entry
+    /// is returned cut, so polling always makes progress).
     pub fn poll_output(&self, id: &str, max_chars: usize) -> Option<ExecPoll> {
         let managed = self.get_arc(id)?;
-        let mut m = managed.lock().expect("managed process poisoned");
+        let mut guard = managed.lock().expect("managed process poisoned");
+        let m = &mut *guard;
         let mut output = String::new();
-        for entry in m.logs.iter().skip(m.read_cursor) {
-            let text = format!("[{}] {}", entry.stream, entry.text);
-            if output.len() + text.len() > max_chars {
-                output.push_str("... (output truncated)\n");
+        if m.read_cursor < m.first_seq {
+            let dropped = m.first_seq - m.read_cursor;
+            output.push_str(&format!("... ({dropped} earlier output chunks were dropped from the log buffer)\n"));
+            m.read_cursor = m.first_seq;
+            m.poll_tag = PollTag { stream: None, at_line_start: true };
+        }
+        let start = (m.read_cursor - m.first_seq) as usize;
+        let mut consumed = 0u64;
+        for entry in m.logs.iter().skip(start) {
+            let mut piece = String::new();
+            let mut tag = PollTag { stream: m.poll_tag.stream.clone(), at_line_start: m.poll_tag.at_line_start };
+            tag.render(&mut piece, entry);
+            if output.len() + piece.len() > max_chars {
+                if consumed == 0 {
+                    // One entry larger than the budget: return it cut.
+                    let cut = locagens_protocol::text::floor_char_boundary(&piece, max_chars.saturating_sub(output.len()));
+                    output.push_str(&piece[..cut]);
+                    output.push('\n');
+                    m.poll_tag = PollTag { stream: tag.stream, at_line_start: true };
+                    consumed = 1;
+                }
+                output.push_str("... (more output pending: poll again)\n");
                 break;
             }
-            output.push_str(&text);
+            output.push_str(&piece);
+            m.poll_tag = tag;
+            consumed += 1;
         }
-        m.read_cursor = m.logs.len();
-        let status = if m.info.status == "running" { "running" } else { "exited" };
+        m.read_cursor += consumed;
+        // `exited` only once the output is drained too, so callers that drop
+        // the session on exit never lose its tail.
+        let drained = m.read_cursor >= m.first_seq + m.logs.len() as u64;
+        let status = if m.info.status == "running" || !drained { "running" } else { "exited" };
         Some(ExecPoll {
             output: output.trim_end().to_string(),
             status: status.to_string(),
             exit_code: m.info.exit_code,
         })
+    }
+
+    /// Whether the session's process is still running, without consuming
+    /// any output (`None` for an unknown session).
+    pub fn is_running(&self, id: &str) -> Option<bool> {
+        let managed = self.get_arc(id)?;
+        let m = managed.lock().expect("managed process poisoned");
+        Some(m.info.status == "running")
     }
 
     /// Removes a finished session from the registry.
@@ -405,15 +522,14 @@ impl ProcessManager {
         std::thread::spawn(move || {
             use std::io::Read as _;
             let mut buf = [0u8; 4096];
+            let mut decoder = Utf8Chunks::default();
             loop {
                 match stream.read(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                        this.append_log(&id, stream_name, &text);
-                    }
+                    Ok(n) => this.append_decoded(&id, stream_name, decoder.decode(&buf[..n])),
                 }
             }
+            this.append_decoded(&id, stream_name, decoder.finish());
         });
     }
 
@@ -611,16 +727,15 @@ impl ProcessManager {
                 std::thread::spawn(move || {
                     let mut file = unsafe { std::fs::File::from_raw_fd(reader_fd) };
                     let mut buf = [0u8; 4096];
+                    let mut decoder = Utf8Chunks::default();
                     use std::io::Read as _;
                     loop {
                         match file.read(&mut buf) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                                this.append_log(&id_owned, "stdout", &text);
-                            }
+                            Ok(n) => this.append_decoded(&id_owned, "stdout", decoder.decode(&buf[..n])),
                         }
                     }
+                    this.append_decoded(&id_owned, "stdout", decoder.finish());
                 });
 
                 {
@@ -701,15 +816,14 @@ impl ProcessManager {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
+            let mut decoder = Utf8Chunks::default();
             loop {
                 match stream.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let text = String::from_utf8_lossy(&buf[..n]).to_string();
-                        this.append_log(&id, stream_name, &text);
-                    }
+                    Ok(n) => this.append_decoded(&id, stream_name, decoder.decode(&buf[..n])),
                 }
             }
+            this.append_decoded(&id, stream_name, decoder.finish());
         });
     }
 
@@ -768,7 +882,9 @@ impl ProcessManager {
                     .lock()
                     .expect("managed process poisoned")
                     .logs
-                    .clone()
+                    .iter()
+                    .cloned()
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -893,8 +1009,112 @@ async fn kill_tree(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
+
+    /// A registered session with no child process, for log-ring tests.
+    fn fake_session(manager: &ProcessManager, id: &str) {
+        let info = ProcessInfo {
+            id: id.to_string(),
+            command: "fake".into(),
+            project_path: String::new(),
+            status: "running".into(),
+            started_at: now_iso(),
+            stopped_at: None,
+            exit_code: None,
+            pid: None,
+        };
+        let managed = Managed {
+            info,
+            logs: VecDeque::new(),
+            first_seq: 0,
+            command: "fake".into(),
+            project_path: PathBuf::new(),
+            options: SpawnOptions::default(),
+            stdin: None,
+            read_cursor: 0,
+            poll_tag: PollTag { stream: None, at_line_start: true },
+            sandbox: None,
+        };
+        manager.lock_processes().insert(id.to_string(), Arc::new(Mutex::new(managed)));
+    }
+
+    /// QA-026: once the ring is full, new output must still be returned.
+    #[test]
+    fn polling_keeps_working_after_the_log_ring_wraps() {
+        let manager = ProcessManager::new();
+        fake_session(&manager, "s");
+        for n in 0..MAX_LOGS_PER_PROCESS {
+            manager.append_log("s", "stdout", &format!("{n}\n"));
+        }
+        let first = manager.poll_output("s", usize::MAX).unwrap();
+        assert!(first.output.ends_with(&format!("{}", MAX_LOGS_PER_PROCESS - 1)));
+        for round in 0..3 {
+            manager.append_log("s", "stdout", &format!("late-{round}\n"));
+            let poll = manager.poll_output("s", usize::MAX).unwrap();
+            assert_eq!(poll.output, format!("late-{round}"), "round {round}");
+        }
+        // Entries that fell out of the ring unread are reported, not hidden.
+        for n in 0..(MAX_LOGS_PER_PROCESS + 5) {
+            manager.append_log("s", "stdout", &format!("x{n}\n"));
+        }
+        let poll = manager.poll_output("s", usize::MAX).unwrap();
+        assert!(poll.output.starts_with("... (5 earlier output chunks were dropped"), "{}", &poll.output[..80]);
+    }
+
+    /// Output over `max_chars` stays queued for the next poll.
+    #[test]
+    fn truncated_polls_do_not_drop_unread_output() {
+        let manager = ProcessManager::new();
+        fake_session(&manager, "s");
+        for n in 0..10 {
+            manager.append_log("s", "stdout", &format!("line-{n}\n"));
+        }
+        let mut seen = String::new();
+        for _ in 0..20 {
+            let poll = manager.poll_output("s", 30).unwrap();
+            seen.push_str(&poll.output.replace("... (more output pending: poll again)", ""));
+            seen.push('\n');
+        }
+        for n in 0..10 {
+            assert!(seen.contains(&format!("line-{n}")), "line-{n} lost: {seen}");
+        }
+        // A finished process only reports `exited` once its output is drained.
+        manager.append_log("s", "stdout", &"y".repeat(30));
+        manager.append_log("s", "stdout", &"z".repeat(30));
+        manager.get_arc("s").unwrap().lock().unwrap().info.status = "stopped".into();
+        assert_eq!(manager.poll_output("s", 40).unwrap().status, "running");
+        assert_eq!(manager.poll_output("s", 400).unwrap().status, "exited");
+    }
+
+    /// Stream tags mark stream switches, never the middle of a line.
+    #[test]
+    fn stream_tags_are_not_inserted_mid_line() {
+        let manager = ProcessManager::new();
+        fake_session(&manager, "s");
+        manager.append_log("s", "stdout", "Compiling foo");
+        manager.append_log("s", "stdout", " v1.0\nDone\n");
+        manager.append_log("s", "stderr", "warn: x");
+        manager.append_log("s", "stdout", "ok\n");
+        let poll = manager.poll_output("s", usize::MAX).unwrap();
+        assert_eq!(poll.output, "[stdout] Compiling foo v1.0\nDone\n[stderr] warn: x\n[stdout] ok");
+        manager.append_log("s", "stdout", "more\n");
+        assert_eq!(manager.poll_output("s", usize::MAX).unwrap().output, "more");
+    }
+
+    #[test]
+    fn utf8_chunks_survive_split_reads() {
+        let bytes = "ğ→🙂".as_bytes();
+        let mut decoder = Utf8Chunks::default();
+        let mut text = String::new();
+        for byte in bytes {
+            text.push_str(&decoder.decode(std::slice::from_ref(byte)));
+        }
+        text.push_str(&decoder.finish());
+        assert_eq!(text, "ğ→🙂");
+        // Invalid bytes still decode (lossy) instead of stalling.
+        let mut decoder = Utf8Chunks::default();
+        assert_eq!(decoder.decode(&[b'a', 0xFF, b'b']), "a\u{FFFD}b");
+    }
 
     /// Spawns a TTY session whose script proves stdin is a terminal, feeds a
     /// line via `write_stdin` and verifies the output roundtrip.

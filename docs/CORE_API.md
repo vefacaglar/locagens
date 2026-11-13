@@ -64,6 +64,28 @@ pub async fn usage_logs(state, query: &UsageLogQuery) -> ApiResult<UsageLogsResp
 pub async fn subscribe_run_events(state, run_id) -> EventRx
 ```
 
+Run lifecycle rules:
+
+* **One drive per run.** Every turn gets a fresh `RunHandle`; `continue_run`
+  returns `Conflict` while a drive of the run is live in this process (queue a
+  mid-run message instead), and also while the run shows an active status
+  updated in the last 2 minutes without a live handle here (another Locagens
+  process may be driving it).
+* **Cancel is final and awaited.** `cancel_run` cancels the handle (never
+  reset), resolves pending prompts, marks the run `cancelled`, kills the run's
+  exec sessions and waits up to 5 s for the drive to unwind before aborting
+  its task. A later `continue_run` always runs on a new handle.
+* **Panics** in a drive task are caught by a supervisor: the run is marked
+  `failed` (`run_failed` is emitted) and its handle is released.
+* **Exec sessions** (`exec_command`) are tracked per run: killed when a turn
+  is cancelled, fails or panics; kept after a `done` turn so `write_stdin`
+  can reach them in the next turn.
+* **Permissions.** Every prompt (tool calls of any agent, network approvals)
+  queues on one gate and owns the single pending slot. `apply_permission_decision`
+  only delivers the answer; the asking side applies `allow_run` and persists
+  `allow_project` / `allow_always` exactly once. A network "Allow for Run"
+  approves that host for the current turn only, never other tool calls.
+
 ### Event subscription
 
 ```rust
@@ -97,7 +119,15 @@ pub async fn git_diff_details(state, path) -> ApiResult<Vec<GitFileDiff>>
 pub async fn git_generate_message(state, run_id) -> ApiResult<String>   // LLM commit message
 pub async fn git_commit(state, input: GitCommitInput) -> ApiResult<()>
 pub fn require_registered_project(state, raw) -> ApiResult<PathBuf>     // workspace containment
+pub async fn undo_last_turn(state, path, run_id: Option<&str>) -> ApiResult<GitSnapshot>
 ```
+
+`undo_last_turn` reverts only the paths the turn changed (pre-turn tree vs
+the post-turn tree recorded when the turn ended). Paths changed again since
+(user edits, later turns) are left alone and listed in `skipped`; reverted
+paths are listed in `restored`. HEAD / index are restored only if still what
+the turn left. The replaced state is saved as a `<run_id>#undo` snapshot, so
+undoing that snapshot redoes the turn.
 
 ### `api::providers` — `pi` providers, models & auth
 
@@ -284,9 +314,12 @@ back to a canonicalized search so the Symbols tab works before registration.
 ## Run model
 
 Runs are **single-model**: one provider/model drives the whole run. The main
-agent can fan work out to sub-agents with the `spawn_agents` tool —
-`explorer` (read-only) or `worker` (full workspace tools) — each running its
-own `AgentLoop` with the run's model. There are no agent presets, no
+agent can fan work out to sub-agents — `explorer` (read-only) or `worker`
+(full workspace tools) — each running its own `AgentLoop` with the run's
+model. All sub-agents live in one per-run agent hub (max 4 live agents):
+`spawn_agent` & co. manage persistent named agents, and the one-shot
+`spawn_agents` batch registers its agents in the same hub, waits for every
+first turn and closes them. There are no agent presets, no
 coder/utility tiers and no `delegate_tasks`/`delegate_to_utility` tools.
 
 ## Conventions

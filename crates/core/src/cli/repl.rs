@@ -219,9 +219,17 @@ async fn handle_slash(
             match crate::api::projects::undo_last_turn(state, &project, session.as_deref()).await {
                 Ok(snapshot) => {
                     eprintln!(
-                        "lcgn: restored snapshot {} (HEAD {}).",
-                        snapshot.id, snapshot.head_sha
+                        "lcgn: restored snapshot {} (HEAD {}, {} file(s)).",
+                        snapshot.id,
+                        snapshot.head_sha,
+                        snapshot.restored.len()
                     );
+                    if !snapshot.skipped.is_empty() {
+                        eprintln!(
+                            "lcgn: left alone (changed after that turn): {}",
+                            snapshot.skipped.join(", ")
+                        );
+                    }
                 }
                 Err(err) => eprintln!("lcgn: undo failed: {err}"),
             }

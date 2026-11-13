@@ -97,7 +97,23 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   Children share the parent's `RunHandle`: parent cancel cancels them, their
   permission prompts queue through the parent's permission flow, and their
   messages carry `agentRole`/`agentName`. Children get no agent tools (depth
-  1). `spawn_agents` stays as the one-shot parallel batch.
+  1). `spawn_agents` is the one-shot parallel batch on the same hub: its
+  agents take slots, it waits for each first turn, then closes them.
+- Drive lifecycle: one drive (and one fresh `RunHandle`) per turn;
+  `continue_run` is a conflict while a drive is live (queue instead).
+  Cancellation is final for a handle (never reset); `cancel_run` waits up to
+  5 s for the drive, then aborts it. A supervisor marks a panicked drive
+  `failed` and always runs cleanup (close agents, drop handle, kill the run's
+  exec sessions unless the turn ended `done`). Long awaits (LLM call, exec
+  polling) race cancellation. LLM streams use one shared client, no total
+  timeout, 300 s idle timeout, and split SSE on raw bytes before decoding.
+- All permission prompts (any agent, network approvals) go through
+  `RunHandle::ask_permission`: one queue, one slot owned by prompt id, a drop
+  guard that clears it. Grants are persisted only by the asking side. Network
+  "Allow for Run" hosts live on the handle (current turn only).
+- Byte-budget string cuts use `locagens_protocol::text` (char-boundary safe).
+- `/undo` reverts only paths the turn changed (pre- vs post-turn tree),
+  skips paths changed since, and saves a `<run_id>#undo` backup snapshot.
 - Other tools: `tool_search` (more than 8 MCP tools are deferred; matches are
   added to the next request), `get_context_remaining`, `host_executable`
   (PATH/PATHEXT lookup). `apply_patch` args are parsed while streaming and

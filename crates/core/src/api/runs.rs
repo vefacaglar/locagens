@@ -151,6 +151,20 @@ fn active_run_statuses() -> [&'static str; 4] {
     ["created", "generating", "awaiting_permission", "awaiting_input"]
 }
 
+/// How long an active status without a live drive in this process is
+/// trusted to belong to another process before it counts as stale.
+const ACTIVE_RUN_STALE_AFTER: Duration = Duration::from_secs(120);
+
+/// Whether a run's last update is older than [`ACTIVE_RUN_STALE_AFTER`]
+/// (unparseable timestamps count as stale).
+fn is_stale(run: &Run) -> bool {
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&run.updated_at) else {
+        return true;
+    };
+    let age = chrono::Utc::now().signed_duration_since(updated.with_timezone(&chrono::Utc));
+    age.to_std().map(|age| age >= ACTIVE_RUN_STALE_AFTER).unwrap_or(false)
+}
+
 fn provider_display_name(state: &AppState, provider_id: &str) -> String {
     state
         .pi
@@ -367,14 +381,34 @@ pub async fn continue_run(
     let Some(existing) = state.db.get_run_full(run_id) else {
         return Err(ApiError::not_found("Run not found."));
     };
-    if active_run_statuses().contains(&existing.status.as_str()) && existing.status != "generating" {
-        return Err(ApiError::conflict(
-            "Run is awaiting your input or approval; resolve it before sending a new message.",
-        ));
-    }
     if payload.task.trim().is_empty() {
         return Err(ApiError::bad_request("Task is required."));
     }
+    // One drive per run (QA-022): a live drive in this process owns the run;
+    // without one, an active status is only trusted while it is fresh (the
+    // run may be driven by another Locagens process).
+    if state.orchestrator.is_driving(run_id) {
+        return Err(ApiError::conflict(match existing.status.as_str() {
+            "awaiting_permission" | "awaiting_input" => {
+                "Run is awaiting your input or approval; resolve it before sending a new message."
+            }
+            _ => "Run is still generating; queue the message instead of starting a new turn.",
+        }));
+    }
+    if state.orchestrator.handle(run_id).is_none()
+        && active_run_statuses().contains(&existing.status.as_str())
+        && !is_stale(&existing)
+    {
+        return Err(ApiError::conflict(
+            "Run is active in another Locagens session; wait for it to finish or cancel it there.",
+        ));
+    }
+    // A cancelled drive that is still unwinding is awaited (then aborted).
+    let handle = state
+        .orchestrator
+        .prepare_drive(run_id, crate::orchestrator::DRIVE_UNWIND_GRACE)
+        .await
+        .map_err(ApiError::conflict)?;
 
     let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions);
     let message = RunMessage {
@@ -410,10 +444,6 @@ pub async fn continue_run(
     });
     state.db.append_message(message.clone());
 
-    let handle = state
-        .orchestrator
-        .handle(run_id)
-        .unwrap_or_else(|| state.orchestrator.ensure_handle(run_id));
     // Subscribe before emitting so the caller's receiver gets the
     // message_created and status events (ordering would otherwise race).
     let events = handle.events.subscribe();
@@ -456,9 +486,13 @@ pub async fn fork_run(
 // ----------------------------------------------------------------------
 
 /// Cancels a run and resolves any pending permission/question so the loop
-/// can unwind (`POST /api/runs/:id/cancel`). Never errors.
+/// can unwind (`POST /api/runs/:id/cancel`). Kills the run's exec sessions
+/// and waits (up to `DRIVE_UNWIND_GRACE`, then aborts) for the drive task to
+/// finish, so a following `continue_run`/delete sees a quiet run. Never
+/// errors.
 pub async fn cancel_run(state: &AppState, run_id: &str) -> ApiResult<()> {
-    if let Some(handle) = state.orchestrator.handle(run_id) {
+    let handle = state.orchestrator.handle(run_id);
+    if let Some(handle) = &handle {
         handle.cancel();
         // Resolve any pending permission/question so the loop can unwind.
         {
@@ -482,6 +516,10 @@ pub async fn cancel_run(state: &AppState, run_id: &str) -> ApiResult<()> {
             state.db.patch_run(run_id, |run| run.status = "cancelled".to_string());
             state.orchestrator.emit_status(run_id, "cancelled");
         }
+    }
+    state.orchestrator.kill_exec_sessions(&state.processes, run_id).await;
+    if let Some(handle) = &handle {
+        state.orchestrator.stop_drive(handle, crate::orchestrator::DRIVE_UNWIND_GRACE).await;
     }
     Ok(())
 }
@@ -511,54 +549,18 @@ pub async fn queue_message(state: &AppState, run_id: &str, content: &str) -> Api
 /// Applies a permission decision to a run's pending request
 /// (`POST /api/runs/:id/permission`). Returns `false` when nothing was
 /// pending. Also used directly by the `lcgn` interactive prompt.
+///
+/// The decision is only delivered here: the orchestrator side that asked
+/// (tool gate or network approval) applies `allow_run` and persists
+/// `allow_project` / `allow_always` grants exactly once (QA-031).
 pub async fn apply_permission_decision(
-    state: &AppState,
+    _state: &AppState,
     handle: &Arc<RunHandle>,
     decision: &str,
 ) -> bool {
     let mut slot = handle.permission.lock().await;
-    let (pending, sender) = (slot.pending.take(), slot.sender.take());
+    let (_pending, sender) = (slot.pending.take(), slot.sender.take());
     drop(slot);
-
-    if decision == "allow_run" {
-        handle.allow_run.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    if let Some(pending) = pending {
-        let tool_call = pending.tool_call;
-        if tool_call.is_object() {
-            let name = tool_call
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let args: Value = serde_json::from_str(
-                tool_call
-                    .pointer("/function/arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("{}"),
-            )
-            .unwrap_or_else(|_| json!({}));
-            if matches!(decision, "allow_project" | "allow_always") {
-                if let Some(run) = state.db.get_run_full(&handle.run_id) {
-                    let command = args.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
-                    let domains = args
-                        .get("network_domains")
-                        .or_else(|| args.get("networkDomains"))
-                        .and_then(Value::as_array)
-                        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                        .unwrap_or_default();
-                    state.db.upsert_permission(
-                        if decision == "allow_project" { "project" } else { "global" },
-                        &run.project_path,
-                        &name,
-                        &command,
-                        domains,
-                        decision,
-                    );
-                }
-            }
-        }
-    }
     match sender {
         Some(sender) => {
             let _ = sender.send(decision.to_string());

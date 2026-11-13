@@ -13,24 +13,18 @@
 //! while the tool call that started the command is still in flight; later
 //! (e.g. from a backgrounded exec session) it is refused with a clear error.
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 use locagens_execpolicy::network_proxy::{DomainAllowlist, NetworkDecider, NetworkPolicy, NetworkRequest};
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
 
-use crate::orchestrator::{PendingPermission, RunHandle};
+use crate::orchestrator::{PermissionPrompt, RunHandle};
 use crate::AppState;
 
 /// Tool name of network approval prompts and their standing grants.
 pub const NETWORK_ACCESS_TOOL: &str = "network_access";
-
-/// Hosts approved with "Allow for Run", keyed by run id.
-static RUN_APPROVED_HOSTS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `[sandbox.network] allowed_domains` from the merged config.toml chain.
 pub fn configured_allowed_domains() -> Vec<String> {
@@ -46,8 +40,9 @@ pub fn requested_domains(args: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Every host the command may reach without a prompt.
-pub fn command_allowlist(state: &AppState, run_id: &str, project_path: &Path, args: &Value) -> DomainAllowlist {
+/// Every host the command may reach without a prompt. "Allow for Run" hosts
+/// live on the drive's `RunHandle`, so they vanish with it (QA-032).
+pub fn command_allowlist(state: &AppState, handle: &RunHandle, project_path: &Path, args: &Value) -> DomainAllowlist {
     let project = project_path.display().to_string();
     let mut allowlist = DomainAllowlist::new(configured_allowed_domains());
     for domain in requested_domains(args) {
@@ -61,10 +56,8 @@ pub fn command_allowlist(state: &AppState, run_id: &str, project_path: &Path, ar
             }
         }
     }
-    if let Some(hosts) = RUN_APPROVED_HOSTS.lock().expect("run hosts poisoned").get(run_id) {
-        for host in hosts {
-            allowlist.insert(host);
-        }
+    for host in handle.approved_hosts.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+        allowlist.insert(host);
     }
     allowlist
 }
@@ -83,7 +76,6 @@ impl Drop for ApprovalWindow {
 pub fn command_network_policy(
     state: &Arc<AppState>,
     handle: &Arc<RunHandle>,
-    run_id: &str,
     project_path: &Path,
     args: &Value,
 ) -> (NetworkPolicy, ApprovalWindow) {
@@ -91,7 +83,7 @@ pub fn command_network_policy(
     let approval = Arc::new(NetworkApproval {
         state: Arc::clone(state),
         handle: Arc::clone(handle),
-        run_id: run_id.to_string(),
+        project_path: project_path.display().to_string(),
         armed: Arc::clone(&armed),
     });
     let decider: NetworkDecider = Arc::new(move |request: NetworkRequest| {
@@ -99,17 +91,19 @@ pub fn command_network_policy(
         Box::pin(async move { approval.ask(request).await })
     });
     let policy = NetworkPolicy {
-        allowlist: command_allowlist(state, run_id, project_path, args),
+        allowlist: command_allowlist(state, handle, project_path, args),
         decider: Some(decider),
     };
     (policy, ApprovalWindow(armed))
 }
 
-/// Asks the user about one host through the run's permission slot.
+/// Asks the user about one host through the run's shared permission prompt
+/// (`RunHandle::ask_permission`), so it queues behind tool prompts instead of
+/// racing them for the slot (QA-028).
 struct NetworkApproval {
     state: Arc<AppState>,
     handle: Arc<RunHandle>,
-    run_id: String,
+    project_path: String,
     armed: Arc<AtomicBool>,
 }
 
@@ -135,49 +129,39 @@ impl NetworkApproval {
             "url": format!("{}:{}", request.host, request.port),
             "networkDomains": [request.host],
         });
-        let (sender, receiver) = oneshot::channel::<String>();
-        {
-            let mut slot = self.handle.permission.lock().await;
-            if slot.pending.is_some() || slot.sender.is_some() {
-                return false;
-            }
-            slot.pending = Some(PendingPermission { tool_call: tool_call.clone(), preview: Some(preview.clone()) });
-            slot.sender = Some(sender);
-        }
-        self.set_status("awaiting_permission");
-        self.handle.emit(json!({
-            "type": "permission_requested",
-            "runId": self.run_id,
-            "toolCall": tool_call,
-            "preview": preview,
-        }));
-        let decision = tokio::select! {
-            decision = receiver => decision.ok(),
-            _ = self.handle.cancelled() => None,
+        let prompt = PermissionPrompt {
+            tool_call,
+            preview: Some(preview),
+            agent_role: None,
+            agent_name: None,
+            armed: Some(Arc::clone(&self.armed)),
         };
-        {
-            let mut slot = self.handle.permission.lock().await;
-            slot.pending = None;
-            slot.sender = None;
+        let Some(decision) = self.handle.ask_permission(&self.state.db, prompt).await else {
+            return false;
+        };
+        match decision.as_str() {
+            "deny" => return false,
+            "allow_run" => {
+                self.handle
+                    .approved_hosts
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(request.host.clone());
+            }
+            "allow_project" | "allow_always" => {
+                // The one place network grants are persisted (QA-031).
+                self.state.db.upsert_permission(
+                    if decision == "allow_project" { "project" } else { "global" },
+                    &self.project_path,
+                    NETWORK_ACCESS_TOOL,
+                    "",
+                    vec![request.host.clone()],
+                    &decision,
+                );
+            }
+            _ => {}
         }
-        self.set_status("generating");
-        let allowed = matches!(decision.as_deref(), Some(d) if d != "deny");
-        if decision.as_deref() == Some("allow_run") {
-            RUN_APPROVED_HOSTS
-                .lock()
-                .expect("run hosts poisoned")
-                .entry(self.run_id.clone())
-                .or_default()
-                .insert(request.host.clone());
-        }
-        // allow_project / allow_always are persisted as `network_access`
-        // grants by `api::runs::apply_permission_decision`.
-        allowed
-    }
-
-    fn set_status(&self, status: &str) {
-        self.state.db.patch_run(&self.run_id, |run| run.status = status.into());
-        self.handle.emit(json!({ "type": "status_changed", "status": status }));
+        true
     }
 }
 

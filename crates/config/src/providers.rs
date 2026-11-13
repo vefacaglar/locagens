@@ -2010,7 +2010,11 @@ impl PiProviderManager {
                         } else if key.len() <= 8 {
                             "***".to_string()
                         } else {
-                            format!("{}***{}", &key[..4], &key[key.len() - 4..])
+                            format!(
+                                "{}***{}",
+                                locagens_protocol::text::prefix_at_char_boundary(key, 4),
+                                locagens_protocol::text::suffix_at_char_boundary(key, 4)
+                            )
                         }
                     });
                 let mut status = json!({

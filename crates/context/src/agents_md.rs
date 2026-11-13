@@ -116,13 +116,7 @@ pub fn load_agents_md_with(
                     break;
                 }
                 let mut text = content;
-                if text.len() > remaining {
-                    let mut cut = remaining;
-                    while cut > 0 && !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    text.truncate(cut);
-                }
+                locagens_protocol::text::truncate_at_char_boundary(&mut text, remaining);
                 remaining = remaining.saturating_sub(text.len());
                 parts.push(text);
                 sources.push(candidate);

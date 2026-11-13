@@ -179,10 +179,7 @@ fn cap_diff(text: String, max: usize) -> String {
     if text.len() <= max {
         return text;
     }
-    let mut cut = max;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = locagens_protocol::text::floor_char_boundary(&text, max);
     format!(
         "{}\n[diff truncated: {} bytes omitted; use read_file for the rest]\n",
         &text[..cut],
