@@ -224,9 +224,10 @@ impl Cli {
     /// overrides the built-in defaults.
     pub fn apply_config_defaults(&mut self, config: &locagens_config::config_toml::Config) {
         if self.model.is_none() {
-            self.model = config.model.clone();
+            let (model, provider) = config_model_for(self.provider.as_deref(), config);
+            self.model = model;
             if self.provider.is_none() {
-                self.provider = config.model_provider.clone();
+                self.provider = provider;
             }
         }
         self.default_thinking = config.reasoning_effort();
@@ -271,6 +272,23 @@ impl Cli {
     }
 }
 
+/// The config.toml `model` / `model_provider` to use under an optional
+/// `--provider` flag. The configured model belongs to the configured provider,
+/// so `--provider anthropic` with `model = "gpt-5"` (provider `openai`) must
+/// not request `gpt-5` from Anthropic (QA-044).
+pub fn config_model_for(
+    provider_flag: Option<&str>,
+    config: &locagens_config::config_toml::Config,
+) -> (Option<String>, Option<String>) {
+    match provider_flag {
+        None => (config.model.clone(), config.model_provider.clone()),
+        Some(flag) if config.model_provider.as_deref() == Some(flag) => {
+            (config.model.clone(), config.model_provider.clone())
+        }
+        Some(_) => (None, None),
+    }
+}
+
 /// Is stdout an interactive terminal?
 pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
@@ -286,48 +304,18 @@ pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// Builds the run prompt from the message arguments: `@path` tokens become
-/// file attachment blocks, the remaining tokens are the task text, and piped
-/// stdin (when stdin is not a TTY) is appended.
+/// Builds the run prompt from the message arguments: they are joined with
+/// spaces and handled like composer text ([`super::prompt::build_prompt`]:
+/// `@path` mentions of existing project files are attached, everything else
+/// stays verbatim); piped stdin (when stdin is not a TTY) is appended.
 pub fn assemble_prompt(messages: &[String], project: &Path, stdin: Option<&str>) -> Result<String, String> {
-    let mut attachments = String::new();
-    let mut texts: Vec<&str> = Vec::new();
-    for message in messages {
-        if let Some(relative) = message.strip_prefix('@') {
-            if relative.trim().is_empty() {
-                return Err("@file argument is empty.".to_string());
-            }
-            let path = project.join(relative.trim());
-            let content = std::fs::read_to_string(&path)
-                .map_err(|err| format!("Cannot read @file \"{}\": {err}", relative.trim()))?;
-            attachments.push_str(&format!(
-                "## Attached file: {}\n```\n{}\n```\n\n",
-                relative.trim(),
-                content
-            ));
-        } else {
-            texts.push(message);
-        }
-    }
-    let mut prompt = String::new();
-    prompt.push_str(&attachments);
-    prompt.push_str(&texts.join(" "));
-    if let Some(piped) = stdin {
-        let piped = piped.trim();
-        if !piped.is_empty() {
-            if !prompt.is_empty() {
-                prompt.push_str("\n\n");
-            }
-            prompt.push_str(piped);
-        }
-    }
-    let prompt = prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err(
-            "No task given. Pass a message, `@file` attachments or piped stdin.".to_string(),
-        );
-    }
-    Ok(prompt)
+    let text = messages.join(" ");
+    let prompt = if text.trim().is_empty() {
+        String::new()
+    } else {
+        super::prompt::build_prompt(&text, project)?
+    };
+    super::prompt::append_stdin(prompt, stdin)
 }
 
 /// Reads piped stdin when it is not a terminal; `None` otherwise.
@@ -402,6 +390,27 @@ hide_agent_reasoning = true
         assert_eq!(flagged.thinking_level().as_deref(), Some("low"));
         assert_eq!(flagged.effective_mode(), "plan");
         assert!(flagged.show_thinking());
+    }
+
+    #[test]
+    fn provider_flag_never_borrows_the_model_of_another_provider() {
+        use locagens_config::config_toml::Config;
+        let config = Config::from_toml_str("model = \"gpt-5\"\nmodel_provider = \"openai\"\n").unwrap();
+
+        let mut other = cli(&["--provider", "anthropic"]);
+        other.apply_config_defaults(&config);
+        assert_eq!(other.provider.as_deref(), Some("anthropic"));
+        assert_eq!(other.model, None, "gpt-5 belongs to openai");
+
+        let mut same = cli(&["--provider", "openai"]);
+        same.apply_config_defaults(&config);
+        assert_eq!(same.model.as_deref(), Some("gpt-5"));
+
+        let mut none = cli(&[]);
+        none.apply_config_defaults(&config);
+        assert_eq!((none.model.as_deref(), none.provider.as_deref()), (Some("gpt-5"), Some("openai")));
+
+        assert_eq!(config_model_for(Some("anthropic"), &config), (None, None));
     }
 
     #[test]
@@ -538,10 +547,12 @@ hide_agent_reasoning = true
         let prompt =
             assemble_prompt(&["from stdin:".to_string()], Path::new("."), Some("piped body"))
                 .unwrap();
-        assert_eq!(prompt, "from stdin:
-
-piped body");
+        assert_eq!(prompt, "from stdin:\n\npiped body");
         assert!(assemble_prompt(&[], Path::new("."), None).is_err());
-        assert!(assemble_prompt(&["@missing.txt".to_string()], Path::new("."), None).is_err());
+        // A mention of a file that does not exist is just text, not an error.
+        assert_eq!(
+            assemble_prompt(&["ping".to_string(), "@alice".to_string()], Path::new("."), None).unwrap(),
+            "ping @alice"
+        );
     }
 }

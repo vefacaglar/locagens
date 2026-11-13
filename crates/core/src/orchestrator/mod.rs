@@ -714,7 +714,7 @@ impl AgentLoop {
                     if last_persist.elapsed() >= STREAM_PERSIST_INTERVAL {
                         self.state
                             .db
-                            .update_message_full(&self.run_id, &message_id, &content, Some(&reasoning), None);
+                            .stream_message(&self.run_id, &message_id, &content, Some(&reasoning));
                         last_persist = Instant::now();
                     }
                 },

@@ -25,11 +25,15 @@ lcgn -p "explain @src/main.rs" --model opencode-go/glm-5.3-flash
 type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
 ```
 
-- `@path` arguments are attached as files; piped (non-TTY) stdin is appended
-  to the prompt, like `pi`.
-- Text mode streams the assistant answer to **stdout** and everything else
-  (reasoning, tool lines like `✔ read_file src/main.rs`, usage/cost) to
-  **stderr** — so `lcgn -p "..." > out.txt` captures only the answer.
+- Prompts are built the same way in `-p`, the REPL and the TUI
+  (`cli/prompt.rs`): `@path` mentions of **existing files inside the project**
+  are attached (max 256 KiB each); everything else, including `@alice`, a
+  missing file or `@../outside`, stays plain text, and newlines are kept
+  verbatim. Piped (non-TTY) stdin is appended to the prompt, like `pi`.
+- Text mode streams the main agent's answer to **stdout** and everything else
+  (reasoning, tool lines like `✔ read_file src/main.rs`, sub-agent text tagged
+  `[name]`, usage/cost) to **stderr** — so `lcgn -p "..." > out.txt` captures
+  only the answer. Consecutive assistant messages are separated by a newline.
 - `--mode json` prints one JSON event per line on stdout (the same run-event
   objects the SSE endpoint emits).
 - Exit codes: `0` success, `1` run failed/cancelled, `2` usage or
@@ -88,6 +92,8 @@ Slash commands (TUI and REPL):
 /thinking <level>      off|minimal|low|medium|high|xhigh|max
 /plan                  plan mode (read-only tools)
 /build                 build mode (edits applied directly)
+/auto                  full access (no permission prompts)
+/chat                  chat mode (no tools)
 /new                   start a fresh session on the next message
 /fork                  fork the current session
 /undo                  undo the last turn (git snapshot restore)
@@ -99,6 +105,15 @@ Slash commands (TUI and REPL):
 /usage                 usage/cost of the current session
 /help, /exit
 ```
+
+`/new`, `/fork`, `/undo` and `/review` are refused while a run is generating
+(Esc interrupts it first). The commands are parsed and executed by one shared
+module, `cli/commands.rs`, used by both the TUI and the REPL.
+
+If the event stream lags (a slow terminal during a burst of output), `lcgn`
+re-syncs from the store instead of dropping the gap: persisted messages are
+re-applied and a permission/question prompt or terminal event that was lost is
+replayed (`cli/events.rs`).
 
 ## Code review
 
@@ -128,7 +143,8 @@ TUI the review becomes the current session.
 
 ## Plain REPL (`--no-tui`)
 
-A line-editor REPL with streaming output and the same slash commands.
+A line-editor REPL with streaming output and the same slash commands (shared
+with the TUI) and the same `@file` handling.
 `Ctrl+C` cancels the running run (or exits at an idle prompt).
 
 ## Sessions
@@ -139,7 +155,9 @@ lcgn --session run-882c "and now?"       # open a session by (partial) id
 lcgn -r                                  # pick a session interactively
 lcgn sessions                            # list sessions for this directory
 lcgn sessions --json
-lcgn --no-session -p "quick question" …  # ephemeral, not persisted
+lcgn --no-session -p "quick question" …  # ephemeral: no rollout kept, and the
+                                         # prompt is not written to history.jsonl
+                                         # or session_index.jsonl
 ```
 
 ## Models
@@ -259,8 +277,25 @@ Flags override config, config overrides the built-in defaults.
 `lcgn` and the desktop app share the same store (`~/.locagens`). Mutations of
 shared files (`projects.json`, `permissions.json`, memory `.md` files, usage id
 counter) are serialized with an advisory lock on `<root>/.lock` and re-read from
-disk under the lock, so interleaved writes lose nothing. Session rollouts under
+disk under the lock, so interleaved writes lose nothing. The usage id counter
+holds the lock only while an id is allocated. Session rollouts under
 `sessions/` are private to the run that owns them and append-only.
+
+Changes made by the other process show up without a restart: grants in
+`permissions.json`, `projects.json` and memories are re-read when their
+modification time changes, and the run list picks up runs created elsewhere.
+A run that a live process is driving holds an owner lock under `run_locks/`;
+starting another `lcgn` or the desktop app never marks such a run failed (only
+runs whose owner process is gone are failed at startup). If `<root>/.lock`
+cannot be opened or taken within 10 s the store logs a warning and continues
+without it instead of crashing.
+
+`config.toml` edits are picked up at the start of the next run of a long-lived
+process (the desktop app); `lcgn config` prints the chain without opening the
+store. A broken `~/.codex` / `~/.pi/agent` `config.toml` is skipped with a
+warning rather than failing `lcgn`; a broken `~/.locagens/config.toml` still
+fails and names the file. `--provider X` without `--model` no longer borrows the
+`model` of another provider from `config.toml`.
 
 ## Auth & providers (Codex / Locagens compatible)
 

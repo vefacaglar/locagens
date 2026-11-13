@@ -34,6 +34,10 @@ pub struct CreateRunPayload {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub append_system_prompt: Option<String>,
+    /// Ephemeral run (`lcgn --no-session`): never indexed in
+    /// `session_index.jsonl` / `history.jsonl`.
+    #[serde(default)]
+    pub no_session: bool,
 }
 
 /// `POST /api/runs/:id/continue` body — same fields, all provider fields
@@ -230,13 +234,22 @@ fn map_event(event: RunEvent) -> RunEvent {
     }
 }
 
+/// Adds the `"type"` field to a pending-request payload (the handle stores
+/// the bare `{ runId, toolCall, preview }` / `{ runId, questions }` object).
+fn typed_event(mut payload: Value, kind: &str) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.entry("type").or_insert_with(|| json!(kind));
+    }
+    payload
+}
+
 /// Replays pending permission/question requests into a fresh subscriber.
 async fn replay_pending(tx: &tokio::sync::broadcast::Sender<RunEvent>, handle: &Arc<RunHandle>) {
     if let Some(permission) = handle.pending_permission().await {
-        let _ = tx.send(permission);
+        let _ = tx.send(typed_event(permission, "permission_requested"));
     }
     if let Some(question) = handle.pending_question().await {
-        let _ = tx.send(question);
+        let _ = tx.send(typed_event(question, "question_requested"));
     }
 }
 
@@ -280,6 +293,8 @@ pub async fn create_run(
     if payload.task.trim().is_empty() {
         return Err(ApiError::bad_request("Task is required."));
     }
+    // Pick up config.toml edits made since the last run (QA-042).
+    crate::config_runtime::reload_if_changed();
     if payload.provider_id.trim().is_empty() || payload.model.trim().is_empty() {
         return Err(ApiError::bad_request("Provider and model are required."));
     }
@@ -319,6 +334,7 @@ pub async fn create_run(
             .filter(|e| !e.is_empty())
             .or_else(|| crate::config_runtime::current().reasoning_effort().filter(|e| e != "off")),
         mode: mode.clone(),
+        ephemeral: payload.no_session,
         system_prompt: payload.system_prompt.clone().filter(|p| !p.is_empty()),
         append_system_prompt: payload.append_system_prompt.clone().filter(|p| !p.is_empty()),
         created_at: now_iso(),
@@ -375,6 +391,7 @@ pub async fn continue_run(
     if payload.task.trim().is_empty() {
         return Err(ApiError::bad_request("Task is required."));
     }
+    crate::config_runtime::reload_if_changed();
 
     let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions);
     let message = RunMessage {
@@ -497,6 +514,30 @@ pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<bool> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     Ok(state.db.delete_run(run_id))
+}
+
+// ----------------------------------------------------------------------
+// DELETE /api/runs/:id
+// ----------------------------------------------------------------------
+
+/// How long `delete_run` waits for a cancelled drive task to unwind.
+const DELETE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deletes a run and its rollout. An active run is cancelled first and the
+/// drive task is given a moment to unwind; the store tombstones the id, so
+/// even a straggling write can never recreate a headless rollout (QA-034).
+pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<()> {
+    if state.db.get_run_full(run_id).is_none() {
+        return Err(ApiError::not_found("Run not found."));
+    }
+    cancel_run(state, run_id).await?;
+    let deadline = tokio::time::Instant::now() + DELETE_DRAIN_TIMEOUT;
+    while state.orchestrator.handle(run_id).is_some() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    state.db.delete_run(run_id);
+    state.orchestrator.drop_handle(run_id);
+    Ok(())
 }
 
 // ----------------------------------------------------------------------
@@ -651,6 +692,8 @@ pub async fn answer_question(
 
 /// Lists all runs, most recently active first (`GET /api/runs`).
 pub async fn list_runs(state: &AppState) -> ApiResult<Vec<Run>> {
+    // Pick up runs created or changed by another process (QA-039).
+    state.db.refresh_runs_throttled();
     let mut runs = state.db.list_runs();
     runs.sort_by(|a, b| b.last_active_at.clone().unwrap_or_default().cmp(&a.last_active_at.clone().unwrap_or_default()));
     Ok(runs)
@@ -744,6 +787,37 @@ pub async fn run_pending(state: &AppState, run_id: &str) -> ApiResult<PendingReq
         permission_request: handle.pending_permission().await,
         question_request: handle.pending_question().await,
     })
+}
+
+/// What a frontend needs to rebuild its state after its event receiver
+/// lagged (events were dropped): the persisted run and messages, the
+/// permission/question requests still waiting for an answer and, for a run
+/// that already finished, its terminal event.
+#[derive(Clone, Debug, Default)]
+pub struct RunResync {
+    pub run: Option<Run>,
+    pub messages: Vec<RunMessage>,
+    /// Replayable events, in the order to apply them.
+    pub events: Vec<RunEvent>,
+}
+
+/// Rebuilds a run's state from the store and the live handle (QA-046).
+/// Frontends call this on `RecvError::Lagged` / a `{"type":"lagged"}` event
+/// instead of dropping the gap silently: a lost `permission_requested`,
+/// `question_requested` or terminal event would otherwise leave the run
+/// waiting on a prompt nobody shows.
+pub async fn resync_run(state: &AppState, run_id: &str) -> RunResync {
+    let run = state.db.get_run_full(run_id);
+    let messages = state.db.list_messages(run_id);
+    let mut events = Vec::new();
+    if let Ok(pending) = run_pending(state, run_id).await {
+        events.extend(pending.permission_request.map(|v| typed_event(v, "permission_requested")));
+        events.extend(pending.question_request.map(|v| typed_event(v, "question_requested")));
+    }
+    if let Some(run) = run.as_ref().filter(|run| is_terminal(&run.status)) {
+        events.push(terminal_event_value(&run.status, run.error_message.as_deref()));
+    }
+    RunResync { run, messages, events }
 }
 
 // ----------------------------------------------------------------------
@@ -932,5 +1006,113 @@ mod tests {
         let title = truncate_title(&long);
         assert_eq!(title.chars().count(), 61);
         assert!(title.ends_with('…'));
+    }
+
+    fn test_state() -> (Arc<AppState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("locagens-runs-api-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(AppState {
+            db: Arc::new(crate::db::Db::open(&dir).unwrap()),
+            pi: Arc::new(crate::pi_providers::PiProviderManager::with_dirs(dir.clone(), dir.clone())),
+            orchestrator: Arc::new(crate::orchestrator::Orchestrator::new()),
+            settings_path: dir.join("settings.json"),
+            default_project_path: dir.clone(),
+            processes: Arc::new(crate::services::processes::ProcessManager::new()),
+        });
+        (state, dir)
+    }
+
+    fn rollout_count(root: &std::path::Path) -> usize {
+        fn walk(dir: &std::path::Path, count: &mut usize) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, count);
+                } else if path.extension().is_some_and(|e| e == "jsonl")
+                    && path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rollout-"))
+                {
+                    *count += 1;
+                }
+            }
+        }
+        let mut count = 0;
+        walk(&root.join("sessions"), &mut count);
+        count
+    }
+
+    #[tokio::test]
+    async fn deleting_a_generating_run_cancels_it_and_leaves_no_rollout() {
+        let (state, dir) = test_state();
+        state.db.create_run(Run {
+            id: "run-gen".into(),
+            status: "generating".into(),
+            created_at: now_iso(),
+            ..Default::default()
+        });
+        let handle = state.orchestrator.ensure_handle("run-gen");
+
+        // A drive task that notices the cancel flag, writes one last message
+        // (the resurrection hazard) and only then lets go of its handle.
+        let driver_state = state.clone();
+        let driver = tokio::spawn(async move {
+            while !handle.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            driver_state.db.append_message(RunMessage {
+                id: "late".into(),
+                run_id: "run-gen".into(),
+                role: "assistant".into(),
+                created_at: now_iso(),
+                ..Default::default()
+            });
+            driver_state.db.append_usage(UsageLogEntry { run_id: "run-gen".into(), ..Default::default() });
+            driver_state.orchestrator.drop_handle("run-gen");
+        });
+
+        delete_run(&state, "run-gen").await.unwrap();
+        driver.await.unwrap();
+
+        assert!(state.db.get_run_full("run-gen").is_none());
+        assert_eq!(rollout_count(&dir), 0, "no headless rollout may remain");
+        assert!(state.db.list_messages("run-gen").is_empty());
+        assert!(state.orchestrator.handle("run-gen").is_none());
+        assert!(delete_run(&state, "run-gen").await.is_err(), "second delete is a clean not-found");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn resync_hands_back_messages_and_the_terminal_event() {
+        let (state, dir) = test_state();
+        state.db.create_run(Run {
+            id: "run-fin".into(),
+            status: "failed".into(),
+            error_message: Some("boom".into()),
+            created_at: now_iso(),
+            ..Default::default()
+        });
+        state.db.append_message(RunMessage {
+            id: "m".into(),
+            run_id: "run-fin".into(),
+            role: "user".into(),
+            created_at: now_iso(),
+            ..Default::default()
+        });
+        let resync = resync_run(&state, "run-fin").await;
+        assert_eq!(resync.messages.len(), 1);
+        assert_eq!(resync.run.unwrap().status, "failed");
+        assert_eq!(resync.events.len(), 1);
+        assert_eq!(resync.events[0]["type"], "run_failed");
+        assert_eq!(resync.events[0]["errorMessage"], "boom");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_payloads_get_their_event_type() {
+        let typed = typed_event(json!({ "runId": "r", "toolCall": {} }), "permission_requested");
+        assert_eq!(typed["type"], "permission_requested");
+        let kept = typed_event(json!({ "type": "x" }), "permission_requested");
+        assert_eq!(kept["type"], "x");
     }
 }

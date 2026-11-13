@@ -80,9 +80,66 @@ pub struct GitWorktree {
 /// How many snapshots `snapshots.json` retains.
 const MAX_SNAPSHOTS: usize = 20;
 
-/// `<project>/.locagens/snapshots.json` — the git-snapshot store.
+/// Where runtime snapshot state lives: the Locagens home (`~/.locagens`).
+/// Unit tests use a temp directory so they never touch the real home.
+fn snapshot_home() -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join("locagens-test-home")
+    } else {
+        crate::paths::locagens_home()
+    }
+}
+
+/// `~/.locagens/projects/<sanitized-project-path>/snapshots/` — the
+/// git-snapshot store and the index copies. Runtime state never lives in the
+/// user's project (QA-041).
+fn snapshot_dir(project_path: &Path) -> PathBuf {
+    snapshot_home()
+        .join("projects")
+        .join(db::sanitize_project_path(&project_path.to_string_lossy()))
+        .join("snapshots")
+}
+
+/// `<snapshot_dir>/snapshots.json` — the git-snapshot store.
 fn snapshot_store_path(project_path: &Path) -> PathBuf {
-    project_path.join(".locagens").join("snapshots.json")
+    snapshot_dir(project_path).join("snapshots.json")
+}
+
+/// Moves the legacy in-project store (`<project>/.locagens/snapshots.json`
+/// plus `snapshots/*.index`) under the Locagens home, once. The old files are
+/// removed; the rest of `.locagens/` (rules) is left alone.
+fn migrate_legacy_snapshots(project_path: &Path) {
+    let old_dir = project_path.join(".locagens");
+    let old_store = old_dir.join("snapshots.json");
+    if !old_store.is_file() {
+        return;
+    }
+    let new_store = snapshot_store_path(project_path);
+    if !new_store.exists() {
+        let copied = (|| -> std::io::Result<()> {
+            let new_dir = snapshot_dir(project_path);
+            std::fs::create_dir_all(&new_dir)?;
+            if let Ok(entries) = std::fs::read_dir(old_dir.join("snapshots")) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::copy(entry.path(), new_dir.join(entry.file_name()));
+                }
+            }
+            std::fs::copy(&old_store, &new_store).map(|_| ())
+        })();
+        if let Err(err) = copied {
+            tracing::warn!("Could not migrate {}: {err}", old_store.display());
+            return;
+        }
+    }
+    let _ = std::fs::remove_file(&old_store);
+    let _ = std::fs::remove_dir_all(old_dir.join("snapshots"));
+    let _ = std::fs::remove_dir(&old_dir); // only succeeds when empty
+}
+
+/// The snapshot list of a project (migrating the legacy store first).
+fn load_snapshots(project_path: &Path) -> Vec<GitSnapshot> {
+    migrate_legacy_snapshots(project_path);
+    read_snapshots(&snapshot_store_path(project_path))
 }
 
 /// Reads the snapshot list (tolerates a missing/corrupt file).
@@ -93,12 +150,12 @@ fn read_snapshots(store: &Path) -> Vec<GitSnapshot> {
         .unwrap_or_default()
 }
 
-/// Persists the snapshot list, creating `.locagens/` and keeping only the
-/// last `MAX_SNAPSHOTS` entries.
+/// Persists the snapshot list, creating the store directory and keeping only
+/// the last `MAX_SNAPSHOTS` entries.
 fn persist_snapshots(project_path: &Path, snapshots: &[GitSnapshot]) -> Result<(), String> {
     let store = snapshot_store_path(project_path);
     if let Some(parent) = store.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("Failed to create .locagens: {err}"))?;
+        std::fs::create_dir_all(parent).map_err(|err| format!("Failed to create the snapshot store: {err}"))?;
     }
     let keep_from = snapshots.len().saturating_sub(MAX_SNAPSHOTS);
     prune_index_copies(project_path, &snapshots[keep_from..]);
@@ -587,7 +644,8 @@ pub async fn git_commit(state: &AppState, input: GitCommitInput) -> ApiResult<()
 /// Nothing in the worktree or the user's index is touched: every non-ignored
 /// file is hashed into the object store as-is (`--no-filters`, so autocrlf /
 /// `.gitattributes` never rewrite line endings), a tree is written from a
-/// throwaway index, and the real index is copied next to `snapshots.json`.
+/// throwaway index, and the real index is copied next to `snapshots.json`
+/// (both under `~/.locagens/projects/<project>/snapshots/`).
 /// `undo_last_turn_for_path` restores exactly those bytes.
 pub async fn create_git_snapshot_for_path(
     project_path: &Path,
@@ -633,7 +691,7 @@ pub async fn create_git_snapshot_for_path(
         created_at: now_iso(),
     };
 
-    let mut snapshots = read_snapshots(&snapshot_store_path(project_path));
+    let mut snapshots = load_snapshots(project_path);
     snapshots.push(snapshot.clone());
     persist_snapshots(project_path, &snapshots)?;
     Ok(Some(snapshot))
@@ -739,9 +797,9 @@ async fn executable_files(project_path: &Path) -> std::collections::HashSet<Stri
         .collect()
 }
 
-/// `<project>/.locagens/snapshots/<id>.index` — copy of the pre-turn index.
+/// `<snapshot_dir>/<id>.index` — copy of the pre-turn index.
 fn index_copy_path(project_path: &Path, id: &str) -> PathBuf {
-    project_path.join(".locagens").join("snapshots").join(format!("{id}.index"))
+    snapshot_dir(project_path).join(format!("{id}.index"))
 }
 
 /// Absolute path of the repository's index (handles linked worktrees).
@@ -763,7 +821,7 @@ async fn save_index_copy(project_path: &Path, id: &str) {
 
 /// Deletes index copies of snapshots no longer in the store.
 fn prune_index_copies(project_path: &Path, kept: &[GitSnapshot]) {
-    let dir = project_path.join(".locagens").join("snapshots");
+    let dir = snapshot_dir(project_path);
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -801,7 +859,7 @@ pub async fn undo_last_turn_for_path(
     project_path: &Path,
     run_id: Option<&str>,
 ) -> Result<GitSnapshot, String> {
-    let mut snapshots = read_snapshots(&snapshot_store_path(project_path));
+    let mut snapshots = load_snapshots(project_path);
     let index = match run_id {
         Some(run_id) => snapshots.iter().rposition(|snap| snap.run_id == run_id),
         None => snapshots.len().checked_sub(1),
@@ -1210,8 +1268,10 @@ mod tests {
         );
         // …the turn artifact is gone…
         assert!(!root.join("generated.txt").exists());
-        // …and `.locagens/` is never touched.
-        assert!(root.join(".locagens").exists());
+        // …and the snapshot store lives under the Locagens home, never in
+        // the project.
+        assert!(!root.join(".locagens").exists());
+        assert!(snapshot_dir(&root).starts_with(snapshot_home()));
 
         // Undo without a matching snapshot fails cleanly.
         assert!(undo_last_turn_for_path(&root, Some("missing")).await.is_err());
@@ -1277,5 +1337,44 @@ mod tests {
         assert!(!worktrees[1].is_main);
         assert_eq!(worktrees[1].branch.as_deref(), Some("feature"));
     }
-}
 
+    #[test]
+    fn legacy_in_project_snapshot_store_moves_under_the_locagens_home() {
+        let root = std::env::temp_dir().join(format!("locagens-snap-migrate-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join(".locagens");
+        std::fs::create_dir_all(legacy.join("snapshots")).unwrap();
+        std::fs::create_dir_all(legacy.join("rules")).unwrap();
+        std::fs::write(legacy.join("rules").join("default.rules"), "# rules").unwrap();
+        std::fs::write(legacy.join("snapshots").join("snap-old.index"), "idx").unwrap();
+        let entry = GitSnapshot {
+            id: "snap-old".into(),
+            run_id: "run-old".into(),
+            head_sha: "abc".into(),
+            tree_sha: Some("def".into()),
+            stash_sha: None,
+            untracked: vec![],
+            created_at: now_iso(),
+
+        };
+        std::fs::write(
+            legacy.join("snapshots.json"),
+            serde_json::to_string(&vec![entry]).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_snapshots(&root);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "snap-old");
+        // The runtime state moved out of the project…
+        assert!(!legacy.join("snapshots.json").exists());
+        assert!(!legacy.join("snapshots").exists());
+        assert!(snapshot_store_path(&root).is_file());
+        assert!(index_copy_path(&root, "snap-old").is_file());
+        // …but user-visible rules stay where they were.
+        assert!(legacy.join("rules").join("default.rules").is_file());
+        // Loading again is stable.
+        assert_eq!(load_snapshots(&root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(snapshot_dir(&root).parent().unwrap());
+    }
+}

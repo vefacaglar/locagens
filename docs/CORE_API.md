@@ -53,7 +53,9 @@ pub async fn apply_permission_decision(state, run_id, call_id, decision, updated
 pub async fn permission_decision(state, run_id, decision)   -> ApiResult<()>
 pub async fn answer_question(state, run_id, answer: &AnswerQuestionPayload) -> ApiResult<()>
 
-pub async fn list_runs(state)      -> ApiResult<Vec<Run>>          // lastActiveAt DESC
+pub async fn list_runs(state)      -> ApiResult<Vec<Run>>          // lastActiveAt DESC; picks up runs of other processes
+pub async fn delete_run(state, run_id) -> ApiResult<()>            // cancels an active run, waits for it, then deletes
+pub async fn resync_run(state, run_id) -> RunResync                // after a lagged receiver: run + messages + pending prompts + terminal event
 pub async fn get_run(state, id)    -> ApiResult<Run>
 pub async fn list_messages(state, id) -> ApiResult<Vec<RunMessage>>
 pub async fn run_usage(state, id)  -> ApiResult<RunUsageSummary>   // tokens/cost, byRole
@@ -79,6 +81,11 @@ Semantics:
   event until the sender closes or all receivers drop;
 * **no handle / not terminal** — polls until a handle appears, the run turns
   terminal, or the last receiver drops.
+
+A receiver that falls behind gets `{"type":"lagged"}` (or `RecvError::Lagged`
+on a handle receiver). Do not ignore it: call `api::runs::resync_run` and
+rebuild the view from the returned messages, pending requests and terminal
+event (`lcgn` does this in `cli/events.rs`).
 
 Event types: `run_started`, `status_changed`, `message_created`,
 `message_updated`, `plan_updated`, `title_changed`, `run_completed`,

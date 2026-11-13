@@ -1,29 +1,8 @@
 //! The `/command` and `@file` completion popups above the composer.
 
-/// A slash command offered by the `/` popup (same set as the REPL).
-pub struct SlashCommand {
-    pub name: &'static str,
-    pub args: &'static str,
-    pub description: &'static str,
-}
-
-pub const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "model", args: "[provider/id]", description: "show or switch models" },
-    SlashCommand { name: "thinking", args: "<level>", description: "reasoning effort (off..max)" },
-    SlashCommand { name: "plan", args: "", description: "switch to plan mode (read-only)" },
-    SlashCommand { name: "build", args: "", description: "switch to build mode (edits applied)" },
-    SlashCommand { name: "new", args: "", description: "start a fresh session on the next message" },
-    SlashCommand { name: "fork", args: "", description: "fork the current session" },
-    SlashCommand { name: "undo", args: "", description: "undo the last turn (git snapshot)" },
-    SlashCommand { name: "diff", args: "", description: "show the working-tree diff" },
-    SlashCommand { name: "review", args: "[target]", description: "code review: changes, a branch or a commit" },
-    SlashCommand { name: "mcp", args: "", description: "list MCP servers and status" },
-    SlashCommand { name: "skills", args: "", description: "list discovered skills" },
-    SlashCommand { name: "sessions", args: "", description: "list sessions for this directory" },
-    SlashCommand { name: "usage", args: "", description: "usage and cost of this session" },
-    SlashCommand { name: "help", args: "", description: "show commands and key bindings" },
-    SlashCommand { name: "exit", args: "", description: "leave lcgn" },
-];
+/// The `/` popup offers the same command table the REPL and the shared
+/// executor use ([`crate::cli::commands`]).
+pub use crate::cli::commands::{CommandSpec as SlashCommand, COMMANDS as SLASH_COMMANDS};
 
 /// Commands matching `query` (without the slash): prefix matches first,
 /// then substring matches, each in table order.

@@ -991,7 +991,7 @@ impl App {
     // ---- misc ---------------------------------------------------------------
 
     pub fn help_text() -> String {
-        "Commands: /model /thinking /plan /build /new /fork /undo /diff /review /mcp /skills /sessions /usage /exit\n\
+        "Commands: /model /thinking /plan /build /auto /chat /new /fork /undo /diff /review /mcp /skills /sessions /usage /exit\n\
          Keys: Enter send · Shift+Enter, Ctrl+J, Alt+Enter or trailing \\ newline · Up/Down history\n\
          Esc interrupt · Ctrl+C clear/interrupt/quit · Ctrl+D quit · Ctrl+O reasoning · Shift+Tab plan/build\n\
          PageUp/PageDown/wheel scroll · End follow · @ file mention · / commands"

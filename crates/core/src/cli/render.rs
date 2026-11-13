@@ -1,8 +1,11 @@
 //! Terminal rendering of run events for `lcgn` (text mode).
 //!
-//! Assistant text streams to **stdout** so `lcgn -p "..." > out.txt` captures
-//! only the answer; everything else (reasoning, tool lines, status) goes to
-//! **stderr**.
+//! The main agent's assistant text streams to **stdout** so
+//! `lcgn -p "..." > out.txt` captures only the answer; everything else
+//! (reasoning, tool lines, status, and the text of sub-agents) goes to
+//! **stderr**. Streaming state is kept per message id, so consecutive
+//! assistant messages are separated by a newline instead of being diffed
+//! against each other.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -43,15 +46,28 @@ const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
-/// Streams run events: assistant deltas to stdout, the rest to stderr.
+/// What has been printed of one assistant message.
+#[derive(Default)]
+struct MessageStream {
+    content: String,
+    reasoning_chars: usize,
+}
+
+/// Streams run events: main-agent text deltas to stdout, the rest to stderr.
 pub struct TextRenderer<W: Write, E: Write> {
     out: W,
     err: E,
     colors: bool,
     show_thinking: bool,
     interactive: bool,
-    last_content: String,
-    reasoning_printed: usize,
+    /// Per message id (messages without an id share the `""` slot).
+    streams: HashMap<String, MessageStream>,
+    /// The message whose text was last written to stdout.
+    last_out_message: Option<String>,
+    /// The last main-agent assistant message that has text (the final answer).
+    last_answer: Option<String>,
+    out_ended_newline: bool,
+    out_printed: bool,
     tool_calls: HashMap<String, (String, String)>,
 }
 
@@ -63,8 +79,11 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
             colors,
             show_thinking,
             interactive,
-            last_content: String::new(),
-            reasoning_printed: 0,
+            streams: HashMap::new(),
+            last_out_message: None,
+            last_answer: None,
+            out_ended_newline: true,
+            out_printed: false,
             tool_calls: HashMap::new(),
         }
     }
@@ -184,15 +203,29 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
                         self.tool_calls.insert(id, (name, summarize_args(&args)));
                     }
                 }
+                let id = message.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let agent = message
+                    .get("agentRole")
+                    .and_then(Value::as_str)
+                    .map(|_| message.get("agentName").and_then(Value::as_str).unwrap_or("agent").to_string());
                 let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-                self.stream_content(content);
+                match agent {
+                    // Sub-agent text must not mix into the answer on stdout.
+                    Some(name) => self.stream_agent_content(&id, &name, content),
+                    None => {
+                        if !content.is_empty() {
+                            self.last_answer = Some(id.clone());
+                        }
+                        self.stream_content(&id, content);
+                    }
+                }
                 if self.show_thinking {
                     if let Some(reasoning) = message
                         .get("reasoningContent")
                         .and_then(Value::as_str)
                         .filter(|r| !r.is_empty())
                     {
-                        self.stream_reasoning(reasoning);
+                        self.stream_reasoning(&id, reasoning);
                     }
                 }
             }
@@ -201,40 +234,67 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
         }
     }
 
-    fn stream_content(&mut self, content: &str) {
-        if content.is_empty() || content == self.last_content {
-            return;
+    /// The part of `content` not printed yet for message `id`: an extension
+    /// prints its tail; a replacement prints everything after the common prefix.
+    fn unprinted(&mut self, id: &str, content: &str) -> String {
+        let stream = self.streams.entry(id.to_string()).or_default();
+        if content.is_empty() || content == stream.content {
+            return String::new();
         }
-        let delta = if content.starts_with(self.last_content.as_str()) {
-            content[self.last_content.len()..].to_string()
+        let delta = if content.starts_with(stream.content.as_str()) {
+            content[stream.content.len()..].to_string()
         } else {
-            // Replaced (not extended): print everything after the common prefix.
             let common = content
                 .chars()
-                .zip(self.last_content.chars())
+                .zip(stream.content.chars())
                 .take_while(|(a, b)| a == b)
                 .count();
-            let byte = content
-                .char_indices()
-                .nth(common)
-                .map(|(i, _)| i)
-                .unwrap_or(content.len());
+            let byte = content.char_indices().nth(common).map(|(i, _)| i).unwrap_or(content.len());
             content[byte..].to_string()
         };
-        self.last_content = content.to_string();
-        if !delta.is_empty() {
-            let _ = self.out.write_all(delta.as_bytes());
-            let _ = self.out.flush();
-        }
+        stream.content = content.to_string();
+        delta
     }
 
-    fn stream_reasoning(&mut self, reasoning: &str) {
-        let total = reasoning.chars().count();
-        if total <= self.reasoning_printed {
+    /// Streams a main-agent message to stdout, starting each new message on
+    /// its own line.
+    fn stream_content(&mut self, id: &str, content: &str) {
+        let delta = self.unprinted(id, content);
+        if delta.is_empty() {
             return;
         }
-        let delta: String = reasoning.chars().skip(self.reasoning_printed).collect();
-        self.reasoning_printed = total;
+        if self.last_out_message.as_deref() != Some(id) {
+            if self.out_printed && !self.out_ended_newline {
+                let _ = self.out.write_all(b"\n");
+            }
+            self.last_out_message = Some(id.to_string());
+        }
+        let _ = self.out.write_all(delta.as_bytes());
+        let _ = self.out.flush();
+        self.out_printed = true;
+        self.out_ended_newline = delta.ends_with('\n');
+    }
+
+    /// Sub-agent text goes to stderr, dimmed and tagged with the agent name.
+    fn stream_agent_content(&mut self, id: &str, name: &str, content: &str) {
+        let delta = self.unprinted(id, content);
+        if delta.is_empty() {
+            return;
+        }
+        let first = self.streams.get(id).is_some_and(|s| s.content.len() == delta.len());
+        let prefix = if first { format!("[{name}] ") } else { String::new() };
+        let _ = write!(self.err, "{}", self.paint(DIM, &format!("{prefix}{delta}")));
+        let _ = self.err.flush();
+    }
+
+    fn stream_reasoning(&mut self, id: &str, reasoning: &str) {
+        let total = reasoning.chars().count();
+        let stream = self.streams.entry(id.to_string()).or_default();
+        if total <= stream.reasoning_chars {
+            return;
+        }
+        let delta: String = reasoning.chars().skip(stream.reasoning_chars).collect();
+        stream.reasoning_chars = total;
         let _ = writeln!(self.err, "{}", self.paint(DIM, &delta));
         let _ = self.err.flush();
     }
@@ -262,17 +322,26 @@ impl<W: Write, E: Write> TextRenderer<W, E> {
         let _ = self.err.flush();
     }
 
-    /// Prints any part of the final answer that was not streamed yet.
+    /// Prints any part of the final answer that was not streamed yet and
+    /// ends stdout with a newline.
     pub fn finalize(&mut self, final_output: &str) {
-        self.stream_content(final_output);
-        let needs_newline = !self.last_content.is_empty()
-            && !self.last_content.ends_with('\n');
-        if needs_newline {
-            let _ = writeln!(self.out);
-            let _ = self.out.flush();
-            self.last_content.push('\n');
+        if !final_output.is_empty() {
+            let id = self.last_answer.clone().unwrap_or_default();
+            let printed = self.streams.get(&id).map(|s| s.content.clone()).unwrap_or_default();
+            if final_output.starts_with(printed.as_str()) {
+                // Usually already streamed; prints only a missing tail.
+                self.stream_content(&id, final_output);
+            } else if final_output != printed {
+                // Unrelated to what streamed: show it as a message of its own.
+                self.stream_content("\u{0}final-output", final_output);
+            }
         }
-        self.reasoning_printed = 0;
+        if self.out_printed && !self.out_ended_newline {
+            let _ = self.out.write_all(b"\n");
+            let _ = self.out.flush();
+            self.out_ended_newline = true;
+        }
+        self.streams.clear();
         self.tool_calls.clear();
     }
 }
@@ -393,6 +462,57 @@ mod tests {
         let mut r = renderer();
         r.finalize("done\n");
         assert_eq!(String::from_utf8(r.out.clone()).unwrap(), "done\n");
+    }
+
+    fn message_with(id: &str, content: &str, agent: Option<&str>) -> Value {
+        let mut message = serde_json::json!({
+            "type": "message_updated",
+            "message": { "id": id, "role": "assistant", "content": content },
+        });
+        if let Some(agent) = agent {
+            message["message"]["agentRole"] = serde_json::json!("explorer");
+            message["message"]["agentName"] = serde_json::json!(agent);
+        }
+        message
+    }
+
+    #[test]
+    fn consecutive_assistant_messages_are_kept_apart() {
+        let mut r = renderer();
+        r.on_event(&message_with("m1", "I'll check", None));
+        r.on_event(&message_with("m2", "All good", None));
+        r.finalize("All good");
+        // No prefix diffing across messages and a newline between them.
+        assert_eq!(String::from_utf8(r.out.clone()).unwrap(), "I'll check\nAll good\n");
+
+        // Streaming deltas of the second message still work per id.
+        let mut r = renderer();
+        r.on_event(&message_with("m1", "one", None));
+        r.on_event(&message_with("m2", "tw", None));
+        r.on_event(&message_with("m2", "two", None));
+        r.on_event(&message_with("m1", "one", None));
+        assert_eq!(String::from_utf8(r.out.clone()).unwrap(), "one\ntwo");
+    }
+
+    #[test]
+    fn sub_agent_text_never_reaches_stdout() {
+        let mut r = renderer();
+        r.on_event(&message_with("a1", "digging through the repo", Some("scout")));
+        r.on_event(&message_with("m1", "The answer", None));
+        r.finalize("The answer");
+        assert_eq!(String::from_utf8(r.out.clone()).unwrap(), "The answer\n");
+        let err = String::from_utf8(r.err.clone()).unwrap();
+        assert!(err.contains("[scout] digging through the repo"), "{err}");
+    }
+
+    #[test]
+    fn finalize_prints_the_answer_that_was_never_streamed() {
+        let mut r = renderer();
+        r.on_event(&message_with("m1", "thinking out loud", None));
+        r.on_event(&message_with("m2", "", None));
+        r.finalize("the final answer");
+        let out = String::from_utf8(r.out.clone()).unwrap();
+        assert_eq!(out, "thinking out loud\nthe final answer\n");
     }
 
     #[test]

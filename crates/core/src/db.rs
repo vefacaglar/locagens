@@ -33,38 +33,112 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, PoisonError, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 const MIGRATION_MARKER: &str = ".migrated-from-data-v1";
 const SESSION_INDEX_FILE: &str = "session_index.jsonl";
 const HISTORY_FILE: &str = "history.jsonl";
 const USAGE_SEQ_FILE: &str = ".usage_seq";
 
+/// How long a mutation waits for the cross-process lock before degrading to
+/// "no lock" (a warning is logged; the write still happens).
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Streamed message text is checkpointed to the rollout at most this often.
+const STREAM_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+/// `refresh_runs_throttled` re-scans the rollouts at most this often.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// Directory (under the root) holding one owner lock file per active run.
+const RUN_LOCKS_DIR: &str = "run_locks";
+
 /// Held for the duration of one cross-process mutation of a shared file.
 /// Backed by an advisory exclusive lock on `<root>/.lock` so the desktop app
 /// and `lcgn` can run concurrently on the same root without overwriting each
 /// other's `projects.json` / `permissions.json` / memory files / usage ids.
 /// Rollouts are not locked (they are private to the run that owns them and
-/// only ever appended to).
-struct CrossProcessLock(std::fs::File);
+/// only ever appended to). `None` means the lock could not be taken (a
+/// read-only or unreachable root); the caller proceeds without it.
+struct CrossProcessLock(Option<std::fs::File>);
 
 impl Drop for CrossProcessLock {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        if let Some(file) = &self.0 {
+            let _ = file.unlock();
+        }
     }
 }
 
+/// Takes the advisory lock, retrying up to [`LOCK_TIMEOUT`]. Never panics:
+/// when the lock file cannot be opened or locked the store degrades to
+/// running unlocked with a warning.
 fn lock_root(root: &Path) -> CrossProcessLock {
     let path = root.join(".lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path)
-        .unwrap_or_else(|err| panic!("Failed to open lock file {}: {err}", path.display()));
-    if let Err(err) = file.lock_exclusive() {
-        tracing::warn!("[Database] Advisory lock not taken on {}: {err}", path.display());
+    let file = match OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::warn!("[Database] Cannot open lock file {}: {err}; continuing without it", path.display());
+            return CrossProcessLock(None);
+        }
+    };
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return CrossProcessLock(Some(file)),
+            Err(err) if is_lock_contended(&err) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => {
+                tracing::warn!("[Database] Advisory lock not taken on {}: {err}", path.display());
+                return CrossProcessLock(None);
+            }
+        }
     }
-    CrossProcessLock(file)
+}
+
+fn is_lock_contended(err: &std::io::Error) -> bool {
+    err.kind() == fs2::lock_contended_error().kind()
+        || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+/// Owner lock of one active run: `<root>/run_locks/<run_id>.lock`.
+fn run_lock_path(root: &Path, run_id: &str) -> PathBuf {
+    root.join(RUN_LOCKS_DIR).join(format!("{}.lock", safe_file_part(run_id)))
+}
+
+/// Takes the exclusive owner lock of a run, held until released or the
+/// process exits (the OS frees it on a crash, which is what makes it a
+/// reliable "is the owner alive" probe).
+fn acquire_run_lock(root: &Path, run_id: &str) -> Option<std::fs::File> {
+    let path = run_lock_path(root, run_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(&path).ok()?;
+    file.try_lock_exclusive().ok()?;
+    Some(file)
+}
+
+/// True when another live process (or `Db` instance) holds the run's owner lock.
+fn run_owned_by_live_process(root: &Path, run_id: &str) -> bool {
+    let path = run_lock_path(root, run_id);
+    let Ok(file) = OpenOptions::new().write(true).open(&path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(err) => is_lock_contended(&err),
+    }
+}
+
+/// `(mtime, length)` of a file; `None` when it does not exist.
+type FileSig = Option<(SystemTime, u64)>;
+
+fn file_sig(path: &Path) -> FileSig {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 /// A durable fact remembered via the `remember` tool / Settings → Memory.
@@ -129,6 +203,10 @@ pub struct Run {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub mode: String,
+    /// `lcgn --no-session`: never written to `session_index.jsonl` /
+    /// `history.jsonl`, and removed again at startup if it was left behind.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
     /// Custom system prompt (`--system-prompt` in `lcgn`); replaces the base.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -220,11 +298,26 @@ struct StorageState {
     next_permission_id: i64,
     next_memory_id: i64,
     next_usage_id: i64,
+    /// Ids of deleted runs: late writes from a still-unwinding drive task
+    /// must never recreate their rollout (QA-034).
+    deleted_runs: HashSet<String>,
+    /// Owner lock files of the runs this process drives (active runs only).
+    run_claims: HashMap<String, std::fs::File>,
+    /// Last time a streamed message was checkpointed to its rollout.
+    stream_checkpoints: HashMap<String, Instant>,
+    /// Signatures of the shared files as last read, so changes made by
+    /// another process are noticed (QA-039).
+    projects_sig: FileSig,
+    permissions_sig: FileSig,
+    memories_sig: u64,
+    /// Signature of every rollout as last replayed.
+    rollout_sigs: HashMap<PathBuf, FileSig>,
 }
 
 pub struct Db {
     root: PathBuf,
     state: RwLock<StorageState>,
+    last_refresh: Mutex<Option<Instant>>,
 }
 
 const ACTIVE_RUN_STATUSES: [&str; 4] =
@@ -250,6 +343,7 @@ impl Db {
         Ok(Self {
             root: data_root.to_path_buf(),
             state: RwLock::new(state),
+            last_refresh: Mutex::new(None),
         })
     }
 
@@ -271,7 +365,12 @@ impl Db {
         let _lock = self.cross_process_lock();
         let mut state = self.write();
         reload_shared_files(&self.root, &mut state);
-        mutate(&mut state)
+        let result = mutate(&mut state);
+        // Our own writes must not look like another process's changes.
+        state.projects_sig = file_sig(&self.root.join("projects.json"));
+        state.permissions_sig = file_sig(&self.root.join("permissions.json"));
+        state.memories_sig = memories_signature(&self.root);
+        result
     }
 
     /// Seeds the default project and fails any run left active by a restart.
@@ -290,15 +389,23 @@ impl Db {
                 persist_projects(&self.root, &state.projects);
             }
 
-            // Reset any runs left in active states by the previous session.
+            // Fail runs left in active states by a process that is gone. A
+            // run another live process (an `lcgn`, the desktop) is driving
+            // holds its owner lock and is left alone (QA-037).
             let stuck: Vec<String> = state
                 .runs
                 .values()
                 .filter(|run| ACTIVE_RUN_STATUSES.contains(&run.status.as_str()))
+                .filter(|run| !run_owned_by_live_process(&root, &run.id))
                 .map(|run| run.id.clone())
                 .collect();
 
             for run_id in stuck {
+                // A `--no-session` run that was never cleaned up leaves no trace.
+                if state.runs.get(&run_id).is_some_and(|run| run.ephemeral) {
+                    remove_run(&root, state, &run_id);
+                    continue;
+                }
                 let now = now_iso();
                 let snapshot = state.runs.get_mut(&run_id).map(|run| {
                     run.status = "failed".to_string();
@@ -338,10 +445,12 @@ impl Db {
     // ------------------------------------------------------------------
 
     pub fn list_projects(&self) -> Vec<Project> {
+        self.sync_shared_files(true, false, false);
         self.read().projects.clone()
     }
 
     pub fn get_project(&self, path: &str) -> Option<Project> {
+        self.sync_shared_files(true, false, false);
         self.read()
             .projects
             .iter()
@@ -390,6 +499,7 @@ impl Db {
     // ------------------------------------------------------------------
 
     pub fn list_memories(&self) -> Vec<Memory> {
+        self.sync_shared_files(false, false, true);
         let mut list = self.read().memories.clone();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list
@@ -465,6 +575,7 @@ impl Db {
     // ------------------------------------------------------------------
 
     pub fn list_permissions(&self) -> Vec<PermissionRule> {
+        self.sync_shared_files(false, true, false);
         let mut list = self.read().permissions.clone();
         list.sort_by_key(|rule| rule.id);
         list
@@ -546,10 +657,12 @@ impl Db {
     // ------------------------------------------------------------------
 
     /// Starts the run's rollout with a `session_meta` line (or appends a
-    /// `run_update` when the run id is already known).
+    /// `run_update` when the run id is already known). An active run is
+    /// claimed by this process (see [`Db::run_startup_tasks`]).
     pub fn create_run(&self, run: Run) -> Run {
         let mut guard = self.write();
         let state = &mut *guard;
+        state.deleted_runs.remove(&run.id);
         let kind = if state.runs.contains_key(&run.id) {
             "run_update"
         } else {
@@ -558,6 +671,7 @@ impl Db {
         state.runs.insert(run.id.clone(), run.clone());
         append_event(&self.root, state, &run.id, &run.created_at, kind, run_payload(&run));
         append_session_index(&self.root, &run);
+        sync_run_claim(&self.root, state, &run);
         run
     }
 
@@ -574,6 +688,7 @@ impl Db {
         if let Some(run) = snapshot {
             append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
             append_session_index(&self.root, &run);
+            sync_run_claim(&self.root, state, &run);
         }
     }
 
@@ -594,6 +709,7 @@ impl Db {
         if title_changed {
             append_session_index(&self.root, &run);
         }
+        sync_run_claim(&self.root, state, &run);
         Some(run)
     }
 
@@ -665,6 +781,7 @@ impl Db {
         };
         fork.status = "done".to_string();
         fork.error_message = None;
+        fork.ephemeral = false;
         fork.created_at = now.clone();
         fork.updated_at = now.clone();
         fork.last_active_at = Some(now.clone());
@@ -703,18 +820,13 @@ impl Db {
     }
 
     /// Deletes the run's rollout file (usage lines live in it and go too).
+    /// The id is tombstoned, so a drive task that is still unwinding cannot
+    /// write a headless rollout back. Callers that may be deleting an active
+    /// run should go through `api::runs::delete_run`, which cancels first.
     pub fn delete_run(&self, id: &str) -> bool {
         let mut guard = self.write();
         let state = &mut *guard;
-        let removed = state.runs.remove(id).is_some();
-        state.messages.remove(id);
-        state.plans.remove(id);
-        state.usage.retain(|entry| entry.run_id != id);
-        if let Some(path) = state.rollouts.remove(id) {
-            let _ = std::fs::remove_file(&path);
-            prune_empty_dirs(&path, &self.root.join("sessions"));
-        }
-        removed
+        remove_run(&self.root, state, id)
     }
 
     // ------------------------------------------------------------------
@@ -724,6 +836,9 @@ impl Db {
     pub fn append_message(&self, message: RunMessage) {
         let mut guard = self.write();
         let state = &mut *guard;
+        if state.deleted_runs.contains(&message.run_id) {
+            return;
+        }
         state
             .messages
             .entry(message.run_id.clone())
@@ -737,7 +852,8 @@ impl Db {
             "message",
             message_payload(&message),
         );
-        if message.role == "user" && message.agent_role.is_none() {
+        let ephemeral = state.runs.get(&message.run_id).is_some_and(|run| run.ephemeral);
+        if message.role == "user" && message.agent_role.is_none() && !ephemeral {
             append_history(&self.root, &message.run_id, &message.content, unix_secs(&message.created_at));
         }
     }
@@ -772,6 +888,34 @@ impl Db {
         reasoning_content: Option<&str>,
         raw_response: Option<&str>,
     ) -> Option<RunMessage> {
+        self.apply_message_update(run_id, message_id, content, reasoning_content, raw_response, true)
+    }
+
+    /// A streaming update of a message that is still being generated: the
+    /// in-memory copy is always current, but the rollout only gets a
+    /// `message_update` checkpoint every [`STREAM_CHECKPOINT_INTERVAL`]. The
+    /// final `update_message_full` always persists, so a 100 KB answer costs a
+    /// handful of lines instead of hundreds (QA-035). A crash loses at most the
+    /// last few seconds of streamed text of a run that is failed on restart anyway.
+    pub fn stream_message(
+        &self,
+        run_id: &str,
+        message_id: &str,
+        content: &str,
+        reasoning_content: Option<&str>,
+    ) -> Option<RunMessage> {
+        self.apply_message_update(run_id, message_id, content, reasoning_content, None, false)
+    }
+
+    fn apply_message_update(
+        &self,
+        run_id: &str,
+        message_id: &str,
+        content: &str,
+        reasoning_content: Option<&str>,
+        raw_response: Option<&str>,
+        force_persist: bool,
+    ) -> Option<RunMessage> {
         let mut guard = self.write();
         let state = &mut *guard;
         let message = state
@@ -787,6 +931,24 @@ impl Db {
             message.raw_response = Some(raw.to_string());
         }
         let updated = message.clone();
+        let now = Instant::now();
+        let due = match state.stream_checkpoints.get(message_id) {
+            Some(last) => now.duration_since(*last) >= STREAM_CHECKPOINT_INTERVAL,
+            None => {
+                // The first streamed chunk only starts the clock: the
+                // placeholder message is already on disk.
+                state.stream_checkpoints.insert(message_id.to_string(), now);
+                false
+            }
+        };
+        if !force_persist && !due {
+            return Some(updated);
+        }
+        if force_persist {
+            state.stream_checkpoints.remove(message_id);
+        } else {
+            state.stream_checkpoints.insert(message_id.to_string(), now);
+        }
         append_event(
             &self.root,
             state,
@@ -809,6 +971,9 @@ impl Db {
     pub fn set_plan(&self, plan: Plan) {
         let mut guard = self.write();
         let state = &mut *guard;
+        if state.deleted_runs.contains(&plan.run_id) {
+            return;
+        }
         state.plans.insert(plan.run_id.clone(), plan.clone());
         append_event(&self.root, state, &plan.run_id, &plan.created_at, "plan", plan_payload(&plan));
     }
@@ -817,29 +982,99 @@ impl Db {
     // Usage logs (`usage` lines of the run's rollout)
     // ------------------------------------------------------------------
 
+    /// Appends a usage line to the run's rollout. The cross-process lock is
+    /// held only while the id is allocated from `.usage_seq`; the shared
+    /// files are not re-read (QA-036).
     pub fn append_usage(&self, mut entry: UsageLogEntry) -> UsageLogEntry {
-        self.with_shared_mutation(|state| {
-            if entry.id == 0 {
-                entry.id = allocate_usage_id(&self.root, state);
-            }
-            state.usage.push(entry.clone());
-            let payload = serde_json::to_value(&entry).unwrap_or(Value::Null);
-            append_event(&self.root, state, &entry.run_id, &entry.created_at, "usage", payload);
-            entry
-        })
+        let mut guard = self.write();
+        let state = &mut *guard;
+        if state.deleted_runs.contains(&entry.run_id) {
+            return entry;
+        }
+        if entry.id == 0 {
+            let _lock = self.cross_process_lock();
+            entry.id = allocate_usage_id(&self.root, state);
+        }
+        state.usage.push(entry.clone());
+        let payload = serde_json::to_value(&entry).unwrap_or(Value::Null);
+        append_event(&self.root, state, &entry.run_id, &entry.created_at, "usage", payload);
+        entry
     }
 
-    /// Re-reads every rollout from disk so runs created or changed by another
-    /// process (the desktop app or a second `lcgn`) become visible.
+    /// Re-reads the rollouts that changed on disk so runs created or changed
+    /// by another process (the desktop app or a second `lcgn`) become
+    /// visible. Incremental: only rollouts whose mtime/size changed are
+    /// replayed, and runs this process is driving (they hold their owner
+    /// lock, and may have in-memory streaming state) are never overwritten.
     pub fn refresh_runs(&self) {
-        let mut state = self.write();
-        state.runs.clear();
-        state.messages.clear();
-        state.plans.clear();
-        state.usage.clear();
-        state.rollouts.clear();
-        load_rollouts(&self.root, &mut state);
+        let mut paths = Vec::new();
+        collect_rollouts(&self.root.join("sessions"), &mut paths);
+        paths.sort();
+        let mut guard = self.write();
+        let state = &mut *guard;
+        let seen: HashSet<PathBuf> = paths.iter().cloned().collect();
+
+        for path in paths {
+            let sig = file_sig(&path);
+            if state.rollout_sigs.get(&path) == Some(&sig) {
+                continue;
+            }
+            state.rollout_sigs.insert(path.clone(), sig);
+            let mut fresh = StorageState::default();
+            replay_rollout(&path, &mut fresh);
+            merge_replayed_runs(state, fresh);
+        }
+
+        // Rollouts deleted by another process take their runs with them.
+        let gone: Vec<PathBuf> = state
+            .rollout_sigs
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .cloned()
+            .collect();
+        for path in gone {
+            state.rollout_sigs.remove(&path);
+            let orphans: Vec<String> = state
+                .rollouts
+                .iter()
+                .filter(|(id, owned)| **owned == path && !state.run_claims.contains_key(*id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in orphans {
+                forget_run(state, &id);
+            }
+        }
+        state.usage.sort_by_key(|entry| entry.id);
         state.next_usage_id = next_usage_id_from(&self.root, &state.usage);
+    }
+
+    /// `refresh_runs` at most every [`REFRESH_INTERVAL`]; cheap enough to call
+    /// from every run listing.
+    pub fn refresh_runs_throttled(&self) {
+        {
+            let mut last = self.last_refresh.lock().unwrap_or_else(PoisonError::into_inner);
+            if last.is_some_and(|at| at.elapsed() < REFRESH_INTERVAL) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        self.refresh_runs();
+    }
+
+    /// Reloads `permissions.json` / `projects.json` / the memory files when
+    /// another process changed them, so grants revoked elsewhere take effect
+    /// here (QA-039).
+    fn sync_shared_files(&self, projects: bool, permissions: bool, memories: bool) {
+        let (projects_sig, permissions_sig) = {
+            let state = self.read();
+            (state.projects_sig, state.permissions_sig)
+        };
+        let stale = (projects && file_sig(&self.root.join("projects.json")) != projects_sig)
+            || (permissions && file_sig(&self.root.join("permissions.json")) != permissions_sig)
+            || (memories && memories_signature(&self.root) != self.read().memories_sig);
+        if stale {
+            reload_shared_files(&self.root, &mut self.write());
+        }
     }
 
     pub fn list_usage(&self, run_id: Option<&str>) -> Vec<UsageLogEntry> {
@@ -857,11 +1092,94 @@ impl Db {
     // ------------------------------------------------------------------
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, StorageState> {
-        self.state.read().expect("storage lock poisoned")
+        // A panic inside one closure must not kill every later Db call.
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, StorageState> {
-        self.state.write().expect("storage lock poisoned")
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+// ----------------------------------------------------------------------
+// Run ownership, deletion and merging
+// ----------------------------------------------------------------------
+
+/// Claims (active run) or releases (terminal run) this process's owner lock
+/// for `run`, so other processes know whether it is still being driven.
+fn sync_run_claim(root: &Path, state: &mut StorageState, run: &Run) {
+    if ACTIVE_RUN_STATUSES.contains(&run.status.as_str()) {
+        if !state.run_claims.contains_key(&run.id) {
+            if let Some(file) = acquire_run_lock(root, &run.id) {
+                state.run_claims.insert(run.id.clone(), file);
+            }
+        }
+    } else {
+        release_run_claim(root, state, &run.id);
+    }
+}
+
+fn release_run_claim(root: &Path, state: &mut StorageState, run_id: &str) {
+    if let Some(file) = state.run_claims.remove(run_id) {
+        let _ = file.unlock();
+        drop(file);
+        let _ = std::fs::remove_file(run_lock_path(root, run_id));
+    }
+}
+
+/// Drops every in-memory trace of a run (no file is touched).
+fn forget_run(state: &mut StorageState, id: &str) {
+    state.runs.remove(id);
+    state.messages.remove(id);
+    state.plans.remove(id);
+    state.usage.retain(|entry| entry.run_id != id);
+    state.rollouts.remove(id);
+}
+
+/// Deletes a run: tombstones the id, releases its owner lock, drops its
+/// memory and removes its rollout file. Returns whether the run existed.
+fn remove_run(root: &Path, state: &mut StorageState, id: &str) -> bool {
+    state.deleted_runs.insert(id.to_string());
+    release_run_claim(root, state, id);
+    state.stream_checkpoints.retain(|message_id, _| {
+        !state.messages.get(id).is_some_and(|messages| messages.iter().any(|m| &m.id == message_id))
+    });
+    let existed = state.runs.contains_key(id);
+    let path = state.rollouts.get(id).cloned();
+    forget_run(state, id);
+    if let Some(path) = path {
+        state.rollout_sigs.remove(&path);
+        let _ = std::fs::remove_file(&path);
+        prune_empty_dirs(&path, &root.join("sessions"));
+    }
+    existed
+}
+
+/// Folds freshly replayed runs into `state`, except runs this process owns
+/// or has deleted.
+fn merge_replayed_runs(state: &mut StorageState, mut fresh: StorageState) {
+    let ids: Vec<String> = fresh.runs.keys().cloned().collect();
+    for id in ids {
+        if state.run_claims.contains_key(&id) || state.deleted_runs.contains(&id) {
+            continue;
+        }
+        if let Some(run) = fresh.runs.remove(&id) {
+            state.runs.insert(id.clone(), run);
+        }
+        state.messages.insert(id.clone(), fresh.messages.remove(&id).unwrap_or_default());
+        match fresh.plans.remove(&id) {
+            Some(plan) => {
+                state.plans.insert(id.clone(), plan);
+            }
+            None => {
+                state.plans.remove(&id);
+            }
+        }
+        state.usage.retain(|entry| entry.run_id != id);
+        state.usage.extend(fresh.usage.iter().filter(|entry| entry.run_id == id).cloned());
+        if let Some(path) = fresh.rollouts.remove(&id) {
+            state.rollouts.insert(id, path);
+        }
     }
 }
 
@@ -928,6 +1246,9 @@ fn append_event(
     kind: &str,
     payload: Value,
 ) {
+    if state.deleted_runs.contains(run_id) {
+        return;
+    }
     let path = state
         .rollouts
         .entry(run_id.to_string())
@@ -1062,6 +1383,7 @@ fn load_rollouts(root: &Path, state: &mut StorageState) {
     collect_rollouts(&root.join("sessions"), &mut paths);
     paths.sort();
     for path in paths {
+        state.rollout_sigs.insert(path.clone(), file_sig(&path));
         replay_rollout(&path, state);
     }
     state.usage.sort_by_key(|entry| entry.id);
@@ -1074,6 +1396,9 @@ fn load_rollouts(root: &Path, state: &mut StorageState) {
 /// `session_index.jsonl`: append-only `{id, title, updated_at}`; the last
 /// line per id wins.
 fn append_session_index(root: &Path, run: &Run) {
+    if run.ephemeral {
+        return;
+    }
     let mut line = json!({
         "id": run.id,
         "title": run.title,
@@ -1124,7 +1449,7 @@ fn next_usage_id_from(root: &Path, usage: &[UsageLogEntry]) -> i64 {
 // ----------------------------------------------------------------------
 
 /// Directory name for a project path: every non-alphanumeric char becomes `-`.
-fn sanitize_project_path(path: &str) -> String {
+pub(crate) fn sanitize_project_path(path: &str) -> String {
     let name: String = path
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -1228,8 +1553,8 @@ fn parse_memory(raw: &str) -> Option<Memory> {
     Some(memory)
 }
 
-/// Reads every memory `.md` (global and per-project) with its file path.
-fn load_memories(root: &Path) -> Vec<(Memory, PathBuf)> {
+/// The global memory directory plus one per project directory.
+fn memory_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![root.join("memories")];
     if let Ok(entries) = std::fs::read_dir(root.join("projects")) {
         for entry in entries.flatten() {
@@ -1238,8 +1563,34 @@ fn load_memories(root: &Path) -> Vec<(Memory, PathBuf)> {
             }
         }
     }
+    dirs
+}
+
+/// Cheap fingerprint of all memory files (path, mtime, size): changes when
+/// another process adds, edits or removes a memory.
+fn memories_signature(root: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<(PathBuf, FileSig)> = Vec::new();
+    for dir in memory_dirs(root) {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let sig = file_sig(&path);
+                entries.push((path, sig));
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Reads every memory `.md` (global and per-project) with its file path.
+fn load_memories(root: &Path) -> Vec<(Memory, PathBuf)> {
     let mut found = Vec::new();
-    for dir in dirs {
+    for dir in memory_dirs(root) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -1330,6 +1681,11 @@ fn load_state(root: &Path) -> anyhow::Result<StorageState> {
 /// `with_shared_mutation` under the advisory lock, so a mutation always
 /// applies on top of the latest on-disk state written by another process.
 fn reload_shared_files(root: &Path, state: &mut StorageState) {
+    // Signatures first: a write racing with the read below is then picked up
+    // by the next sync instead of being lost.
+    state.projects_sig = file_sig(&root.join("projects.json"));
+    state.permissions_sig = file_sig(&root.join("permissions.json"));
+    state.memories_sig = memories_signature(root);
     state.projects = read_json_or::<Vec<Project>>(&root.join("projects.json"));
     state.permissions = read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json"));
     let memories = load_memories(root);
@@ -2128,6 +2484,228 @@ mod tests {
         db2.refresh_runs();
         assert!(db2.get_run_full("run-from-1").is_some());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // QA-034..041 regression tests
+    // ------------------------------------------------------------------
+
+    fn active_run(id: &str) -> Run {
+        Run {
+            status: "generating".into(),
+            ..sample_run(id)
+        }
+    }
+
+    #[test]
+    fn deleted_run_is_never_resurrected_by_late_writes() {
+        let root = temp_root("tombstone");
+        let db = Db::open(&root).unwrap();
+        db.create_run(active_run("run-del"));
+        db.append_message(msg("run-del", "m1", "user", "hi"));
+        assert_eq!(rollouts_in(&root).len(), 1);
+
+        assert!(db.delete_run("run-del"));
+        assert!(rollouts_in(&root).is_empty());
+
+        // A drive task that is still unwinding keeps writing.
+        db.append_message(msg("run-del", "m2", "assistant", "late"));
+        db.update_run_status("run-del", "done", None);
+        db.set_plan(Plan {
+            run_id: "run-del".into(),
+            ..Default::default()
+        });
+        db.append_usage(UsageLogEntry {
+            run_id: "run-del".into(),
+            ..Default::default()
+        });
+        assert!(db.stream_message("run-del", "m2", "x", None).is_none());
+        assert!(rollouts_in(&root).is_empty(), "no headless rollout may reappear");
+        assert!(db.list_messages("run-del").is_empty());
+        assert!(db.list_usage(Some("run-del")).is_empty());
+        assert!(db.get_plan("run-del").is_none());
+
+        // A reopen shows nothing either.
+        drop(db);
+        assert!(Db::open(&root).unwrap().list_runs().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn streaming_updates_are_coalesced_but_the_final_text_persists() {
+        let root = temp_root("stream");
+        let db = Db::open(&root).unwrap();
+        db.create_run(active_run("run-s"));
+        db.append_message(msg("run-s", "a1", "assistant", ""));
+        let mut text = String::new();
+        for chunk in 0..200 {
+            text.push_str(&format!("chunk {chunk} "));
+            let live = db.stream_message("run-s", "a1", &text, Some("thinking")).unwrap();
+            assert_eq!(live.content, text, "memory is always current");
+        }
+        assert_eq!(db.list_messages("run-s")[0].content, text);
+        let streaming_lines = kinds_of(&rollouts_in(&root)[0])
+            .iter()
+            .filter(|kind| *kind == "message_update")
+            .count();
+        assert_eq!(streaming_lines, 0, "intermediate states stay in memory");
+
+        db.update_message_full("run-s", "a1", &text, Some("thinking"), None);
+        let kinds = kinds_of(&rollouts_in(&root)[0]);
+        assert_eq!(kinds.iter().filter(|kind| *kind == "message_update").count(), 1);
+
+        drop(db);
+        let reopened = Db::open(&root).unwrap();
+        assert_eq!(reopened.list_messages("run-s")[0].content, text);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_leaves_runs_of_a_live_process_alone() {
+        let root = temp_root("owner");
+        let owner = Db::open(&root).unwrap();
+        owner.create_run(active_run("run-live"));
+
+        // A second process starts while the first still drives the run.
+        let other = Db::open(&root).unwrap();
+        other.run_startup_tasks(Path::new("C:/ws"), "Locagens");
+        assert_eq!(other.get_run_full("run-live").unwrap().status, "generating");
+        assert!(other.list_messages("run-live").is_empty(), "no restart message injected");
+
+        // The owner finishes: the claim is released, nothing is stuck.
+        owner.update_run_status("run-live", "done", None);
+        assert!(!run_lock_path(&root, "run-live").exists());
+
+        // An owner that died mid-run (lock released with the process) is failed.
+        owner.create_run(active_run("run-dead"));
+        drop(owner);
+        let third = Db::open(&root).unwrap();
+        third.run_startup_tasks(Path::new("C:/ws"), "Locagens");
+        assert_eq!(third.get_run_full("run-dead").unwrap().status, "failed");
+        assert_eq!(third.get_run_full("run-live").unwrap().status, "done");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_panic_inside_a_closure_does_not_kill_the_store() {
+        let root = temp_root("poison");
+        let db = Db::open(&root).unwrap();
+        db.create_run(sample_run("run-p"));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.patch_run("run-p", |_| panic!("boom"));
+        }));
+        assert!(result.is_err());
+        // Every later call still works.
+        assert!(db.get_run_full("run-p").is_some());
+        db.append_message(msg("run-p", "m", "user", "still alive"));
+        assert_eq!(db.list_messages("run-p").len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unopenable_lock_file_degrades_instead_of_panicking() {
+        let root = temp_root("nolock");
+        // `.lock` is a directory, so it can never be opened as a file.
+        std::fs::create_dir_all(root.join(".lock")).unwrap();
+        let db = Db::open(&root).unwrap();
+        let project = db.create_project("C:/x", "x");
+        assert_eq!(project.path, "C:/x");
+        assert_eq!(db.list_projects().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn changes_from_another_process_become_visible() {
+        let root = temp_root("crossproc");
+        let a = Db::open(&root).unwrap();
+        let b = Db::open(&root).unwrap();
+
+        // Permissions: a grant revoked by one instance disappears for the other.
+        let rule = a.upsert_permission("global", "", "run_command", "ls", vec![], "allow_always");
+        assert_eq!(b.list_permissions().len(), 1);
+        a.delete_permission(rule.id);
+        assert!(b.list_permissions().is_empty());
+
+        // Projects and memories likewise.
+        a.create_project("C:/shared", "shared");
+        assert!(b.get_project("C:/shared").is_some());
+        let memory = a.create_memory("global", "", "ref", "remember me").unwrap();
+        assert_eq!(b.list_memories().len(), 1);
+        a.update_memory(memory.id, "edited");
+        assert_eq!(b.list_memories()[0].content, "edited");
+        a.delete_memory(memory.id);
+        assert!(b.list_memories().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refresh_runs_is_incremental_and_spares_runs_this_process_drives() {
+        let root = temp_root("refresh");
+        let a = Db::open(&root).unwrap();
+        let b = Db::open(&root).unwrap();
+
+        // b is driving a run with live streaming state.
+        b.create_run(active_run("run-mine"));
+        b.append_message(msg("run-mine", "am", "assistant", ""));
+        b.stream_message("run-mine", "am", "streamed so far", None);
+
+        // a finishes one run, then continues it with another message.
+        a.create_run(sample_run("run-theirs"));
+        b.refresh_runs();
+        assert!(b.get_run_full("run-theirs").is_some());
+        assert!(b.list_messages("run-theirs").is_empty());
+        a.append_message(msg("run-theirs", "t1", "user", "more"));
+        b.refresh_runs();
+        assert_eq!(b.list_messages("run-theirs").len(), 1);
+
+        // The run b drives was not reverted to its (stale) on-disk state.
+        assert_eq!(b.list_messages("run-mine")[0].content, "streamed so far");
+
+        // A run deleted by another process disappears.
+        a.delete_run("run-theirs");
+        b.refresh_runs();
+        assert!(b.get_run_full("run-theirs").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_session_runs_leave_no_index_or_history_and_are_swept_at_startup() {
+        let root = temp_root("ephemeral");
+        let db = Db::open(&root).unwrap();
+        db.create_run(Run {
+            ephemeral: true,
+            ..active_run("run-eph")
+        });
+        db.append_message(msg("run-eph", "u1", "user", "secret prompt"));
+        db.update_run_status("run-eph", "generating", None);
+        assert!(!root.join(SESSION_INDEX_FILE).exists());
+        assert!(!root.join(HISTORY_FILE).exists());
+
+        // A crash left it behind: the next startup removes it entirely.
+        drop(db);
+        let reopened = Db::open(&root).unwrap();
+        assert!(reopened.get_run_full("run-eph").is_some());
+        reopened.run_startup_tasks(Path::new("C:/ws"), "Locagens");
+        assert!(reopened.get_run_full("run-eph").is_none());
+        assert!(rollouts_in(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn usage_ids_stay_unique_without_reloading_shared_files() {
+        let root = temp_root("usage");
+        let a = Db::open(&root).unwrap();
+        let b = Db::open(&root).unwrap();
+        let mut ids = HashSet::new();
+        for i in 0..10 {
+            let (db, run) = if i % 2 == 0 { (&a, "ra") } else { (&b, "rb") };
+            let entry = db.append_usage(UsageLogEntry {
+                run_id: run.into(),
+                ..Default::default()
+            });
+            assert!(ids.insert(entry.id), "duplicate usage id {}", entry.id);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

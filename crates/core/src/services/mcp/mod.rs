@@ -242,7 +242,8 @@ fn read_file(path: &PathBuf, scope: &str, project_path: Option<&str>) -> Vec<Mcp
 
 /// Maps config.toml `[mcp_servers.<name>]` tables onto the user scope.
 /// `env_vars` (names to forward) are resolved from the current environment;
-/// `cwd` and the timeout keys have no equivalent here and are ignored.
+/// `cwd` and the timeout keys have no equivalent here and are ignored;
+/// `enabled_tools` / `disabled_tools` are applied by [`tool_allowed`].
 fn config_toml_servers(
     servers: &BTreeMap<String, locagens_config::config_toml::McpServerConfig>,
 ) -> Vec<McpServerConfig> {
@@ -274,6 +275,15 @@ fn config_toml_servers(
             }
         })
         .collect()
+}
+
+/// Whether the model may use `tool` of `server_name`: the `enabled_tools` /
+/// `disabled_tools` filters of the matching config.toml `[mcp_servers.<name>]`
+/// entry (QA-045). Servers without such an entry are unfiltered.
+pub fn tool_allowed(server_name: &str, tool: &str) -> bool {
+    crate::config_runtime::current()
+        .mcp_server(server_name)
+        .is_none_or(|entry| entry.tool_allowed(tool))
 }
 
 /// Project configs take precedence over user configs of the same name.
@@ -840,7 +850,7 @@ pub async fn discover_tool_defs(project_path: Option<&str>) -> Vec<Value> {
         let prefix = sanitized_server_prefix(&config.name);
         for tool in tools {
             let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
-            if name.is_empty() {
+            if name.is_empty() || !tool_allowed(&config.name, name) {
                 continue;
             }
             defs.push(json!({
@@ -919,6 +929,9 @@ pub async fn call_mcp_tool(
     arguments: &Value,
 ) -> Result<String, String> {
     let server = find_enabled_server(server_key, project_path)?;
+    if !tool_allowed(&server.name, tool_name) {
+        return Err(format!("MCP tool '{tool_name}' is disabled by config.toml for server '{}'.", server.name));
+    }
     let result = rpc_call(&server, "tools/call", &json!({ "name": tool_name, "arguments": arguments })).await?;
     if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
         let text = extract_content_text(&result);
