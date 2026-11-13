@@ -43,6 +43,21 @@ how to install bubblewrap or to switch to Full Access); nothing runs
 unsandboxed outside Full Access. The desktop security tab shows the status
 `unavailable` with the same message.
 
+### Credential files
+
+`execpolicy::secret_paths` lists the credential locations that exist on the
+machine: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`,
+`~/.git-credentials`, `.netrc` / `_netrc`, `~/.docker/config.json`,
+`~/.kube/config`, `~/.pypirc`, cargo credentials, gnupg private keys, and in
+every agent dir (`~/.locagens`, `~/.codex`, `~/.pi/agent`) `auth.json`,
+`mcp-oauth.json`, `models.json`, `mcp.json`, `mcp_servers.json` and
+`.credentials.json`.
+- **macOS:** the Seatbelt profile denies `file-read*` and `file-write*` on each.
+- **Linux:** bwrap mounts an empty tmpfs over directories and `/dev/null` over
+  files (after the workspace mounts; a directory that contains the workspace
+  or a writable root is never masked).
+- **Windows:** see "Not covered on Windows" below.
+
 The rest of this document describes the Windows backend (`crates/execpolicy/src/windows_sandbox/`) and the per-domain
 network proxy (`crates/execpolicy/src/network_proxy.rs`).
 
@@ -253,6 +268,34 @@ prompt outside Full Access. Approving a command never amends project
 `.rules`; standing grants go to `permissions.json` only. Commands on Windows
 run with `NoDefaultCurrentDirectoryInExePath=1`, so a repo-shipped `git.bat`
 is not picked up from the working directory.
+
+### Input to interactive sessions
+
+`write_stdin` only reaches exec sessions started by the same run. When the
+approved command starts a shell or REPL (`cmd`, `powershell`/`pwsh`,
+`bash`/`sh`/`zsh`/`fish`, `python`, `node`, database or remote shells,
+`docker exec -it`, ... — also behind `env` / `sudo` / `cd x &&` wrappers;
+unknown cases count as a shell), every submitted line (up to `
+` / ``)
+is classified like an `exec_command` outside Full Access: forbidden lines are
+blocked, known-safe lines and exact standing grants / Allow-for-Run pass,
+dangerous lines always prompt and are approved once, everything else
+prompts. Text after the last newline is held back until a later write
+completes the line, so a command cannot be typed in pieces past the check.
+Ctrl-C / Ctrl-D / Ctrl-Z / Ctrl-\ alone always pass (and drop held text);
+input to non-shell programs (answering a build's prompt, data for a script)
+is sent unchanged.
+
+### File tools and links
+
+In-process writes (`write_file`, `edit_file`, `delete_file`,
+`create_directory`, `move_file`, `apply_patch`) go through
+`apply_patch::workspace_fs`: on Unix the path is walked from a handle on the
+workspace root with `openat(O_NOFOLLOW | O_DIRECTORY)` and the final
+operation happens inside the checked directory; on Windows files are opened
+with `FILE_FLAG_OPEN_REPARSE_POINT` and the handle's final path
+(`GetFinalPathNameByHandleW`) must still be inside the workspace before
+anything is written. A link swapped in after the path check is refused.
 
 ## Deviations from Codex
 

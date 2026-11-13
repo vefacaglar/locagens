@@ -38,12 +38,12 @@ All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; t
 | 009 | fixed | `fetch_url` pins DNS, re-checks every redirect hop, uses no system proxy and caps the body at 2 MiB. |
 | 010 | fixed | The sandbox fails closed when its backend is missing. |
 | 011 | fixed | Unknown modes are rejected and fail closed; dangerous-command markers match on tokens. |
-| 012 | partial | `write_stdin` only reaches sessions of its own run. One approval still covers a whole interactive session (documented). |
+| 012 | fixed | `write_stdin` only reaches sessions of its own run. In shells and REPLs every typed line is classified like `exec_command` (known-safe, standing grant, dangerous, prompt); partial lines are held back until complete. |
 | 013 | fixed | Standing grants live only in `permissions.json` and match the exact command. |
 | 014 | fixed | The proxy checks private addresses for approved hosts too. |
 | 015 | fixed | One sandbox spec for every backend and tool. |
 | 016 | fixed | One env builder; `[shell_environment_policy]` applies on every spawn path. |
-| 017 | partial | Dangling symlinks and junctions are refused. A check-then-open race remains, because there is no `O_NOFOLLOW` open. |
+| 017 | fixed | `apply_patch::workspace_fs`: Unix walks from a root handle with `openat(O_NOFOLLOW)`; Windows opens with `FILE_FLAG_OPEN_REPARSE_POINT` and re-checks the handle's final path before writing. No check-then-open window. |
 | 018 | fixed | Markers match tokens, not substrings. |
 | 019 | fixed | Dangerous commands always prompt outside Full Access; no grant covers them. |
 | 020 | partial | Windows cannot restrict reads in Build mode with a restricted token; the UI and docs warn about it. |
@@ -75,7 +75,7 @@ All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; t
 | 046 | fixed | `resync_run` runs on a lagged stream (CLI, TUI and desktop). |
 | 047 | fixed | Per-message render state; sub-agent text goes to stderr. |
 | 048 | fixed | One prompt builder (`cli/prompt.rs`). |
-| 049 | partial | The CLI and TUI share one command table (`cli/commands.rs`). The desktop keeps its own UI subset, which includes `/auto` and `/chat`, because coupling it to the CLI module would break layering. |
+| 049 | fixed | One frontend-neutral command table and parser in `crate::commands`, used by the REPL, the TUI (popup and help) and the desktop composer (suggestion list, `/help`, busy blocking). |
 | 050 | fixed | Desktop events are routed by the active run, with a stream generation guard. |
 | 051 | fixed | Desktop MCP settings include project-scoped servers. |
 | 052 | fixed | The remaining strings go through i18n. |
@@ -88,8 +88,8 @@ All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; t
 | 059 | fixed | MCP OAuth robustness. |
 | 060 | fixed | The key preview shows the last 4 characters only. |
 | 061 | fixed | Smaller credential hygiene items. |
-| 062 | partial | Snapshots and undo moved to `services/snapshots.rs`; `orchestrator/mod.rs` and `config/providers.rs` are split into submodules. `db.rs`, `llm.rs`, `tui/app.rs` and `settings.rs` are not split yet. |
-| 063 | fixed | Unused dependencies removed; clippy runs in CI. It only reports for now, because 53 style-only lints remain. |
+| 062 | fixed | Snapshots and undo live in `services/snapshots.rs`. `orchestrator/mod.rs`, `config/providers.rs`, `db.rs`, `llm.rs`, `tui/app.rs` and desktop `settings.rs` are split into submodules; no file is over 800 lines except two test files. |
+| 063 | fixed | Unused dependencies removed; all clippy lints fixed; CI runs `cargo clippy --workspace --all-targets -- -D warnings`. |
 | 064 | fixed | One `now_ms`, `open_browser`, env allowlist, private-IP check, atomic writer, prompt builder and usage aggregation (`UsageTotals`). |
 | 065 | fixed | Stale route, SSE and `apps/backend` comments rewritten; the main usage role is `main`, and legacy `planner` is read as `main`. |
 | 066 | fixed | README rewritten for the current product. |
@@ -98,7 +98,7 @@ All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; t
 | 069 | fixed | RELEASING.md names the real crates and steps. |
 | 070 | fixed | state.md updated, plan.md marked historical, Claude.md and SANDBOX.md corrected, leftover db files removed. |
 | 071 | fixed | Tests use a per-process temp home (`crate::paths` under `cfg(test)`); hooks take an injectable agent-dir chain; the integration test isolates every home variable. |
-| 072 | partial | Regression tests cover every listed class. The Unix-only `auth.json` mode test still needs a Linux/macOS CI run. There is no desktop end-to-end run test yet. |
+| 072 | fixed | Regression tests cover every listed class; the Unix `auth.json` mode test passes on the Linux and macOS CI runners; a headless desktop end-to-end test (`e2e_tests.rs`) drives the composer against a mock provider through a permission prompt to `done`. |
 | 073 | fixed | A shared async `ENV_TEST_LOCK`; `config_toml_servers` takes an explicit env lookup. |
 
 ---
