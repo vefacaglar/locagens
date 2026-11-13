@@ -7,6 +7,17 @@ use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 use serde_json::Value;
 
+/// Delivers a permission-card answer to the run and drops the card.
+pub(crate) async fn decide(mut store: UiStore, run_id: String, decision: &'static str, mut busy: Signal<bool>) {
+    busy.set(true);
+    let state = crate::state_ui::core();
+    if let Err(err) = locagens_core::api::runs::permission_decision(&state, &run_id, decision).await {
+        store.toast(store.tf("toast.decision_failed", &[&err.to_string()]));
+    }
+    store.pending_permission.set(None);
+    busy.set(false);
+}
+
 /// Renders whichever of the two cards is currently pending.
 #[component]
 pub fn PendingCards() -> Element {
@@ -137,18 +148,6 @@ fn PermissionCard(request: Value) -> Element {
         });
 
     let busy = use_signal(|| false);
-
-    async fn decide(mut store: UiStore, run_id: String, decision: &'static str, mut busy: Signal<bool>) {
-        busy.set(true);
-        let state = crate::state_ui::core();
-        if let Err(err) =
-            locagens_core::api::runs::permission_decision(&state, &run_id, decision).await
-        {
-            store.toast(store.tf("toast.decision_failed", &[&err.to_string()]));
-        }
-        store.pending_permission.set(None);
-        busy.set(false);
-    }
 
     rsx! {
         div {

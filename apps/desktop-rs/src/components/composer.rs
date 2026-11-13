@@ -3,6 +3,7 @@
 //! effort selectors and the Send / Continue / Queue action.
 
 use super::icons::*;
+use super::slash::{self, SlashAction};
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload};
@@ -137,6 +138,8 @@ pub fn Composer() -> Element {
     let selected_effort = store.selected_effort.read().clone();
     let selected_mode = store.selected_mode.read().clone();
     let prompt_text = store.prompt.read().clone();
+    // `/` suggestions from the shared command table while typing a command.
+    let slash_suggestions = slash::suggestions(&prompt_text);
 
     let provider_models: Vec<String> = providers
         .iter()
@@ -220,6 +223,36 @@ pub fn Composer() -> Element {
                         context_menu.set(None);
                         hovered_model.set(None);
                     },
+                }
+            }
+            // Slash-command suggestions (shared table, translated descriptions).
+            if context_menu.read().is_none() && !slash_suggestions.is_empty() {
+                div {
+                    class: "composer-context-menu slash-menu",
+                    div { class: "ccm-header", "{store.t(\"composer.commands\")}" }
+                    div {
+                        class: "ccm-list",
+                        for spec in slash_suggestions.iter() {
+                            {
+                                let insert = format!("/{} ", spec.name);
+                                let usage = spec.usage();
+                                let description = crate::i18n::command_description(store.lang(), spec);
+                                rsx! {
+                                    button {
+                                        key: "cmd-{spec.name}",
+                                        class: "ccm-item",
+                                        title: "{description}",
+                                        onclick: move |_| {
+                                            let mut store = store;
+                                            store.prompt.set(insert.clone());
+                                        },
+                                        span { class: "ccm-cmd-usage", "{usage}" }
+                                        span { class: "ccm-cmd-desc", "{description}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Full-width borderless prompt input.
@@ -654,90 +687,21 @@ pub fn Composer() -> Element {
     }
 }
 
-/// Sends the prompt: create_run (no active run), continue_run (finished run)
-/// or queue_message (a generating run). Attaches the event stream that was
-/// subscribed before the drive task started.
-fn submit(store: &UiStore, busy: Signal<bool>) {
-    let mut store = *store;
+/// Sends the prompt: a slash command, or create_run (no active run),
+/// continue_run (finished run) or queue_message (a generating run). Attaches
+/// the event stream that was subscribed before the drive task started.
+pub(crate) fn submit(store: &UiStore, busy: Signal<bool>) {
+    let store = *store;
     let prompt = store.prompt.read().trim().to_string();
     if prompt.is_empty() || *busy.read() {
         return;
     }
 
-    // Client-side slash commands run before any run is started.
-    if prompt.starts_with('/') {
-        let mut parts = prompt.split_whitespace();
-        let head = parts.next().unwrap_or("").to_lowercase();
-        match head.as_str() {
-            "/new" | "/clear" => {
-                store.active_run_id.set(None);
-                store.active_run.set(None);
-                store.messages.set(Vec::new());
-                store.plan.set(None);
-                store.run_usage.set(None);
-                store.pending_permission.set(None);
-                store.pending_question.set(None);
-                store.turn_diff.set(None);
-                store.spawned_agents.set(Vec::new());
-                store.prompt.set(String::new());
-            }
-            "/fork" => {
-                if let Some(run_id) = store.active_run_id.read().clone() {
-                    store.prompt.set(String::new());
-                    spawn(async move {
-                        let state = core();
-                        match locagens_core::api::runs::fork_run(&state, &run_id, None).await {
-                            Ok(forked) => {
-                                store.refresh_runs();
-                                store.select_run(forked.id);
-                                store.toast(store.t("toast.forked").to_string());
-                            }
-                            Err(err) => store.toast(store.tf("toast.fork_failed", &[&err.to_string()])),
-                        }
-                    });
-                } else {
-                    store.toast(store.t("toast.no_fork").to_string());
-                }
-            }
-            "/undo" => {
-                let run_id = store.active_run_id.read().clone();
-                let project = store
-                    .selected_project
-                    .read()
-                    .clone()
-                    .or_else(|| store.active_run.read().as_ref().map(|run| run.project_path.clone()));
-                if let Some(project) = project {
-                    store.prompt.set(String::new());
-                    spawn(async move {
-                        let state = core();
-                        match locagens_core::api::projects::undo_last_turn(&state, &project, run_id.as_deref()).await {
-                            Ok(snapshot) => store.toast(store.tf("toast.restored", &[&snapshot.id])),
-                            Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
-                        }
-                    });
-                } else {
-                    store.toast(store.t("toast.select_project").to_string());
-                }
-            }
-            "/review" => {
-                let argument = prompt.trim_start_matches(head.as_str()).trim().to_string();
-                super::review::start_from_command(&store, &argument);
-            }
-            "/plan" | "/build" | "/auto" | "/chat" => {
-                let mode = match head.as_str() {
-                    "/plan" => "plan",
-                    "/build" => "accept_edits",
-                    "/auto" => "auto",
-                    _ => "chat",
-                };
-                store.selected_mode.set(mode.to_string());
-                store.prompt.set(String::new());
-                store.toast(store.tf("toast.mode_set", &[mode]));
-            }
-            _ => {
-                store.toast(store.tf("toast.unknown_command", &[&head]));
-            }
-        }
+    // Client-side slash commands (shared table and busy rule) run before any
+    // run is started.
+    let generating = store.active_run.read().as_ref().is_some_and(|run| run.status == "generating");
+    if let Some(action) = slash::resolve(&prompt, generating) {
+        run_slash(store, action);
         return;
     }
     // A pending card must be resolved first.
@@ -745,7 +709,83 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
         store.toast(store.t("toast.resolve_first").to_string());
         return;
     }
+    start_turn(store, prompt, busy);
+}
 
+/// Executes a slash command on the desktop.
+fn run_slash(mut store: UiStore, action: SlashAction) {
+    match action {
+        SlashAction::Reset => {
+            store.active_run_id.set(None);
+            store.active_run.set(None);
+            store.messages.set(Vec::new());
+            store.plan.set(None);
+            store.run_usage.set(None);
+            store.pending_permission.set(None);
+            store.pending_question.set(None);
+            store.turn_diff.set(None);
+            store.spawned_agents.set(Vec::new());
+            store.prompt.set(String::new());
+        }
+        SlashAction::Fork => {
+            if let Some(run_id) = store.active_run_id.read().clone() {
+                store.prompt.set(String::new());
+                spawn(async move {
+                    let state = core();
+                    match locagens_core::api::runs::fork_run(&state, &run_id, None).await {
+                        Ok(forked) => {
+                            store.refresh_runs();
+                            store.select_run(forked.id);
+                            store.toast(store.t("toast.forked").to_string());
+                        }
+                        Err(err) => store.toast(store.tf("toast.fork_failed", &[&err.to_string()])),
+                    }
+                });
+            } else {
+                store.toast(store.t("toast.no_fork").to_string());
+            }
+        }
+        SlashAction::Undo => {
+            let run_id = store.active_run_id.read().clone();
+            let project = store
+                .selected_project
+                .read()
+                .clone()
+                .or_else(|| store.active_run.read().as_ref().map(|run| run.project_path.clone()));
+            if let Some(project) = project {
+                store.prompt.set(String::new());
+                spawn(async move {
+                    let state = core();
+                    match locagens_core::api::projects::undo_last_turn(&state, &project, run_id.as_deref()).await {
+                        Ok(snapshot) => store.toast(store.tf("toast.restored", &[&snapshot.id])),
+                        Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
+                    }
+                });
+            } else {
+                store.toast(store.t("toast.select_project").to_string());
+            }
+        }
+        SlashAction::Review(argument) => super::review::start_from_command(&store, &argument),
+        SlashAction::SetMode(mode) => {
+            store.selected_mode.set(mode.to_string());
+            store.prompt.set(String::new());
+            store.toast(store.tf("toast.mode_set", &[mode]));
+        }
+        SlashAction::Help => {
+            store.prompt.set(String::new());
+            store.toast(store.tf("toast.commands", &[&slash::command_help(store.lang())]));
+        }
+        SlashAction::Busy(name) => store.toast(store.tf("toast.command_busy", &[&name])),
+        SlashAction::Unavailable(name) => store.toast(store.tf("toast.command_cli_only", &[&name])),
+        SlashAction::Unknown(head) => {
+            store.toast(store.tf("toast.unknown_command", &[&head, &slash::command_names()]));
+        }
+    }
+}
+
+/// Sends a (non-command) prompt: queue on a generating run, continue a
+/// finished one, or create a new run.
+fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
     let provider_id = store.selected_provider.read().clone();
     let model = store.selected_model.read().clone();
     if provider_id.is_empty() || model.is_empty() {

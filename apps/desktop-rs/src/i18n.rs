@@ -71,6 +71,18 @@ pub fn tf(lang: Lang, key: &'static str, args: &[&str]) -> String {
     text
 }
 
+/// Translated description of a slash command (`slash.<name>`), falling back
+/// to the shared English description.
+pub fn command_description(lang: Lang, spec: &locagens_core::commands::CommandSpec) -> &'static str {
+    match lookup().get(format!("slash.{}", spec.name).as_str()) {
+        Some((en, tr)) => match lang {
+            Lang::En => en,
+            Lang::Tr => tr,
+        },
+        None => spec.description,
+    }
+}
+
 fn lookup() -> &'static HashMap<&'static str, (&'static str, &'static str)> {
     static MAP: OnceLock<HashMap<&'static str, (&'static str, &'static str)>> = OnceLock::new();
     MAP.get_or_init(|| TABLE.iter().map(|(key, en, tr)| (*key, (*en, *tr))).collect())
@@ -381,7 +393,22 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("toast.restored", "Restored snapshot {0}", "{0} anlık görüntüsü geri yüklendi"),
     ("toast.select_project", "Select a project first.", "Önce bir proje seç."),
     ("toast.mode_set", "Mode set to {0}", "Mod {0} olarak ayarlandı"),
-    ("toast.unknown_command", "Unknown command {0} — try /new /fork /undo /review /plan /build /auto /chat", "Bilinmeyen komut {0} — şunları dene: /new /fork /undo /review /plan /build /auto /chat"),
+    ("toast.unknown_command", "Unknown command {0} — try {1}", "Bilinmeyen komut {0} — şunları dene: {1}"),
+    ("toast.command_busy", "{0} is unavailable while a run is generating — wait or stop it first.", "{0} bir oturum çalışırken kullanılamaz — bitmesini bekle ya da durdur."),
+    ("toast.command_cli_only", "{0} is only available in the lcgn CLI.", "{0} yalnızca lcgn CLI'da kullanılabilir."),
+    ("toast.commands", "Commands: {0}", "Komutlar: {0}"),
+    ("composer.commands", "Commands", "Komutlar"),
+    // Slash-command descriptions, keyed `slash.<name>`; the English text is
+    // the shared `locagens_core::commands` description (checked by a test).
+    ("slash.plan", "switch to plan mode (read-only)", "plan moduna geç (salt okunur)"),
+    ("slash.build", "switch to build mode (edits applied)", "build moduna geç (düzenlemeler uygulanır)"),
+    ("slash.auto", "switch to full access (no permission prompts)", "tam erişime geç (izin sorulmaz)"),
+    ("slash.chat", "switch to chat mode (no tools)", "sohbet moduna geç (araç yok)"),
+    ("slash.new", "start a fresh session on the next message", "sonraki mesajla yeni bir oturum başlat"),
+    ("slash.fork", "fork the current session", "geçerli oturumu çatalla"),
+    ("slash.undo", "undo the last turn (git snapshot)", "son turu geri al (git anlık görüntüsü)"),
+    ("slash.review", "code review: changes, a branch or a commit", "kod incelemesi: değişiklikler, bir dal ya da bir commit"),
+    ("slash.help", "show the available commands", "kullanılabilir komutları göster"),
     ("toast.resolve_first", "Resolve the pending permission or question first.", "Önce bekleyen izni ya da soruyu yanıtla."),
     ("toast.select_provider", "Select a provider and model first (Settings → Providers).", "Önce bir sağlayıcı ve model seç (Ayarlar → Sağlayıcılar)."),
     ("toast.queue_failed", "Failed to queue message: {0}", "Mesaj sıraya alınamadı: {0}"),
@@ -476,6 +503,20 @@ mod tests {
         assert_eq!(tf(Lang::En, "act.ran", &["3", "commands"]), "Ran 3 commands");
     }
 
+    /// The desktop shows the shared command descriptions: every command the
+    /// desktop offers has a `slash.<name>` entry whose English text is the
+    /// core table's description.
+    #[test]
+    fn desktop_commands_use_the_shared_descriptions() {
+        use locagens_core::commands::{commands_for, Frontend};
+        for spec in commands_for(Frontend::Desktop) {
+            let key = format!("slash.{}", spec.name);
+            let entry = TABLE.iter().find(|(k, _, _)| *k == key).unwrap_or_else(|| panic!("{key} missing"));
+            assert_eq!(entry.1, spec.description, "{key}: English must match locagens_core::commands");
+            assert_eq!(command_description(Lang::Tr, spec), entry.2);
+        }
+    }
+
     /// Every `"namespace.key"` literal in the UI sources must exist in the
     /// table, so no component can reference a key that lacks EN/TR text.
     #[test]
@@ -487,7 +528,8 @@ mod tests {
         let known: HashSet<&str> = TABLE.iter().map(|(key, _, _)| *key).collect();
         let mut missing = Vec::new();
         for file in files {
-            if file.file_name().is_some_and(|name| name == "i18n.rs" || name == "prefs.rs") {
+            // e2e_tests.rs is test-only and names config files (`auth.json`).
+            if file.file_name().is_some_and(|name| name == "i18n.rs" || name == "prefs.rs" || name == "e2e_tests.rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&file).unwrap();

@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod cli;
+pub mod commands;
 pub mod config_runtime;
 pub mod db;
 pub mod orchestrator;
