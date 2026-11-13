@@ -46,15 +46,23 @@ pub struct GitFileDiff {
     pub new_text: String,
 }
 
-/// Pre-turn git baseline: HEAD sha, optional stash of the dirty state and the
-/// untracked files present before the turn ran.
+/// Pre-turn git baseline: HEAD sha, a git tree holding the exact bytes of
+/// every non-ignored worktree file, a copy of the index, and the untracked
+/// files present before the turn ran.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GitSnapshot {
     pub id: String,
     pub run_id: String,
     pub head_sha: String,
+    /// Tree of the pre-turn worktree (blobs hashed with `--no-filters`).
+    /// `None` for snapshots written by older versions (not undoable).
+    #[serde(default)]
+    pub tree_sha: Option<String>,
+    /// Legacy stash-based snapshots only; no longer written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stash_sha: Option<String>,
+    #[serde(default)]
     pub untracked: Vec<String>,
     pub created_at: String,
 }
@@ -93,6 +101,7 @@ fn persist_snapshots(project_path: &Path, snapshots: &[GitSnapshot]) -> Result<(
         std::fs::create_dir_all(parent).map_err(|err| format!("Failed to create .locagens: {err}"))?;
     }
     let keep_from = snapshots.len().saturating_sub(MAX_SNAPSHOTS);
+    prune_index_copies(project_path, &snapshots[keep_from..]);
     let json = serde_json::to_string_pretty(&snapshots[keep_from..])
         .map_err(|err| format!("Failed to serialize snapshots: {err}"))?;
     std::fs::write(&store, json).map_err(|err| format!("Failed to write snapshots: {err}"))
@@ -575,9 +584,11 @@ pub async fn git_commit(state: &AppState, input: GitCommitInput) -> ApiResult<()
 /// Captures a pre-turn git baseline for `project_path` (best-effort; a
 /// non-git repo or a repo without commits yields `Ok(None)`).
 ///
-/// The snapshot records HEAD, the currently untracked files, and — when the
-/// working tree is dirty — a stash commit of the pre-turn changes so
-/// `undo_last_turn_for_path` can restore exactly that state.
+/// Nothing in the worktree or the user's index is touched: every non-ignored
+/// file is hashed into the object store as-is (`--no-filters`, so autocrlf /
+/// `.gitattributes` never rewrite line endings), a tree is written from a
+/// throwaway index, and the real index is copied next to `snapshots.json`.
+/// `undo_last_turn_for_path` restores exactly those bytes.
 pub async fn create_git_snapshot_for_path(
     project_path: &Path,
     run_id: &str,
@@ -608,54 +619,16 @@ pub async fn create_git_snapshot_for_path(
         .map(str::to_string)
         .collect();
 
-    // Stash the dirty pre-turn state. `git stash create` does NOT include
-    // untracked files (it silently treats `-u/--include-untracked` as the
-    // stash message), so push a real stash entry, read its sha, restore the
-    // worktree and drop the entry again: the (now dangling) stash commit
-    // keeps the full pre-turn state — tracked changes, index and untracked
-    // files — for `git stash apply <sha>` during undo.
-    let stash_before = git(project_path, &["rev-parse", "-q", "--verify", "stash@{0}"])
-        .await
-        .ok()
-        .map(|out| out.trim().to_string());
-    let stash_sha = match git(
-        project_path,
-        &["stash", "push", "-u", "-m", "locagens pre-turn snapshot"],
-    )
-    .await
-    {
-        Ok(output) if !output.contains("No local changes") => {
-            let stash_top = git(project_path, &["rev-parse", "-q", "--verify", "stash@{0}"])
-                .await
-                .ok()
-                .map(|out| out.trim().to_string())
-                .filter(|sha| !sha.is_empty());
-            match stash_top {
-                Some(sha) if Some(&sha) != stash_before.as_ref() => {
-                    // Put the worktree back to the pre-turn state, then drop
-                    // the list entry (the sha stays valid for the undo).
-                    let applied = git(project_path, &["stash", "apply", "--index", "stash@{0}"])
-                        .await
-                        .is_ok()
-                        || git(project_path, &["stash", "apply", "stash@{0}"])
-                            .await
-                            .is_ok();
-                    if applied {
-                        let _ = git(project_path, &["stash", "drop", "stash@{0}"]).await;
-                    }
-                    Some(sha)
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    };
+    let id = format!("snap-{}", uuid::Uuid::new_v4());
+    let tree_sha = write_worktree_tree(project_path, &id).await?;
+    save_index_copy(project_path, &id).await;
 
     let snapshot = GitSnapshot {
-        id: format!("snap-{}", uuid::Uuid::new_v4()),
+        id,
         run_id: run_id.to_string(),
-        head_sha: head_sha.clone(),
-        stash_sha,
+        head_sha,
+        tree_sha: Some(tree_sha),
+        stash_sha: None,
         untracked,
         created_at: now_iso(),
     };
@@ -664,6 +637,141 @@ pub async fn create_git_snapshot_for_path(
     snapshots.push(snapshot.clone());
     persist_snapshots(project_path, &snapshots)?;
     Ok(Some(snapshot))
+}
+
+/// Runs `git` with optional extra env and stdin, returning raw stdout bytes.
+async fn git_bytes(
+    project_path: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+    stdin: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncWriteExt;
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(args)
+        .current_dir(project_path)
+        .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().map_err(|err| format!("Failed to run git: {err}"))?;
+    if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(&input).await.map_err(|err| format!("git stdin: {err}"))?;
+        drop(pipe);
+    }
+    let output = child.wait_with_output().await.map_err(|err| format!("git: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git {}: {stderr}", args.first().unwrap_or(&"")));
+    }
+    Ok(output.stdout)
+}
+
+/// Non-ignored worktree files (tracked + untracked), excluding `.locagens/`.
+/// Paths with a newline cannot go through `--stdin-paths` and are skipped.
+async fn worktree_files(project_path: &Path) -> Result<Vec<String>, String> {
+    let raw = git_bytes(project_path, &["ls-files", "-z", "-c", "-o", "--exclude-standard"], &[], None).await?;
+    let mut files: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .filter(|path| !path.is_empty() && !path.contains('\n') && !is_locagens_path(path))
+        // Deleted-but-tracked files are listed by `-c`; only existing files count.
+        .filter(|path| project_path.join(path).is_file())
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Hashes `files` exactly as they are on disk; `write` stores the blobs.
+async fn hash_files(project_path: &Path, files: &[String], write: bool) -> Result<Vec<String>, String> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["hash-object", "--no-filters", "--stdin-paths"];
+    if write {
+        args.insert(1, "-w");
+    }
+    let input = files.join("\n").into_bytes();
+    let output = git_bytes(project_path, &args, &[], Some(input)).await?;
+    let shas: Vec<String> = String::from_utf8_lossy(&output).lines().map(str::to_string).collect();
+    if shas.len() != files.len() {
+        return Err("git hash-object returned an unexpected number of hashes".to_string());
+    }
+    Ok(shas)
+}
+
+/// Writes a tree of the current worktree bytes using a throwaway index.
+async fn write_worktree_tree(project_path: &Path, id: &str) -> Result<String, String> {
+    let files = worktree_files(project_path).await?;
+    let shas = hash_files(project_path, &files, true).await?;
+    let modes = executable_files(project_path).await;
+    let mut index_info = String::new();
+    for (file, sha) in files.iter().zip(&shas) {
+        let mode = if modes.contains(file) { "100755" } else { "100644" };
+        index_info.push_str(&format!("{mode} {sha}\t{file}\n"));
+    }
+    let temp_index = std::env::temp_dir().join(format!("locagens-{id}.index"));
+    let env = [("GIT_INDEX_FILE", temp_index.as_path())];
+    let result = async {
+        git_bytes(project_path, &["update-index", "--add", "--index-info"], &env, Some(index_info.into_bytes())).await?;
+        let tree = git_bytes(project_path, &["write-tree"], &env, None).await?;
+        Ok::<String, String>(String::from_utf8_lossy(&tree).trim().to_string())
+    }
+    .await;
+    let _ = std::fs::remove_file(&temp_index);
+    result
+}
+
+/// Tracked files with the executable bit (kept in the snapshot tree).
+async fn executable_files(project_path: &Path) -> std::collections::HashSet<String> {
+    let raw = git_bytes(project_path, &["ls-files", "-s", "-z"], &[], None).await.unwrap_or_default();
+    raw.split(|byte| *byte == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            meta.starts_with("100755").then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// `<project>/.locagens/snapshots/<id>.index` — copy of the pre-turn index.
+fn index_copy_path(project_path: &Path, id: &str) -> PathBuf {
+    project_path.join(".locagens").join("snapshots").join(format!("{id}.index"))
+}
+
+/// Absolute path of the repository's index (handles linked worktrees).
+async fn git_index_path(project_path: &Path) -> Option<PathBuf> {
+    let raw = git(project_path, &["rev-parse", "--git-path", "index"]).await.ok()?;
+    let path = PathBuf::from(raw.trim());
+    Some(if path.is_absolute() { path } else { project_path.join(path) })
+}
+
+/// Copies the real index next to the snapshot store (best effort).
+async fn save_index_copy(project_path: &Path, id: &str) {
+    let Some(index) = git_index_path(project_path).await else { return };
+    let target = index_copy_path(project_path, id);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::copy(index, target);
+}
+
+/// Deletes index copies of snapshots no longer in the store.
+fn prune_index_copies(project_path: &Path, kept: &[GitSnapshot]) {
+    let dir = project_path.join(".locagens").join("snapshots");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".index") else { continue };
+        if !kept.iter().any(|snapshot| snapshot.id == id) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// True for paths inside the managed `.locagens` folder (never touched by
@@ -686,9 +794,9 @@ pub async fn create_git_snapshot(
         .map_err(ApiError::internal)
 }
 
-/// Undoes the last turn: restores tracked files to the snapshot's HEAD,
-/// removes files created during the turn, and re-applies the stashed
-/// pre-turn changes. The used snapshot is consumed (removed from the store).
+/// Undoes the last turn: rewrites every file whose bytes differ from the
+/// snapshot tree, deletes files the turn created, and puts HEAD (soft) and
+/// the index back. The used snapshot is consumed (removed from the store).
 pub async fn undo_last_turn_for_path(
     project_path: &Path,
     run_id: Option<&str>,
@@ -699,86 +807,96 @@ pub async fn undo_last_turn_for_path(
         None => snapshots.len().checked_sub(1),
     }
     .ok_or_else(|| "No git snapshot available to undo".to_string())?;
+    let tree_sha = snapshots[index]
+        .tree_sha
+        .clone()
+        .ok_or_else(|| "This snapshot was made by an older Locagens version and cannot be undone".to_string())?;
     let snapshot = snapshots.remove(index);
-    persist_snapshots(project_path, &snapshots)?;
 
-    // 1. Tracked files back to the pre-turn HEAD.
-    git(project_path, &["reset", "--hard", &snapshot.head_sha])
-        .await
-        .map_err(|err| format!("git reset failed: {err}"))?;
+    let saved = snapshot_tree_entries(project_path, &tree_sha).await?;
+    let current_files = worktree_files(project_path).await?;
+    let current_shas = hash_files(project_path, &current_files, false).await?;
+    let current: std::collections::HashMap<&str, &str> = current_files
+        .iter()
+        .map(String::as_str)
+        .zip(current_shas.iter().map(String::as_str))
+        .collect();
 
-    // 2. Delete files the turn created (untracked now, unknown before it).
-    //    With a stash present, the pre-existing untracked files are removed
-    //    too: `git stash apply` restores them from the stash's untracked
-    //    tree, and keeping them on disk would make the apply conflict.
-    if let Ok(output) = git(project_path, &["ls-files", "--others", "--exclude-standard"]).await {
-        let known: std::collections::HashSet<&str> = snapshot
-            .untracked
-            .iter()
-            .map(String::as_str)
-            .collect();
-        for line in output.lines() {
-            let relative = line.trim();
-            if relative.is_empty() || is_locagens_path(relative) {
-                continue;
-            }
-            let known_file = known.contains(relative);
-            let delete = if snapshot.stash_sha.is_some() {
-                // Everything untracked will be re-created by the stash apply.
-                true
-            } else {
-                // Without a stash only turn-created files are removed.
-                !known_file
-            };
-            if !delete {
-                continue;
-            }
-            if let Some(full_path) = join_inside(project_path, relative) {
-                // Canonical containment check before deleting.
-                let canonical_project = std::fs::canonicalize(project_path)
-                    .map(crate::util::normalize_canonical)
-                    .unwrap_or_else(|_| project_path.to_path_buf());
-                let canonical_full = std::fs::canonicalize(&full_path)
-                    .map(crate::util::normalize_canonical)
-                    .unwrap_or(full_path);
-                if canonical_full.starts_with(&canonical_project) {
-                    if canonical_full.is_dir() {
-                        let _ = std::fs::remove_dir_all(&canonical_full);
-                    } else {
-                        let _ = std::fs::remove_file(&canonical_full);
-                        // Drop now-empty parent dirs (best effort).
-                        let mut parent = canonical_full.parent().map(Path::to_path_buf);
-                        while let Some(dir) = parent {
-                            if dir == canonical_project
-                                || !dir.starts_with(&canonical_project)
-                                || dir.ends_with(".git")
-                                || dir.ends_with(".locagens")
-                            {
-                                break;
-                            }
-                            if std::fs::remove_dir(&dir).is_ok() {
-                                parent = dir.parent().map(Path::to_path_buf);
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // 1. Files the turn created.
+    for path in current_files.iter().filter(|path| !saved.contains_key(path.as_str())) {
+        remove_inside(project_path, path);
     }
-
-    // 3. Re-apply the pre-turn dirty state.
-    if let Some(sha) = snapshot.stash_sha.as_deref().filter(|sha| !sha.is_empty()) {
-        if git(project_path, &["stash", "apply", "--index", sha])
+    // 2. Files the turn changed or deleted: write the snapshot bytes back.
+    for (path, sha) in &saved {
+        if current.get(path.as_str()) == Some(&sha.as_str()) {
+            continue;
+        }
+        let Some(full_path) = crate::util::writable_inside(project_path, path) else { continue };
+        let bytes = git_bytes(project_path, &["cat-file", "blob", sha], &[], None).await?;
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+        }
+        std::fs::write(&full_path, bytes).map_err(|err| format!("Failed to restore {path}: {err}"))?;
+    }
+    // 3. HEAD (if the turn committed) and the index.
+    let head_now = git(project_path, &["rev-parse", "HEAD"]).await.unwrap_or_default();
+    if head_now.trim() != snapshot.head_sha {
+        git(project_path, &["reset", "-q", "--soft", &snapshot.head_sha])
             .await
-            .is_err()
-        {
-            let _ = git(project_path, &["stash", "apply", sha]).await;
-        }
+            .map_err(|err| format!("git reset failed: {err}"))?;
     }
+    let copy = index_copy_path(project_path, &snapshot.id);
+    if let (true, Some(index)) = (copy.is_file(), git_index_path(project_path).await) {
+        std::fs::copy(&copy, index).map_err(|err| format!("Failed to restore the git index: {err}"))?;
+    }
+    let _ = std::fs::remove_file(copy);
 
+    persist_snapshots(project_path, &snapshots)?;
     Ok(snapshot)
+}
+
+/// `path -> blob sha` for every file in a snapshot tree.
+async fn snapshot_tree_entries(
+    project_path: &Path,
+    tree_sha: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let raw = git_bytes(project_path, &["ls-tree", "-r", "-z", tree_sha], &[], None).await?;
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            let sha = meta.split_whitespace().nth(2)?;
+            Some((path.to_string(), sha.to_string()))
+        })
+        .collect())
+}
+
+/// Deletes a file inside the project (canonical containment check) and then
+/// any parent directories it left empty.
+fn remove_inside(project_path: &Path, relative: &str) {
+    let Some(full_path) = join_inside(project_path, relative) else { return };
+    let canonical_project = std::fs::canonicalize(project_path)
+        .map(crate::util::normalize_canonical)
+        .unwrap_or_else(|_| project_path.to_path_buf());
+    let canonical_full = std::fs::canonicalize(&full_path)
+        .map(crate::util::normalize_canonical)
+        .unwrap_or(full_path);
+    if !canonical_full.starts_with(&canonical_project) || std::fs::remove_file(&canonical_full).is_err() {
+        return;
+    }
+    let mut parent = canonical_full.parent().map(Path::to_path_buf);
+    while let Some(dir) = parent {
+        if dir == canonical_project
+            || !dir.starts_with(&canonical_project)
+            || dir.ends_with(".git")
+            || dir.ends_with(".locagens")
+            || std::fs::remove_dir(&dir).is_err()
+        {
+            break;
+        }
+        parent = dir.parent().map(Path::to_path_buf);
+    }
 }
 
 /// `undo_last_turn_for_path` for a registered project.
@@ -1068,7 +1186,7 @@ mod tests {
             .unwrap()
             .expect("snapshot for a committed git repo");
         assert!(!snapshot.head_sha.is_empty());
-        assert!(snapshot.stash_sha.is_some(), "dirty tree must be stashed");
+        assert!(snapshot.tree_sha.is_some(), "snapshot must record a worktree tree");
         assert!(snapshot.untracked.iter().any(|f| f == "notes.txt"));
 
         // The turn modifies the tracked file again and creates a new file.
@@ -1097,6 +1215,55 @@ mod tests {
 
         // Undo without a matching snapshot fails cleanly.
         assert!(undo_last_turn_for_path(&root, Some("missing")).await.is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn git_snapshot_is_byte_exact_and_leaves_the_worktree_alone() {
+        let root = std::env::temp_dir().join(format!("locagens-snap-eol-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("lf.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("crlf.txt"), "one\r\ntwo\r\n").unwrap();
+        run_git(&root, &["init", "-q"]);
+        // Windows' common default: convert on checkout/commit.
+        run_git(&root, &["config", "core.autocrlf", "true"]);
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        // Pre-turn: mixed endings, a staged change, an untracked file.
+        std::fs::write(root.join("lf.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("crlf.txt"), "one\r\nmixed\n").unwrap();
+        std::fs::write(root.join("src/staged.rs"), "fn a() {}\n").unwrap();
+        run_git(&root, &["add", "src/staged.rs"]);
+        std::fs::write(root.join("notes.txt"), "keep\r\n").unwrap();
+        let before = |name: &str| std::fs::read(root.join(name)).unwrap();
+        let (lf, crlf, staged, notes) = (before("lf.txt"), before("crlf.txt"), before("src/staged.rs"), before("notes.txt"));
+
+        create_git_snapshot_for_path(&root, "run-eol").await.unwrap().expect("snapshot");
+        // Taking the snapshot must not rewrite anything.
+        assert_eq!(before("lf.txt"), lf);
+        assert_eq!(before("crlf.txt"), crlf);
+
+        // The turn edits, deletes, creates (incl. a new directory).
+        std::fs::write(root.join("lf.txt"), "changed\r\n").unwrap();
+        std::fs::remove_file(root.join("crlf.txt")).unwrap();
+        std::fs::write(root.join("src/staged.rs"), "fn b() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("gen/deep")).unwrap();
+        std::fs::write(root.join("gen/deep/out.txt"), "x").unwrap();
+
+        undo_last_turn_for_path(&root, Some("run-eol")).await.unwrap();
+        assert_eq!(before("lf.txt"), lf);
+        assert_eq!(before("crlf.txt"), crlf);
+        assert_eq!(before("src/staged.rs"), staged);
+        assert_eq!(before("notes.txt"), notes);
+        assert!(!root.join("gen").exists(), "turn-created dirs are removed");
+        // The staged change is staged again.
+        let staged_names = std::process::Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&staged_names.stdout).contains("src/staged.rs"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

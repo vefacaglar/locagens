@@ -65,11 +65,27 @@ pub fn join_inside(base: &Path, relative: &str) -> Option<PathBuf> {
         return None;
     }
     let joined = base.join(relative);
-    let canonical = std::fs::canonicalize(&joined).ok()?;
+    // Both sides normalized: on Windows `canonicalize` adds a `\\?\` prefix,
+    // and comparing a prefixed path to an unprefixed base always failed.
+    let canonical = std::fs::canonicalize(&joined).map(normalize_canonical).ok()?;
     let base_canonical = std::fs::canonicalize(base).map(normalize_canonical).ok()?;
-    if canonical.starts_with(&base_canonical) {
-        Some(normalize_canonical(canonical))
-    } else {
-        None
+    canonical.starts_with(&base_canonical).then_some(canonical)
+}
+
+/// Like `join_inside`, but for a path that may not exist yet (a file about to
+/// be written): the deepest existing ancestor must resolve inside `base`.
+pub fn writable_inside(base: &Path, relative: &str) -> Option<PathBuf> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
+    {
+        return None;
     }
+    let base_canonical = std::fs::canonicalize(base).map(normalize_canonical).ok()?;
+    let joined = base_canonical.join(relative_path);
+    let existing = joined.ancestors().find(|ancestor| ancestor.exists())?;
+    let existing_canonical = std::fs::canonicalize(existing).map(normalize_canonical).ok()?;
+    existing_canonical.starts_with(&base_canonical).then_some(joined)
 }
