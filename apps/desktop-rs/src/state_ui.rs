@@ -374,20 +374,40 @@ impl UiStore {
         spawn(async move {
             loop {
                 let event = match rx.recv().await {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(event) if event.get("type").and_then(Value::as_str) != Some("lagged") => Some(event),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
                 // A newer stream for the same run took over: retire this one.
                 if !streams().is_current(&run_id, generation) {
                     return;
                 }
-                if !store.process_event(&run_id, event) {
+                let alive = match event {
+                    Some(event) => store.process_event(&run_id, event),
+                    // Events were dropped: rebuild from the store so a lost
+                    // prompt or terminal event is not missed (QA-046).
+                    None => store.resync(&run_id).await,
+                };
+                if !alive {
                     break;
                 }
             }
             streams().release(&run_id, generation);
         });
+    }
+
+    /// Reloads a run after its event stream lagged and replays the pending
+    /// prompts / terminal event; returns `false` when the run has ended.
+    async fn resync(&self, run_id: &str) -> bool {
+        let mut store = *self;
+        let snapshot = api::runs::resync_run(&core(), run_id).await;
+        if event_scope(store.active_run_id.peek().as_deref(), run_id) == EventScope::Foreground {
+            if let Some(run) = snapshot.run {
+                store.active_run.set(Some(run));
+            }
+            store.messages.set(snapshot.messages);
+        }
+        snapshot.events.into_iter().all(|event| store.process_event(run_id, event))
     }
 
     /// Processes one run event; returns `false` when the stream ended.

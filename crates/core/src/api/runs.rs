@@ -503,19 +503,6 @@ pub async fn cancel_run(state: &AppState, run_id: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Cancels a run, waits (up to ~3 s) for its drive loop to unwind, then
-/// deletes it so a late write cannot resurrect a headless rollout.
-pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<bool> {
-    cancel_run(state, run_id).await?;
-    for _ in 0..60 {
-        if state.orchestrator.handle(run_id).is_none() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    Ok(state.db.delete_run(run_id))
-}
-
 // ----------------------------------------------------------------------
 // DELETE /api/runs/:id
 // ----------------------------------------------------------------------
