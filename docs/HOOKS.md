@@ -11,6 +11,12 @@ call sites: `crates/core/src/orchestrator/hook_calls.rs`.
 and the `hooks` field of enabled plugin manifests. All matching hooks run in
 that order, in the project folder, with a timeout (default 10 s).
 
+Project hooks (`<project>/.locagens/hooks.json` and project plugins) run only
+when the folder is trusted (`lcgn trust`, the desktop trust banner, or
+`[projects."<path>"] trust_level = "trusted"` in `~/.locagens/config.toml`).
+Hook commands do not inherit the app's environment: they get the same
+stripped environment as `exec_command` sessions (no API keys or tokens).
+
 ```json
 {
   "hooks": {

@@ -217,6 +217,11 @@ fn project_roles_reach_the_spawn_spec() {
     let dir = project.join(".locagens").join("agents");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("reviewer.toml"), "description = \"Reviews diffs for bugs\"\nsandbox_mode = \"read-only\"").unwrap();
+    // Untrusted folder: its role files are ignored.
+    let mut tools = tool_defs(&agent_roles::builtin_roles());
+    apply_project_roles(&mut tools, &project);
+    assert!(!tools[0].to_string().contains("reviewer"));
+    crate::services::project_trust::trust_for_session(&project);
     let mut tools = tool_defs(&agent_roles::builtin_roles());
     apply_project_roles(&mut tools, &project);
     assert!(tools[0].to_string().contains("- reviewer (read-only): Reviews diffs for bugs"));
@@ -378,7 +383,9 @@ impl Harness {
             agent_role: None,
             agent_name: None,
             history: Vec::new(),
-            tools: Vec::new(),
+            // The main agent's real toolset for the mode: dispatch refuses
+            // tools that were never offered.
+            tools: crate::orchestrator::tools::filter_tool_defs(&crate::orchestrator::tool_names_for_mode(mode)),
             system: String::new(),
             depth_left: 1,
             turn_diff: Arc::new(TurnDiffTracker::new()),
@@ -647,11 +654,107 @@ async fn tool_search_dispatch_adds_specs_to_the_next_request_tools() {
         def("mcp__github__create_issue", "Create an issue"),
         def("mcp__slack__post_message", "Post a Slack message"),
     ];
-    assert!(parent.tools.is_empty());
+    parent.tools.clear();
     let out = parent.dispatch_tool("c1", "tool_search", &json!({ "query": "slack message" })).await.unwrap();
     assert!(out.contains("mcp__slack__post_message"));
     let names: Vec<&str> = parent.tools.iter().filter_map(|t| t.pointer("/function/name").and_then(Value::as_str)).collect();
     assert_eq!(names, vec!["mcp__slack__post_message"]);
+}
+
+#[tokio::test]
+async fn dispatch_refuses_tools_that_were_not_offered() {
+    let harness = harness(echo_handler).await;
+    // A read-only explorer offered only read tools cannot write in Build mode.
+    let mut explorer = harness.parent("accept_edits");
+    explorer.tools = crate::orchestrator::tools::readonly_tool_defs(false);
+    explorer.extras.readonly = true;
+    let err = explorer.dispatch_tool("c1", "write_file", &json!({ "path": "x.txt", "content": "pwned" })).await;
+    assert!(matches!(err, Err(AgentError::Failed(ref e)) if e.contains("not available")), "{err:?}");
+    assert!(!harness.project.join("x.txt").exists());
+    // Even if a mutation tool were offered, a read-only agent may not run it.
+    explorer.tools = crate::orchestrator::tools::filter_tool_defs(&["read_file", "write_file"]);
+    let refused = explorer.dispatch_tool("c2", "write_file", &json!({ "path": "x.txt", "content": "pwned" })).await.unwrap();
+    assert!(refused.contains("read-only agent"), "{refused}");
+    assert!(!harness.project.join("x.txt").exists());
+
+    // Chat mode does not offer update_plan / fetch_url, so they never dispatch.
+    let mut chat = harness.parent("chat");
+    for tool in ["update_plan", "fetch_url", "write_file", "exec_command"] {
+        let err = chat.dispatch_tool("c3", tool, &json!({})).await;
+        assert!(matches!(err, Err(AgentError::Failed(ref e)) if e.contains("not available")), "{tool}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn write_stdin_only_reaches_sessions_of_the_same_run() {
+    let harness = harness(echo_handler).await;
+    let mut parent = harness.parent("auto");
+    let err = parent.dispatch_tool("c1", "write_stdin", &json!({ "session_id": "proc-1-1", "chars": "x\n" })).await;
+    assert!(matches!(err, Err(AgentError::Failed(ref e)) if e.contains("unknown session")), "{err:?}");
+}
+
+#[tokio::test]
+async fn protected_paths_always_prompt_in_build_mode_and_grants_do_not_cover_them() {
+    let harness = harness(echo_handler).await;
+    let parent = harness.parent("accept_edits");
+    // A standing grant and "Allow for Run" for write_file exist…
+    harness.state.db.upsert_permission("global", "", "write_file", "", Vec::new(), "allow_always");
+    harness.handle.allow_tool_for_run("write_file");
+    // …ordinary files are written without a prompt…
+    parent.gated_execute("c0", "write_file", &json!({ "path": "ok.txt", "content": "fine" })).await.unwrap();
+    assert!(harness.project.join("ok.txt").exists());
+
+    // …but `.locagens/hooks.json` pauses for an explicit decision.
+    let mut events = harness.handle.events.subscribe();
+    let handle = harness.handle.clone();
+    let answer = tokio::spawn(async move {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "permission_requested" {
+                let sender = handle.permission.lock().await.sender.take().unwrap();
+                sender.send("Deny".to_string()).unwrap();
+                return event;
+            }
+        }
+    });
+    let hooks = json!({ "path": ".locagens/hooks.json", "content": "{\"SessionStart\":\"evil\"}" });
+    let result = parent.gated_execute("c1", "write_file", &hooks).await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap();
+    assert_eq!(event["preview"]["protectedPath"], ".locagens/hooks.json");
+    assert!(result.contains("denied"), "an unknown answer (\"Deny\") denies: {result}");
+    assert!(!harness.project.join(".locagens").join("hooks.json").exists());
+
+    // apply_patch into .git/hooks is gated the same way.
+    let patch = json!({ "input": "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+evil\n*** End Patch" });
+    assert_eq!(
+        crate::orchestrator::tools::protected_mutation_target(&harness.project, "apply_patch", &patch).as_deref(),
+        Some(".git/hooks/pre-commit")
+    );
+    // Full Access does not prompt (commands are unsandboxed there anyway).
+    let auto = harness.parent("auto");
+    auto.gated_execute("c2", "write_file", &hooks).await.unwrap();
+    assert!(harness.project.join(".locagens").join("hooks.json").exists());
+}
+
+#[tokio::test]
+async fn dangerous_commands_prompt_even_with_allow_run() {
+    let harness = harness(echo_handler).await;
+    let parent = harness.parent("accept_edits");
+    harness.handle.allow_tool_for_run("run_command");
+    let mut events = harness.handle.events.subscribe();
+    let handle = harness.handle.clone();
+    let answer = tokio::spawn(async move {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "permission_requested" {
+                handle.permission.lock().await.sender.take().unwrap().send("deny".to_string()).unwrap();
+                return event;
+            }
+        }
+    });
+    let result = parent.gated_execute("c1", "run_command", &json!({ "command": "git push --force origin main" })).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap();
+    assert!(result.contains("denied"), "{result}");
 }
 
 #[tokio::test]

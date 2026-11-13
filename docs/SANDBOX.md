@@ -197,8 +197,8 @@ tool is `network_access` and whose preview carries `url: "host:port"` and
 render it. Answers:
 
 - `allow_once`: allowed for the rest of this command;
-- `allow_run`: allowed for every command in this run (note: like any
-  `allow_run` answer it also stops prompting for other tools in the run);
+- `allow_run`: this host is allowed for every command in this run (it does
+  not cover other hosts or tools);
 - `allow_project` / `allow_always`: persisted as a `network_access` grant;
 - `deny`: refused.
 
@@ -231,6 +231,28 @@ All of these point at `http://127.0.0.1:<port>`: `HTTP_PROXY`, `HTTPS_PROXY`,
 `NO_PROXY` (and `no_proxy`, `npm_config_noproxy`, `NPM_CONFIG_NOPROXY`,
 `BUNDLE_NO_PROXY`) is `localhost,127.0.0.1,::1`. `NODE_USE_ENV_PROXY=1`,
 `ELECTRON_GET_USE_PROXY=true` and `LOCAGENS_NETWORK_PROXY_ACTIVE=1` are set.
+
+## Protected paths and command approval
+
+`execpolicy::protected_paths` is the one definition used by every sandbox
+backend (`.locagens`, `.git/hooks`, `.git/config`) and by the file tools
+(`.git`, `.locagens`, `.codex`, `.agents`, matched case-insensitively and
+ignoring `:stream` suffixes and trailing dots/spaces). Outside Full Access a
+file-tool mutation of a protected path always prompts, and no standing grant
+or Allow-for-Run covers it.
+
+Known-safe commands (no prompt in Build) are a short read-only list (`git
+status/diff/log/show/branch`, `rg`, `grep`, `find`, `ls`, `cat`, ...) and only
+while their arguments stay inside the workspace and avoid writing or
+executing options (`find -exec/-delete`, `rg --pre`, `git diff --output`,
+...). Build and test tools (`cargo check`, ...) prompt. On Windows commands
+are split with cmd.exe quoting, and any `%`, `!`, `^`, redirection or
+grouping makes the command non-safe. Dangerous markers (`sudo`, `rm -rf`,
+`git push --force`, `reg delete`, ...) are matched on tokens and always
+prompt outside Full Access. Approving a command never amends project
+`.rules`; standing grants go to `permissions.json` only. Commands on Windows
+run with `NoDefaultCurrentDirectoryInExePath=1`, so a repo-shipped `git.bat`
+is not picked up from the working directory.
 
 ## Deviations from Codex
 

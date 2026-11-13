@@ -24,14 +24,18 @@ const MAX_SEARCH_DEPTH: usize = 14;
 pub const MUTATION_TOOLS: [&str; 6] = ["write_file", "edit_file", "delete_file", "move_file", "create_directory", "apply_patch"];
 
 /// Whether a tool call needs interactive permission approval under `mode`.
+/// Only the exact `auto` mode skips prompts. `fetch_url` sends data out of
+/// the machine, so it prompts in every other mode, Plan and Chat included
+/// (commands are forbidden there outright, see
+/// [`is_forbidden_in_readonly_mode`]).
 pub fn needs_permission(mode: &str, tool: &str) -> bool {
     if mode == "auto" {
         return false;
     }
-    let dangerous = matches!(tool, "run_command" | "exec_command" | "write_stdin" | "fetch_url");
+    let command = matches!(tool, "run_command" | "exec_command" | "write_stdin");
     let mutation = MUTATION_TOOLS.contains(&tool);
-    let mcp = tool.starts_with("mcp__") && mode == "ask_permissions";
-    (dangerous && mode != "plan" && mode != "chat") || (mutation && mode == "ask_permissions") || mcp
+    let mcp = tool.starts_with("mcp__") && mode != "accept_edits";
+    tool == "fetch_url" || command || (mutation && mode != "accept_edits") || mcp
 }
 
 /// Whether a tool is flat-out forbidden in read-only (`plan` / `chat`) mode:
@@ -286,44 +290,46 @@ pub fn readonly_tool_defs(include_move: bool) -> Vec<Value> {
 // ----------------------------------------------------------------------
 
 /// Resolves `relative` against `project`, refusing any path that escapes the
-/// workspace (including via symlinks). Non-existent targets are validated by
-/// their deepest existing ancestor.
+/// workspace (including via symlinks, dangling ones too). Non-existent
+/// targets are validated by their deepest existing ancestor. One
+/// implementation shared with `apply_patch`.
 pub fn safe_path(project: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative = relative.trim();
-    if relative.is_empty() {
-        return Ok(project.to_path_buf());
-    }
-    if relative.contains('\0') {
-        return Err("Path contains a null byte.".to_string());
-    }
-    let candidate = project.join(relative);
+    locagens_apply_patch::resolve_safe_path(project, relative)
+}
 
-    // Walk up to the deepest existing ancestor, collecting the missing tail.
-    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut probe: PathBuf = candidate.clone();
-    while !probe.exists() {
-        match probe.file_name() {
-            Some(file) => missing_tail.push(file.to_os_string()),
-            None => return Err("Path could not be resolved.".to_string()),
+/// The first workspace path a mutation tool call would write that is
+/// protected (`.git`, `.locagens`, `.codex`, `.agents`; see
+/// `locagens_execpolicy::protected_paths`), as the relative path the model
+/// gave. Such writes always need an explicit approval outside Full Access.
+pub fn protected_mutation_target(project: &Path, name: &str, args: &Value) -> Option<String> {
+    if !MUTATION_TOOLS.contains(&name) {
+        return None;
+    }
+    let targets: Vec<String> = if name == "apply_patch" {
+        let patch = str_arg(args, "input").or_else(|| str_arg(args, "patch")).unwrap_or("");
+        match crate::orchestrator::apply_patch::parse_patch(patch) {
+            Ok(parsed) => parsed
+                .hunks
+                .iter()
+                .flat_map(|hunk| {
+                    let mut paths = vec![hunk.path().to_string_lossy().to_string()];
+                    if let crate::orchestrator::apply_patch::Hunk::UpdateFile { move_path: Some(to), .. } = hunk {
+                        paths.push(to.to_string_lossy().to_string());
+                    }
+                    paths
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         }
-        if !probe.pop() {
-            return Err("Path could not be resolved.".to_string());
-        }
-    }
-    let deepest = std::fs::canonicalize(&probe)
-        .map(crate::util::normalize_canonical)
-        .map_err(|_| "Path could not be resolved.".to_string())?;
-    let project_canonical = std::fs::canonicalize(project)
-        .map(crate::util::normalize_canonical)
-        .map_err(|_| "Project folder is not accessible.".to_string())?;
-    if !deepest.starts_with(&project_canonical) {
-        return Err("Path is outside the workspace.".to_string());
-    }
-    let mut resolved = deepest;
-    for part in missing_tail.iter().rev() {
-        resolved.push(part);
-    }
-    Ok(resolved)
+    } else {
+        ["path", "from", "to"].iter().filter_map(|key| str_arg(args, key)).map(str::to_string).collect()
+    };
+    let root = std::fs::canonicalize(project).map(crate::util::normalize_canonical).ok()?;
+    targets.into_iter().find(|relative| match safe_path(project, relative) {
+        Ok(resolved) => locagens_execpolicy::protected_paths::is_protected_in_workspace(&root, &resolved),
+        // Unresolvable paths fail in the tool itself.
+        Err(_) => false,
+    })
 }
 
 fn truncate_output(mut text: String) -> String {
@@ -800,56 +806,90 @@ pub async fn run_command_with_network(
     Ok(truncate_output(result))
 }
 
-/// Resolves a host and rejects private/loopback/link-local targets (SSRF-safe).
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || v4.octets()[0] == 169 && v4.octets()[1] == 254
-                || v4.octets()[0] == 100 && (v4.octets()[1] & 0b1100_0000) == 64
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00 || v6.is_unique_local()
-        }
+/// Redirects `fetch_url` follows, each re-validated like the first URL.
+const FETCH_MAX_REDIRECTS: usize = 5;
+/// Bytes of response body `fetch_url` reads before it stops.
+const FETCH_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Validates one `fetch_url` target and resolves it to public addresses:
+/// http(s) only, and every address the host resolves to must be public
+/// (`network_proxy::is_non_public_ip`, which also knows IPv4-mapped IPv6,
+/// link-local and reserved ranges).
+async fn resolve_public_target(url: &url::Url) -> Result<(String, Vec<std::net::SocketAddr>), String> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("fetch_url: only http(s) URLs are allowed.".to_string());
     }
+    let host = url
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "fetch_url: URL has no host.".to_string())?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|err| format!("fetch_url: cannot resolve {host}: {err}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("fetch_url: cannot resolve {host}."));
+    }
+    if addrs.iter().any(|addr| locagens_execpolicy::network_proxy::is_non_public_ip(&addr.ip())) {
+        return Err("fetch_url: requests to private/internal addresses are blocked.".to_string());
+    }
+    Ok((host, addrs))
+}
+
+/// One request pinned to the addresses that were just validated, so a
+/// second DNS answer (rebinding) can never redirect the connection. No
+/// proxy (it would resolve the host itself) and no automatic redirects.
+async fn fetch_pinned(url: &url::Url) -> Result<reqwest::Response, String> {
+    let (host, addrs) = resolve_public_target(url).await?;
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Locagens/1.0")
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if url.host().is_some_and(|h| matches!(h, url::Host::Domain(_))) {
+        builder = builder.resolve_to_addrs(&host, &addrs);
+    }
+    let http = builder.build().map_err(|err| format!("fetch_url: {err}"))?;
+    http.get(url.clone()).send().await.map_err(|err| format!("fetch_url: {err}"))
+}
+
+/// Reads at most `limit` bytes of the body; `true` when it was cut.
+async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> (Vec<u8>, bool) {
+    let mut body: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let room = limit.saturating_sub(body.len());
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return (body, true);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    (body, false)
 }
 
 async fn fetch_url(args: &Value) -> Result<String, String> {
     let url = str_arg(args, "url").unwrap_or_default();
-    let parsed = url::Url::parse(url.trim()).map_err(|err| format!("fetch_url: invalid URL: {err}"))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("fetch_url: only http(s) URLs are allowed.".to_string());
-    }
-    let host = parsed
-        .host_str()
-        .filter(|host| !host.is_empty())
-        .ok_or_else(|| "fetch_url: URL has no host.".to_string())?;
-    let port = parsed.port_or_known_default().unwrap_or(80);
-
-    // SSRF protection: resolve the host and refuse private addresses.
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|err| format!("fetch_url: cannot resolve {host}: {err}"))?;
-    for addr in resolved {
-        if is_private_ip(&addr.ip()) {
-            return Err("fetch_url: requests to private/internal addresses are blocked.".to_string());
+    let mut current = url::Url::parse(url.trim()).map_err(|err| format!("fetch_url: invalid URL: {err}"))?;
+    // Follow redirects by hand: every hop is resolved, checked and pinned.
+    let mut redirects = 0usize;
+    let response = loop {
+        let response = fetch_pinned(&current).await?;
+        if !response.status().is_redirection() {
+            break response;
         }
-    }
-
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Locagens/1.0")
-        .build()
-        .map_err(|err| format!("fetch_url: {err}"))?;
-    let response = http
-        .get(parsed)
-        .send()
-        .await
-        .map_err(|err| format!("fetch_url: {err}"))?;
+        let Some(location) = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else {
+            break response;
+        };
+        if redirects >= FETCH_MAX_REDIRECTS {
+            return Err(format!("fetch_url: more than {FETCH_MAX_REDIRECTS} redirects."));
+        }
+        current = current.join(location).map_err(|err| format!("fetch_url: invalid redirect: {err}"))?;
+        redirects += 1;
+    };
     let status = response.status();
     let content_type = response
         .headers()
@@ -857,7 +897,11 @@ async fn fetch_url(args: &Value) -> Result<String, String> {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = response.text().await.unwrap_or_default();
+    let (bytes, cut) = read_capped_body(response, FETCH_MAX_BODY_BYTES).await;
+    let mut body = String::from_utf8_lossy(&bytes).to_string();
+    if cut {
+        body.push_str("\n... (response body truncated)");
+    }
     let mut out = format!("HTTP {status}\ncontent-type: {content_type}\n\n");
     if content_type.starts_with("text/html") {
         // Rough HTML→text strip so the model sees content, not markup soup.
@@ -1075,6 +1119,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    /// Creates `link -> target`; `false` when the OS refuses (Windows
+    /// without the symlink privilege).
+    fn make_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_file(target, link).is_ok();
+    }
+
+    #[tokio::test]
+    async fn writes_never_follow_a_dangling_symlink_out_of_the_workspace() {
+        let ws = temp_ws("dangling");
+        let outside = temp_ws("dangling-target");
+        let target = outside.join("autostart.desktop");
+        if !make_symlink(&target, &ws.join("notes.md")) {
+            eprintln!("skipping: cannot create symlinks here");
+            return;
+        }
+        let err = safe_path(&ws, "notes.md").unwrap_err();
+        assert!(err.contains("dangling"), "{err}");
+        assert!(execute(&ws, "write_file", &json!({ "path": "notes.md", "content": "x" })).await.is_err());
+        assert!(!target.exists(), "the write must not create the link target");
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// Windows: a junction (no privilege needed) to a missing directory
+    /// outside the workspace must not let a write create files there.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn writes_never_follow_a_dangling_junction_out_of_the_workspace() {
+        let ws = temp_ws("junction");
+        let outside = temp_ws("junction-target").join("missing");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(ws.join("notes"))
+            .arg(&outside)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !created {
+            eprintln!("skipping: cannot create junctions here");
+            return;
+        }
+        assert!(safe_path(&ws, "notes/x.txt").is_err());
+        assert!(execute(&ws, "write_file", &json!({ "path": "notes/x.txt", "content": "x" })).await.is_err());
+        assert!(!outside.join("x.txt").exists());
+        let _ = std::fs::remove_dir(ws.join("notes"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn protected_mutation_targets_cover_every_mutation_tool() {
+        let ws = temp_ws("protected");
+        std::fs::create_dir_all(ws.join(".git").join("hooks")).unwrap();
+        let cases = [
+            ("write_file", json!({ "path": ".locagens/hooks.json", "content": "{}" }), Some(".locagens/hooks.json")),
+            ("edit_file", json!({ "path": ".git/config", "old_text": "a", "new_text": "b" }), Some(".git/config")),
+            ("create_directory", json!({ "path": ".locagens/rules" }), Some(".locagens/rules")),
+            ("delete_file", json!({ "path": ".git/hooks/pre-commit" }), Some(".git/hooks/pre-commit")),
+            ("move_file", json!({ "from": "evil.sh", "to": ".git/hooks/pre-commit" }), Some(".git/hooks/pre-commit")),
+            ("write_file", json!({ "path": ".GIT/hooks/post-checkout", "content": "x" }), Some(".GIT/hooks/post-checkout")),
+            ("write_file", json!({ "path": "src/main.rs", "content": "x" }), None),
+            ("read_file", json!({ "path": ".git/config" }), None),
+            (
+                "apply_patch",
+                json!({ "input": "*** Begin Patch\n*** Update File: a.txt\n*** Move to: .locagens/agents/explorer.toml\n@@\n-a\n+b\n*** End Patch" }),
+                Some(".locagens/agents/explorer.toml"),
+            ),
+        ];
+        for (tool, args, expected) in cases {
+            assert_eq!(protected_mutation_target(&ws, tool, &args).as_deref(), expected, "{tool} {args}");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn fetch_url_refuses_internal_targets_in_every_spelling() {
+        for url in [
+            "http://127.0.0.1/",
+            "http://localhost:8080/admin",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fe80::1]/",
+            "http://10.0.0.5/",
+            "http://240.0.0.1/",
+            "file:///etc/passwd",
+        ] {
+            let err = fetch_url(&json!({ "url": url })).await.unwrap_err();
+            assert!(err.contains("blocked") || err.contains("only http"), "{url}: {err}");
+        }
+        use locagens_execpolicy::network_proxy::is_non_public_ip;
+        for ip in ["64:ff9b::7f00:1", "ff02::1", "::10.0.0.1", "224.0.0.1", "198.18.0.1", "192.0.0.8"] {
+            assert!(is_non_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "2606:4700:4700::1111", "1.1.1.1"] {
+            assert!(!is_non_public_ip(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
     #[tokio::test]
     async fn file_tool_roundtrip() {
         let ws = temp_ws("roundtrip");
@@ -1139,10 +1285,18 @@ mod tests {
         assert!(needs_permission("ask_permissions", "mcp__github__list_issues"));
         assert!(!needs_permission("auto", "mcp__github__list_issues"));
         assert!(!needs_permission("accept_edits", "mcp__github__list_issues"));
-        // Plan/chat never mutate.
-        assert!(!needs_permission("plan", "run_command"));
-        assert!(!needs_permission("plan", "exec_command"));
-        assert!(!needs_permission("chat", "exec_command"));
+        // fetch_url prompts in Plan and Chat too (QA-005); commands there
+        // are forbidden before gating (is_forbidden_in_readonly_mode).
+        assert!(needs_permission("plan", "fetch_url"));
+        assert!(needs_permission("chat", "fetch_url"));
+        assert!(needs_permission("accept_edits", "fetch_url"));
+        assert!(!needs_permission("auto", "fetch_url"));
+        assert!(!needs_permission("plan", "read_file"));
+        // Unknown / misspelled modes prompt for everything (QA-011).
+        for tool in ["write_file", "run_command", "fetch_url", "mcp__x__y", "apply_patch"] {
+            assert!(needs_permission("Auto", tool), "{tool}");
+            assert!(needs_permission("build", tool), "{tool}");
+        }
     }
 
     #[test]

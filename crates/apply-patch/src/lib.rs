@@ -558,6 +558,11 @@ fn resolve(project: &Path, path: &Path) -> Result<PathBuf, String> {
 /// escapes it (traversal, absolute paths, symlinks pointing outside).
 /// Non-existent paths resolve through their deepest existing ancestor, so
 /// files that do not exist yet still resolve inside the workspace.
+///
+/// "Existing" means a directory entry of any kind, symlinks included
+/// (`symlink_metadata`): a dangling symlink is never mistaken for a missing
+/// name, because writing through it would create its target, which may lie
+/// outside the workspace. Such a link fails to canonicalize and is rejected.
 pub fn resolve_safe_path(project_root: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim();
     if rel.is_empty() {
@@ -571,7 +576,7 @@ pub fn resolve_safe_path(project_root: &Path, rel: &str) -> Result<PathBuf, Stri
     // Walk up to the deepest existing ancestor, collecting the missing tail.
     let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
     let mut probe: PathBuf = candidate.clone();
-    while !probe.exists() {
+    while std::fs::symlink_metadata(&probe).is_err() {
         match probe.file_name() {
             Some(file) => missing_tail.push(file.to_os_string()),
             None => return Err("Path could not be resolved.".to_string()),
@@ -580,9 +585,13 @@ pub fn resolve_safe_path(project_root: &Path, rel: &str) -> Result<PathBuf, Stri
             return Err("Path could not be resolved.".to_string());
         }
     }
-    let deepest = std::fs::canonicalize(&probe)
-        .map(normalize_canonical)
-        .map_err(|_| "Path could not be resolved.".to_string())?;
+    let deepest = std::fs::canonicalize(&probe).map(normalize_canonical).map_err(|_| {
+        if std::fs::symlink_metadata(&probe).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            "Path is a dangling symbolic link.".to_string()
+        } else {
+            "Path could not be resolved.".to_string()
+        }
+    })?;
     let project_canonical = std::fs::canonicalize(project_root)
         .map(normalize_canonical)
         .map_err(|_| "Project folder is not accessible.".to_string())?;

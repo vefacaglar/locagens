@@ -345,11 +345,24 @@ pub fn parse_qualified_mcp_tool(tool_name: &str) -> Option<(String, String)> {
 // Effective configs (explicit files + enabled plugin manifests)
 // ----------------------------------------------------------------------
 
-/// Builds a config from a plugin-manifest `mcpServers` entry.
+/// Shown when a project-scope server of an untrusted folder is not started.
+pub const UNTRUSTED_PROJECT_MESSAGE: &str =
+    "Project MCP servers are ignored until you trust this project folder.";
+
+/// Whether `config` comes from the project's `.locagens/mcp.json` of a folder
+/// the user has not trusted (such servers are never started).
+fn untrusted_project_server(config: &McpServerConfig) -> bool {
+    config.scope == "project" && !crate::services::project_trust::is_trusted_str(config.project_path.as_deref())
+}
+
+/// Builds a config from a plugin-manifest `mcpServers` entry. `user_plugin`
+/// is false for project plugins, which may not read environment variables
+/// into request headers.
 fn config_from_plugin_entry(
     name: &str,
     entry: &Value,
     project_path: Option<&str>,
+    user_plugin: bool,
 ) -> Option<McpServerConfig> {
     let obj = entry.as_object()?;
     let transport = obj
@@ -396,9 +409,13 @@ fn config_from_plugin_entry(
         url,
         enabled,
         project_path: project_path.map(|p| p.to_string()),
-        bearer_token_env_var: obj.get("bearer_token_env_var").and_then(Value::as_str).map(str::to_string),
+        bearer_token_env_var: obj
+            .get("bearer_token_env_var")
+            .and_then(Value::as_str)
+            .filter(|_| user_plugin)
+            .map(str::to_string),
         http_headers: string_map("http_headers"),
-        env_http_headers: string_map("env_http_headers"),
+        env_http_headers: string_map("env_http_headers").filter(|_| user_plugin),
         oauth_client_id: None,
         scopes: None,
     })
@@ -406,17 +423,22 @@ fn config_from_plugin_entry(
 
 /// Explicit MCP configs (user + project files) merged with the `mcpServers`
 /// entries of every enabled plugin manifest. Explicit config entries win;
-/// plugin entries are only appended when the name is not taken.
+/// plugin entries are only appended when the name is not taken. Servers of
+/// an untrusted project folder are listed as disabled and never started.
 pub fn effective_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
     let mut configs = list_configs(project_path);
+    for config in configs.iter_mut().filter(|config| untrusted_project_server(config)) {
+        config.enabled = false;
+    }
     for manifest in crate::services::plugins::enabled_manifests(project_path) {
         let servers = manifest.get("mcpServers").and_then(Value::as_object);
         let Some(servers) = servers else { continue };
+        let user_plugin = manifest.get("scope").and_then(Value::as_str) == Some("user");
         for (name, entry) in servers {
             if configs.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
                 continue;
             }
-            if let Some(config) = config_from_plugin_entry(name, entry, project_path) {
+            if let Some(config) = config_from_plugin_entry(name, entry, project_path, user_plugin) {
                 configs.push(config);
             }
         }
@@ -679,6 +701,11 @@ pub fn invalidate_server(name: &str) {
 // ----------------------------------------------------------------------
 
 async fn rpc_call(config: &McpServerConfig, method: &str, params: &Value) -> Result<Value, String> {
+    // The single choke point for every spawn / request: an untrusted
+    // project's server never runs, whoever asks.
+    if untrusted_project_server(config) {
+        return Err(UNTRUSTED_PROJECT_MESSAGE.to_string());
+    }
     match config.transport.as_str() {
         "http" | "sse" | "streamable-http" => http::rpc_http(config, method, params).await,
         _ => rpc_stdio(config, method, params).await,
@@ -735,6 +762,10 @@ async fn rpc_stdio(config: &McpServerConfig, method: &str, params: &Value) -> Re
     if let Some(args) = &config.args {
         cmd.args(args);
     }
+    // Codex-style MCP environment: a small secret-free base plus exactly the
+    // variables the config names (`env`, and `env_vars` from config.toml,
+    // which are resolved into `env`). The parent's API keys never leak.
+    cmd.env_clear().envs(crate::orchestrator::tools::exec_session_env());
     if let Some(env) = &config.env {
         cmd.envs(env.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
@@ -809,6 +840,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// Probes one server: spawns/requests `tools/list` and caches the result.
 /// Disabled servers report `disabled` without being spawned.
 pub async fn probe_server(config: &McpServerConfig) -> McpServerInfo {
+    if untrusted_project_server(config) {
+        return info_for(config, "disabled".to_string(), Some(UNTRUSTED_PROJECT_MESSAGE.to_string()), Vec::new());
+    }
     if !config.enabled {
         return info_for(config, "disabled".to_string(), None, Vec::new());
     }
@@ -1053,6 +1087,12 @@ done"#;
         )
         .unwrap();
         let project_str = project.display().to_string();
+
+        // Untrusted folder: the project server is listed disabled and never spawned.
+        assert!(probe_server(&config).await.error.as_deref() == Some(UNTRUSTED_PROJECT_MESSAGE));
+        assert!(effective_configs(Some(&project_str)).iter().all(|c| c.scope != "project" || !c.enabled));
+        assert!(call_mcp_tool(Some(&project_str), "mock", "echo", &json!({})).await.is_err());
+        crate::services::project_trust::trust_for_session(&project);
 
         // probe_server → connected with discovered tools.
         let info = probe_server(&config).await;

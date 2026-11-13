@@ -97,6 +97,14 @@ pub struct HistoryConfig {
     pub persistence: Option<String>,
 }
 
+/// `[projects."<path>"]` (Codex): per-folder settings. Only `trust_level`
+/// (`"trusted"` / `"untrusted"`) is used.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    pub trust_level: Option<String>,
+}
+
 /// `[profiles.<name>]`: per-profile overrides of the model / policy keys.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -146,6 +154,72 @@ pub struct Config {
     pub notify: Vec<String>,
     pub hide_agent_reasoning: Option<bool>,
     pub history: Option<HistoryConfig>,
+    /// Per-folder trust decisions, keyed by the canonical folder path.
+    pub projects: BTreeMap<String, ProjectConfig>,
+}
+
+/// `trust_level` entries of `[projects."<path>"]` across `files`, primary
+/// (earliest) file winning per path. Files that are missing or do not parse
+/// are skipped, so one broken file never marks a folder trusted.
+pub fn project_trust_levels(files: &[PathBuf]) -> BTreeMap<String, String> {
+    let mut levels: BTreeMap<String, String> = BTreeMap::new();
+    for path in files.iter().rev() {
+        let Ok(raw) = std::fs::read_to_string(path) else { continue };
+        let Ok(table) = toml::from_str::<toml::Table>(&raw) else { continue };
+        let Some(projects) = table.get("projects").and_then(toml::Value::as_table) else { continue };
+        for (key, entry) in projects {
+            if let Some(level) = entry.get("trust_level").and_then(toml::Value::as_str) {
+                levels.insert(key.clone(), level.trim().to_string());
+            }
+        }
+    }
+    levels
+}
+
+/// Sets (`Some`) or removes (`None`) `[projects."<key>"] trust_level` in one
+/// `config.toml`, keeping the rest of the file (comments, order) intact.
+/// The file and its directory are created when missing.
+pub fn write_project_trust_level(file: &Path, key: &str, level: Option<&str>) -> Result<(), ConfigError> {
+    let fail = |message: String| ConfigError { message: format!("{}: {message}", file.display()) };
+    let raw = match std::fs::read_to_string(file) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(fail(err.to_string())),
+    };
+    let mut doc: toml_edit::Document = raw.parse().map_err(|err: toml_edit::TomlError| fail(err.to_string()))?;
+    match level {
+        Some(level) => {
+            if !doc.contains_key("projects") {
+                let mut projects = toml_edit::Table::new();
+                projects.set_implicit(true);
+                doc.insert("projects", toml_edit::Item::Table(projects));
+            }
+            let projects = doc["projects"]
+                .as_table_mut()
+                .ok_or_else(|| fail("`projects` is not a table".to_string()))?;
+            if !projects.contains_key(key) {
+                projects.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let entry = projects[key]
+                .as_table_like_mut()
+                .ok_or_else(|| fail(format!("`projects.{key}` is not a table")))?;
+            entry.insert("trust_level", toml_edit::value(level));
+        }
+        None => {
+            if let Some(entry) = doc
+                .get_mut("projects")
+                .and_then(|projects| projects.as_table_like_mut())
+                .and_then(|projects| projects.get_mut(key))
+                .and_then(|entry| entry.as_table_like_mut())
+            {
+                entry.remove("trust_level");
+            }
+        }
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| fail(err.to_string()))?;
+    }
+    std::fs::write(file, doc.to_string()).map_err(|err| fail(err.to_string()))
 }
 
 /// Loads the merged `[mcp_servers.<name>]` tables from the agent-dir chain
@@ -607,6 +681,42 @@ a = 1
         assert!(shown.contains("WEB_TOKEN"), "env var names stay visible:\n{shown}");
         assert!(shown.contains("P_KEY"));
         assert!(shown.contains("***"));
+    }
+
+    #[test]
+    fn project_trust_levels_roundtrip_and_keep_the_rest_of_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = write(
+            &tmp.path().join("a"),
+            "config.toml",
+            "# my settings\nmodel = \"m\"\n\n[projects.'C:\\work\\x']\ntrust_level = \"untrusted\"\n",
+        );
+        let fallback = write(
+            &tmp.path().join("b"),
+            "config.toml",
+            "[projects.\"C:\\\\work\\\\x\"]\ntrust_level = \"trusted\"\n[projects.\"/srv/y\"]\ntrust_level = \"trusted\"\n",
+        );
+        let broken = write(&tmp.path().join("c"), "config.toml", "[projects.\"/evil\"]\ntrust_level = = \"trusted\"\n");
+        let levels = project_trust_levels(&[primary.clone(), fallback, broken]);
+        assert_eq!(levels.get("C:\\work\\x").map(String::as_str), Some("untrusted"), "primary wins");
+        assert_eq!(levels.get("/srv/y").map(String::as_str), Some("trusted"));
+        assert!(!levels.contains_key("/evil"), "unparsable files are ignored");
+
+        write_project_trust_level(&primary, "C:\\work\\x", Some("trusted")).unwrap();
+        write_project_trust_level(&primary, "/new/project", Some("trusted")).unwrap();
+        let text = std::fs::read_to_string(&primary).unwrap();
+        assert!(text.starts_with("# my settings\nmodel = \"m\""), "{text}");
+        let config = Config::from_toml_str(&text).unwrap();
+        assert_eq!(config.projects["C:\\work\\x"].trust_level.as_deref(), Some("trusted"));
+        assert_eq!(config.projects["/new/project"].trust_level.as_deref(), Some("trusted"));
+
+        write_project_trust_level(&primary, "/new/project", None).unwrap();
+        let levels = project_trust_levels(&[primary.clone()]);
+        assert!(!levels.contains_key("/new/project"));
+
+        let created = tmp.path().join("fresh").join("config.toml");
+        write_project_trust_level(&created, "/p", Some("trusted")).unwrap();
+        assert_eq!(project_trust_levels(&[created]).get("/p").map(String::as_str), Some("trusted"));
     }
 
     #[test]

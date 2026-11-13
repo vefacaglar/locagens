@@ -12,6 +12,7 @@ pub mod render;
 pub mod repl;
 pub mod review;
 pub mod runner;
+pub mod trust;
 pub mod tui;
 
 use args::{Cli, Command};
@@ -101,6 +102,9 @@ async fn run(mut cli: Cli) -> i32 {
         return match command {
             Command::Auth { action } => auth::auth_command(&state, action).await,
             Command::Mcp { action } => {
+                if let (true, Ok(dir)) = (cli.trust, cli.project_dir()) {
+                    crate::services::project_trust::trust_for_session(&dir);
+                }
                 let project = cli.project_dir().ok().map(|p| p.to_string_lossy().to_string());
                 mcp::mcp_command(&state, action, project.as_deref()).await
             }
@@ -116,6 +120,7 @@ async fn run(mut cli: Cli) -> i32 {
                 auth::sessions_command(&state, &project, json)
             }
             Command::Review(args) => return review_main(&state, &cli, &args).await,
+            Command::Trust { path, revoke, status } => trust::trust_command(&cli, path.as_deref(), revoke, status),
         };
     }
 
@@ -165,6 +170,9 @@ async fn run(mut cli: Cli) -> i32 {
     // Interactive TUI (or the plain REPL with --no-tui) when there is a TTY
     // and no -p / --mode json.
     let interactive = !cli.print && !json_mode && args::stdin_is_tty();
+    // Project hooks / MCP / plugins / rules / roles load only for a trusted
+    // folder: ask once on a terminal, otherwise print a one-line notice.
+    trust::ensure_project_trust(&project, cli.trust, interactive);
     if interactive {
         let initial_session = match resolve_initial_session(&cli, &state, &project).await {
             Ok(session) => session,
@@ -261,6 +269,7 @@ async fn review_main(state: &Arc<crate::state::AppState>, cli: &Cli, args: &args
             return 2;
         }
     };
+    trust::ensure_project_trust(&project, cli.trust, false);
     let provider_flag = args.provider.as_deref().or(cli.provider.as_deref());
     // The global `cli.model` may have been filled from config.toml for the
     // configured provider: do not pair it with a different review provider.

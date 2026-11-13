@@ -614,16 +614,33 @@ pub fn is_non_public_ip(ip: &IpAddr) -> bool {
                 || v4.is_unspecified()
                 || a == 0
                 || (a == 100 && (b & 0b1100_0000) == 64)
+                // Multicast 224/4 and reserved 240/4.
+                || a >= 224
+                // IETF protocol assignments and benchmarking ranges.
+                || (a == 192 && b == 0 && v4.octets()[2] == 0)
+                || (a == 198 && (b & 0xfe) == 18)
         }
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_non_public_ip(&IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
+            let segments = v6.segments();
+            // NAT64 (64:ff9b::/96) embeds an IPv4 target.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [hi, lo] = [segments[6], segments[7]];
+                let v4 = std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+                return is_non_public_ip(&IpAddr::V4(v4));
+            }
+            let first = segments[0];
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (first & 0xfe00) == 0xfc00
                 || (first & 0xffc0) == 0xfe80
+                // Site-local (deprecated) and multicast.
+                || (first & 0xffc0) == 0xfec0
+                || (first & 0xff00) == 0xff00
+                // IPv4-compatible (`::a.b.c.d`, deprecated).
+                || segments[..6] == [0, 0, 0, 0, 0, 0]
         }
     }
 }

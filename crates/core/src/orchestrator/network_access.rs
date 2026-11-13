@@ -140,7 +140,6 @@ impl NetworkApproval {
             return false;
         };
         match decision.as_str() {
-            "deny" => return false,
             "allow_run" => {
                 self.handle
                     .approved_hosts
@@ -159,7 +158,9 @@ impl NetworkApproval {
                     &decision,
                 );
             }
-            _ => {}
+            "allow_once" => {}
+            // `deny` and unknown answers deny (QA-006).
+            _ => return false,
         }
         true
     }

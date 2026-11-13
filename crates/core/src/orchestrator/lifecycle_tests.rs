@@ -203,7 +203,7 @@ async fn network_and_tool_prompts_share_one_queue() {
     assert!(runs_api::apply_permission_decision(&h.state, &handle, "allow_always").await);
     assert_eq!(tool_prompt.await.unwrap().as_deref(), Some("allow_always"));
     assert!(h.state.db.list_permissions().is_empty(), "tool grants are persisted by gated_execute only");
-    assert!(!handle.allow_run.load(Ordering::SeqCst));
+    assert!(!handle.tool_allowed_for_run("exec_command") && !handle.tool_allowed_for_run(NETWORK_ACCESS_TOOL));
 
     wait_for_pending(&handle, NETWORK_ACCESS_TOOL).await;
     assert!(runs_api::apply_permission_decision(&h.state, &handle, "allow_run").await);
@@ -211,7 +211,7 @@ async fn network_and_tool_prompts_share_one_queue() {
     assert!(handle.pending_permission().await.is_none());
     assert_eq!(h.state.db.get_run_full("run-test").unwrap().status, "generating");
     // "Allow for Run" approves the host only, never every later tool call.
-    assert!(!handle.allow_run.load(Ordering::SeqCst));
+    assert!(!handle.tool_allowed_for_run("exec_command") && !handle.tool_allowed_for_run(NETWORK_ACCESS_TOOL));
     assert!(network_access::command_allowlist(&h.state, &handle, &h.project, &json!({})).allows(&host));
     let next_drive = RunHandle::new("run-test");
     assert!(!network_access::command_allowlist(&h.state, &next_drive, &h.project, &json!({})).allows(&host));

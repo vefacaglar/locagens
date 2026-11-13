@@ -4,7 +4,8 @@
 //! `nickname_candidates`, plus config overrides) merged over two built-ins,
 //! `explorer` and `worker`. Locagens loads the same shape from
 //!
-//! 1. `<project>/.locagens/agents/*.toml` (highest precedence),
+//! 1. `<project>/.locagens/agents/*.toml` (highest precedence; only for a
+//!    trusted project folder, see `services::project_trust`),
 //! 2. `<agent dir>/agents/*.toml` for every dir in the agent-dir chain
 //!    (`~/.locagens`, `~/.codex`, `~/.pi/agent`, in that order),
 //! 3. the built-ins.
@@ -105,7 +106,10 @@ fn role_dirs(project: &Path) -> Vec<PathBuf> {
         .rev()
         .map(|dir| dir.join("agents"))
         .collect();
-    dirs.push(project.join(".locagens").join("agents"));
+    // Project roles can redefine `explorer` as writable: trusted folders only.
+    if crate::services::project_trust::is_trusted(project) {
+        dirs.push(project.join(".locagens").join("agents"));
+    }
     dirs
 }
 

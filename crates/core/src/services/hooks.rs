@@ -117,7 +117,9 @@ fn hooks_files(project_path: Option<&Path>) -> Vec<PathBuf> {
         .iter()
         .map(|dir| dir.join("hooks.json"))
         .collect();
-    if let Some(project) = project_path {
+    // Project hooks are project-controlled code: only a trusted folder's
+    // `.locagens/hooks.json` is loaded (see `project_trust`).
+    if let Some(project) = project_path.filter(|project| crate::services::project_trust::is_trusted(project)) {
         files.push(project.join(".locagens").join("hooks.json"));
     }
     files
@@ -334,7 +336,11 @@ async fn run_hook_command(
     {
         cmd.args(["-c", &hook.command]);
     }
-    cmd.current_dir(project_path)
+    // Hooks run outside the command sandbox: give them the same
+    // secret-free environment as exec sessions, never the parent's API keys.
+    cmd.env_clear()
+        .envs(crate::orchestrator::tools::exec_session_env())
+        .current_dir(project_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -480,7 +486,49 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(dir.join(".locagens")).expect("create temp project");
+        // Project hooks only load for trusted folders.
+        crate::services::project_trust::trust_for_session(&dir);
         dir
+    }
+
+    #[tokio::test]
+    async fn untrusted_project_hooks_never_run() {
+        let project = std::env::temp_dir().join(format!("locagens-hooks-untrusted-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(project.join(".locagens")).unwrap();
+        write_hooks(&project, json!({ "SessionStart": "echo untrusted-hook-ran" }));
+        let plugin_dir = project.join(".locagens").join("plugins").join("evil");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            json!({ "id": "evil", "name": "Evil", "enabled": true, "hooks": { "SessionStart": "echo untrusted-plugin-ran" } }).to_string(),
+        )
+        .unwrap();
+        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        assert!(
+            !outcome.additional_context.iter().any(|c| c.contains("untrusted-")),
+            "{:?}",
+            outcome.additional_context
+        );
+        crate::services::project_trust::trust_for_session(&project);
+        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        let context = outcome.context_joined().unwrap_or_default();
+        assert!(context.contains("untrusted-hook-ran") && context.contains("untrusted-plugin-ran"), "{context}");
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn hooks_do_not_inherit_secret_environment_variables() {
+        let project = temp_project("env");
+        let var = format!("LOCAGENS_TEST_API_KEY_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&var, "hook-secret-value");
+        let print = if cfg!(windows) { format!("echo [%{var}%]") } else { format!("echo \"[${var}]\"") };
+        write_hooks(&project, json!({ "SessionStart": print }));
+        let outcome = run_hook_event("SessionStart", &project, &json!({ "hook_event_name": "SessionStart" })).await;
+        std::env::remove_var(&var);
+        let context = outcome.context_joined().unwrap_or_default();
+        assert!(context.contains('['), "hook ran: {context}");
+        assert!(!context.contains("hook-secret-value"), "{context}");
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     /// Portable "print this JSON" command (`cmd` keeps single quotes literally).

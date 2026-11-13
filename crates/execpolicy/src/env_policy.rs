@@ -30,7 +30,12 @@ const CORE_VARS: [&str; 14] = [
 ];
 
 /// Variables callers always set for non-interactive output.
-const CALLER_OVERRIDES: [&str; 4] = ["PAGER", "GIT_PAGER", "GH_PAGER", "NO_COLOR"];
+const CALLER_OVERRIDES: [&str; 5] = ["PAGER", "GIT_PAGER", "GH_PAGER", "NO_COLOR", NO_CWD_EXE_LOOKUP];
+
+/// `cmd.exe` looks for programs in the current directory before `PATH`, so a
+/// repository shipping `git.bat` would hijack a known-safe `git status`.
+/// Setting this variable turns that lookup off (Windows; harmless elsewhere).
+const NO_CWD_EXE_LOOKUP: &str = "NoDefaultCurrentDirectoryInExePath";
 
 static POLICY: RwLock<Option<ShellEnvironmentPolicy>> = RwLock::new(None);
 
@@ -182,6 +187,9 @@ where
     env.insert("GIT_PAGER".to_string(), "cat".to_string());
     env.insert("GH_PAGER".to_string(), "cat".to_string());
     env.insert("NO_COLOR".to_string(), "1".to_string());
+    if cfg!(windows) {
+        env.insert(NO_CWD_EXE_LOOKUP.to_string(), "1".to_string());
+    }
     env
 }
 

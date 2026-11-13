@@ -242,6 +242,49 @@ pub async fn delete_project(state: &AppState, path: &str) -> ApiResult<()> {
     Ok(())
 }
 
+// ----------------------------------------------------------------------
+// Project trust (see `services::project_trust`)
+// ----------------------------------------------------------------------
+
+/// Trust state of a project folder.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTrust {
+    pub trusted: bool,
+    /// Project-controlled executable config (`.locagens/hooks.json`,
+    /// `mcp.json`, plugins, rules, agent roles) ignored because the folder
+    /// is not trusted. Empty when trusted or when there is none.
+    pub ignored_files: Vec<String>,
+}
+
+/// Whether the folder's project config (hooks, MCP servers, plugins,
+/// rules, agent roles) is loaded. Unknown / inaccessible folders are not.
+pub fn is_project_trusted(path: &str) -> bool {
+    crate::services::project_trust::is_trusted_str(Some(path))
+}
+
+/// The folder's trust state plus what it would load once trusted.
+pub async fn project_trust(path: &str) -> ApiResult<ProjectTrust> {
+    let canonical = canonical_project_path(path).map_err(ApiError::bad_request)?;
+    let ignored = crate::services::project_trust::ignored_config_files(&canonical);
+    Ok(ProjectTrust {
+        trusted: crate::services::project_trust::is_trusted(&canonical),
+        ignored_files: ignored
+            .iter()
+            .map(|file| file.strip_prefix(&canonical).unwrap_or(file).display().to_string())
+            .collect(),
+    })
+}
+
+/// Trusts (or explicitly distrusts) a project folder; persisted as
+/// `[projects."<path>"] trust_level` in `~/.locagens/config.toml`. The
+/// filesystem root and the home directory cannot be trusted as a whole.
+pub async fn trust_project(path: &str, trusted: bool) -> ApiResult<ProjectTrust> {
+    let canonical = canonical_project_path(path).map_err(ApiError::bad_request)?;
+    crate::services::project_trust::set_trusted(&canonical, trusted).map_err(ApiError::internal)?;
+    project_trust(&canonical.to_string_lossy()).await
+}
+
 /// Runs `git` in `project_path` and returns stdout; stderr (or the spawn
 /// failure) becomes the error message.
 async fn git(project_path: &Path, args: &[&str]) -> Result<String, String> {
@@ -1271,6 +1314,28 @@ pub async fn git_diff(state: &AppState, path: &str, staged: bool) -> ApiResult<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn trust_facade_reports_ignored_config_and_persists_trust() {
+        let project = std::env::temp_dir().join(format!("locagens-trust-api-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(project.join(".locagens")).unwrap();
+        std::fs::write(project.join(".locagens").join("mcp.json"), "{}").unwrap();
+        let path = project.display().to_string();
+        assert!(!is_project_trusted(&path));
+        let before = project_trust(&path).await.unwrap();
+        assert!(!before.trusted);
+        assert_eq!(before.ignored_files.len(), 1);
+        assert!(before.ignored_files[0].ends_with("mcp.json"), "{:?}", before.ignored_files);
+
+        let after = trust_project(&path, true).await.unwrap();
+        assert_eq!(after, ProjectTrust { trusted: true, ignored_files: Vec::new() });
+        assert!(is_project_trusted(&path));
+        let revoked = trust_project(&path, false).await.unwrap();
+        assert!(!revoked.trusted);
+        // The home directory can never be trusted as a whole.
+        assert!(trust_project(&crate::util::home_dir().display().to_string(), true).await.is_err());
+        let _ = std::fs::remove_dir_all(&project);
+    }
 
     #[test]
     fn parses_porcelain_z_with_renames() {

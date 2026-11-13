@@ -27,6 +27,7 @@ pub mod host_executable;
 pub mod llm;
 pub mod network_access;
 pub mod patch_progress;
+pub mod permission_decision;
 pub mod review;
 pub mod tool_search;
 pub mod tools;
@@ -38,6 +39,7 @@ pub use turn_diff_tracker::TurnDiffTracker;
 mod lifecycle_tests;
 
 use crate::db::{Plan, RunMessage, UsageLogEntry};
+use permission_decision::PermissionDecision;
 use crate::pi_providers::PiProviderManager;
 use crate::AppState;
 use serde_json::{json, Value};
@@ -220,7 +222,8 @@ pub struct RunHandle {
     pub inbox: tokio::sync::Mutex<VecDeque<String>>,
     pub permission: tokio::sync::Mutex<PermissionSlot>,
     pub question: tokio::sync::Mutex<QuestionSlot>,
-    pub allow_run: AtomicBool,
+    /// Tools approved with "Allow for Run" (per tool name, not run-wide).
+    allow_run_tools: Mutex<std::collections::HashSet<String>>,
     /// Serializes interactive permission prompts: concurrent sub-agents and
     /// network approvals share the single pending-permission slot, so they
     /// queue here (QA-028).
@@ -254,7 +257,7 @@ impl RunHandle {
             inbox: tokio::sync::Mutex::new(VecDeque::new()),
             permission: tokio::sync::Mutex::new(PermissionSlot::default()),
             question: tokio::sync::Mutex::new(QuestionSlot::default()),
-            allow_run: AtomicBool::new(false),
+            allow_run_tools: Mutex::new(Default::default()),
             permission_gate: tokio::sync::Mutex::new(()),
             next_prompt_id: std::sync::atomic::AtomicU64::new(1),
             agents: agents::AgentHub::default(),
@@ -378,6 +381,16 @@ impl RunHandle {
     pub fn emit(&self, event: Value) {
         // Dropping when no one listens (or the buffer lags) is fine.
         let _ = self.events.send(event);
+    }
+
+    /// Records "Allow for Run" for one tool.
+    pub fn allow_tool_for_run(&self, tool: &str) {
+        self.allow_run_tools.lock().expect("allow_run lock poisoned").insert(tool.to_string());
+    }
+
+    /// Whether `tool` was approved with "Allow for Run" earlier in this run.
+    pub fn tool_allowed_for_run(&self, tool: &str) -> bool {
+        self.allow_run_tools.lock().expect("allow_run lock poisoned").contains(tool)
     }
 
     /// `{ runId, toolCall, preview }` of the pending permission, if any.
@@ -942,6 +955,9 @@ struct LoopExtras {
     deferred_tools: Vec<Value>,
     /// Raised by `interrupt_agent` to end this agent's current turn only.
     interrupt: Option<Arc<AtomicBool>>,
+    /// Read-only sub-agent (explorer roles): never mutates or executes,
+    /// whatever the run mode.
+    readonly: bool,
 }
 
 impl AgentLoop {
@@ -1290,15 +1306,33 @@ impl AgentLoop {
         result
     }
 
+    /// Whether `name` was offered to this agent: an advertised tool spec, a
+    /// deferred MCP spec, or `tool_search` while specs are deferred.
+    fn tool_is_offered(&self, name: &str) -> bool {
+        let named = |tool: &Value| tool.pointer("/function/name").and_then(Value::as_str) == Some(name);
+        self.tools.iter().any(named)
+            || self.extras.deferred_tools.iter().any(named)
+            || (name == tool_search::TOOL_SEARCH_NAME && !self.extras.deferred_tools.is_empty())
+    }
+
     /// Executes one tool call, routing interactive/delegation tools to the
     /// orchestrator and workspace tools through permission gating.
     async fn dispatch_tool(&mut self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
-        if tools::is_forbidden_in_readonly_mode(&self.mode, name) {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": format!("Tool '{name}' is not allowed in '{}' mode.", self.mode),
-            })
-            .to_string());
+        // Models do call tools they were never offered: only the advertised
+        // set (plus deferred MCP specs behind `tool_search`) may run.
+        if !self.tool_is_offered(name) {
+            return Err(AgentError::Failed(format!(
+                "Unknown tool \"{name}\": it is not available to this agent."
+            )));
+        }
+        let readonly_mode = if self.extras.readonly { "plan" } else { self.mode.as_str() };
+        if tools::is_forbidden_in_readonly_mode(readonly_mode, name) {
+            let error = if self.extras.readonly {
+                format!("Tool '{name}' is not allowed for a read-only agent.")
+            } else {
+                format!("Tool '{name}' is not allowed in '{}' mode.", self.mode)
+            };
+            return Ok(serde_json::json!({ "ok": false, "error": error }).to_string());
         }
         match name {
             "set_chat_title" => {
@@ -1399,14 +1433,17 @@ impl AgentLoop {
     }
 
     /// Loads the merged Starlark `.rules` exec policy for this run: every
-    /// agent-directory `rules` folder plus the project-local
-    /// `<project>/.locagens/rules`.
+    /// agent-directory `rules` folder plus, for a trusted project folder
+    /// only, `<project>/.locagens/rules` (an untrusted repo could otherwise
+    /// ship `allow` rules for any command).
     fn load_exec_policy(&self) -> locagens_execpolicy::rules::Policy {
         let mut dirs: Vec<PathBuf> = locagens_config::paths::agent_dir_chain()
             .into_iter()
             .map(|dir| dir.join("rules"))
             .collect();
-        dirs.push(self.project_path.join(".locagens").join("rules"));
+        if crate::services::project_trust::is_trusted(&self.project_path) {
+            dirs.push(self.project_path.join(".locagens").join("rules"));
+        }
         locagens_execpolicy::rules::Policy::load_from_dirs(&dirs)
     }
 
@@ -1611,11 +1648,16 @@ impl AgentLoop {
     }
 
     /// `write_stdin`: feeds characters to a running exec session and polls
-    /// its latest output.
+    /// its latest output. Only sessions this run started are reachable;
+    /// approving an interactive `exec_command` (a shell, a REPL) approves
+    /// what is later typed into it.
     async fn write_stdin_tool(&self, args: &Value) -> Result<String, AgentError> {
         let session_id = str_arg(args, "session_id").unwrap_or_default().to_string();
         if session_id.is_empty() {
             return Err(AgentError::Failed("write_stdin: session_id is empty.".into()));
+        }
+        if !self.state.orchestrator.exec_sessions(&self.run_id).contains(&session_id) {
+            return Err(AgentError::Failed(format!("write_stdin: unknown session {session_id}.")));
         }
         if let Some(chars) = str_arg(args, "chars") {
             let sent = self.state.processes.write_stdin(&session_id, chars).await;
@@ -1849,8 +1891,11 @@ impl AgentLoop {
         // run without a prompt; forbidden rules block outright. Requested
         // network domains are only granted through a prompt (or a matching
         // standing grant), never by the known-safe bypass.
-        if name == "run_command" || name == "exec_command" {
+        let is_command = name == "run_command" || name == "exec_command";
+        let mut dangerous = false;
+        if is_command {
             let cmd_str = command_safety::command_from_args(args);
+            dangerous = command_safety::is_dangerous_command(&cmd_str);
             let policy = self.load_exec_policy();
             let requests_network = !sorted_domains(args).is_empty();
             match command_safety::command_bypasses_prompt_with_policy(&self.mode, &cmd_str, Some(&policy)) {
@@ -1867,7 +1912,21 @@ impl AgentLoop {
                 }
             }
         }
-        if !tools::needs_permission(&self.mode, name) || self.handle.allow_run.load(Ordering::SeqCst) || self.standing_grant(name, args) {
+        // Outside Full Access, writes to protected paths (`.git`, `.locagens`,
+        // … — what the command sandbox also protects) and dangerous commands
+        // always prompt: no standing grant or "Allow for Run" covers them,
+        // and the answer approves this one call only.
+        let protected = if self.mode == "auto" {
+            None
+        } else {
+            tools::protected_mutation_target(&self.project_path, name, args)
+        };
+        let must_prompt = protected.is_some() || (dangerous && self.mode != "auto");
+        if !must_prompt
+            && (!tools::needs_permission(&self.mode, name)
+                || self.handle.tool_allowed_for_run(name)
+                || self.standing_grant(name, args))
+        {
             return self.execute_with_turn_diff(name, args).await;
         }
 
@@ -1880,7 +1939,10 @@ impl AgentLoop {
                 "arguments": serde_json::to_string(args).unwrap_or_else(|_| "{}".into()),
             }
         });
-        let preview = tools::build_preview(&self.project_path, name, args);
+        let mut preview = tools::build_preview(&self.project_path, name, args);
+        if let (Some(path), Some(Value::Object(fields))) = (protected.as_ref(), preview.as_mut()) {
+            fields.insert("protectedPath".into(), json!(path));
+        }
         match self.permission_hook(call_id, name, args).await {
             hook_calls::PermissionVerdict::Allow => return self.execute_with_turn_diff(name, args).await,
             hook_calls::PermissionVerdict::Deny(reason) => return Ok(format!("Denied by PermissionRequest hook: {reason}")),
@@ -1905,44 +1967,34 @@ impl AgentLoop {
         }
 
         // Standing grants are persisted here only (QA-031), never by the facade.
-        match decision.as_str() {
-            "deny" => Ok("The user denied permission for this tool call.".to_string()),
-            "allow_run" => {
-                self.handle.allow_run.store(true, Ordering::SeqCst);
+        // Unknown answers deny (QA-006); protected / dangerous calls are
+        // approved once, never as a standing or run-wide grant.
+        let mut decision = PermissionDecision::parse_or_deny(&decision);
+        if must_prompt && decision.allows() {
+            decision = PermissionDecision::AllowOnce;
+        }
+        match decision {
+            PermissionDecision::Deny => Ok("The user denied permission for this tool call.".to_string()),
+            PermissionDecision::AllowRun => {
+                self.handle.allow_tool_for_run(name);
                 self.execute_with_turn_diff(name, args).await
             }
-            "allow_project" | "allow_always" => {
-                let command = extract_command_str(args).to_string();
-                let domains = args
-                    .get("network_domains")
-                    .or_else(|| args.get("networkDomains"))
-                    .and_then(Value::as_array)
-                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                    .unwrap_or_default();
+            PermissionDecision::AllowProject | PermissionDecision::AllowAlways => {
+                // Standing grants live in `permissions.json` under the
+                // Locagens home and match the exact command + domains
+                // (`standing_grant_matches`); nothing is written into the
+                // project folder.
                 self.state.db.upsert_permission(
-                    if decision == "allow_project" { "project" } else { "global" },
+                    decision.standing_scope().unwrap_or("project"),
                     &self.project_path.display().to_string(),
                     name,
-                    &command,
-                    domains,
-                    &decision,
+                    extract_command_str(args),
+                    sorted_domains(args),
+                    decision.as_str(),
                 );
-                // Amend the Starlark `.rules` policy so the standing grant
-                // survives restarts and applies without the permission table.
-                if (name == "run_command" || name == "exec_command") && !command.is_empty() {
-                    let rules_file = if decision == "allow_project" {
-                        self.project_path.join(".locagens").join("rules").join("default.rules")
-                    } else {
-                        locagens_config::paths::locagens_home()
-                            .join("rules")
-                            .join("default.rules")
-                    };
-                    let _ = locagens_execpolicy::rules::append_allow_prefix_rule(&rules_file, &command);
-                }
                 self.execute_with_turn_diff(name, args).await
             }
-            // allow_once and unknown decisions just proceed once.
-            _ => self.execute_with_turn_diff(name, args).await,
+            PermissionDecision::AllowOnce => self.execute_with_turn_diff(name, args).await,
         }
     }
 
@@ -2194,7 +2246,7 @@ async fn build_sub_loop(
         depth_left: spec.depth_left,
         turn_diff,
         agent_inbox,
-        extras: LoopExtras { interrupt, ..Default::default() },
+        extras: LoopExtras { interrupt, readonly: spec.readonly, ..Default::default() },
     }
 }
 
@@ -2292,7 +2344,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
         state: state.clone(),
         turn_diff: Arc::new(TurnDiffTracker::new()),
         agent_inbox: None,
-        extras: LoopExtras { deferred_tools, interrupt: None },
+        extras: LoopExtras { deferred_tools, interrupt: None, readonly: false },
     };
     if let Some(context) = session_start_context {
         agent.system.push_str("\n\n");

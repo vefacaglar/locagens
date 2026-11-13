@@ -50,7 +50,7 @@ pub async fn continue_run(state, run_id, payload: &ContinueRunPayload) -> ApiRes
 pub async fn cancel_run(state, run_id)                      -> ApiResult<()>
 pub async fn queue_message(state, run_id, content)          -> ApiResult<()>           // mid-run inbox (409 when idle)
 pub async fn apply_permission_decision(state, run_id, call_id, decision, updated_args) -> ApiResult<()>
-pub async fn permission_decision(state, run_id, decision)   -> ApiResult<()>
+pub async fn permission_decision(state, run_id, decision)   -> ApiResult<()>   // unknown decision: 400
 pub async fn answer_question(state, run_id, answer: &AnswerQuestionPayload) -> ApiResult<()>
 
 pub async fn list_runs(state)      -> ApiResult<Vec<Run>>          // lastActiveAt DESC; picks up runs of other processes
@@ -127,6 +127,10 @@ pub async fn git_generate_message(state, run_id) -> ApiResult<String>   // LLM c
 pub async fn git_commit(state, input: GitCommitInput) -> ApiResult<()>
 pub fn require_registered_project(state, raw) -> ApiResult<PathBuf>     // workspace containment
 pub async fn undo_last_turn(state, path, run_id: Option<&str>) -> ApiResult<GitSnapshot>
+pub struct ProjectTrust { pub trusted: bool, pub ignored_files: Vec<String> }
+pub fn is_project_trusted(path) -> bool
+pub async fn project_trust(path) -> ApiResult<ProjectTrust>     // ignored_files: project config skipped while untrusted
+pub async fn trust_project(path, trusted: bool) -> ApiResult<()> // writes [projects."<path>"] trust_level
 ```
 
 `undo_last_turn` reverts only the paths the turn changed (pre-turn tree vs
@@ -135,6 +139,10 @@ the post-turn tree recorded when the turn ended). Paths changed again since
 paths are listed in `restored`. HEAD / index are restored only if still what
 the turn left. The replaced state is saved as a `<run_id>#undo` snapshot, so
 undoing that snapshot redoes the turn.
+
+Untrusted projects load no `<project>/.locagens/` hooks, MCP servers,
+plugins, `.rules` or agent roles; home and filesystem roots cannot be
+trusted.
 
 ### `api::providers` — `pi` providers, models & auth
 
@@ -393,6 +401,13 @@ accept_edits (Build)   → on-request + workspace-write
 ask_permissions        → untrusted + workspace-write (everything prompts)
 auto (Full Access)     → never + danger-full-access
 ```
+
+`create_run` / `continue_run` reject unknown modes with `BadRequest`;
+`apply_permission_decision` sends any unknown decision as `deny`.
+Outside `auto`, dangerous commands and mutations of protected paths
+(`.git`, `.locagens`, `.codex`, `.agents`) always prompt and their approval
+is downgraded to `allow_once`; `fetch_url` prompts in every other mode.
+`allow_run` covers only the approved tool.
 
 Commands requesting `network_domains` never use the known-safe bypass: the
 domains are granted only by a prompt or a matching standing grant. On
