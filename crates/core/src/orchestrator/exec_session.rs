@@ -1,13 +1,55 @@
 //! Exec sessions (`exec_command` / `write_stdin`) and their per-run tracking.
 
 use super::*;
+use locagens_execpolicy::stdin_input;
+
+/// Typed-input state of one exec session (QA-012).
+#[derive(Debug, Default)]
+pub(super) struct ExecSessionInput {
+    /// The session is a shell / REPL: every submitted line is a command
+    /// (`stdin_input::reads_commands_from_stdin` of the approved command).
+    reads_commands: bool,
+    /// Typed text after the last line break, not written yet.
+    held: String,
+}
 
 impl Orchestrator {
-    pub(super) fn track_exec_session(&self, run_id: &str, session_id: &str) {
+    /// Tracks an exec session started by `run_id` with the approved
+    /// `command` (which decides whether typed input is gated).
+    pub(super) fn track_exec_session(&self, run_id: &str, session_id: &str, command: &str) {
+        let input = ExecSessionInput {
+            reads_commands: stdin_input::reads_commands_from_stdin(command),
+            held: String::new(),
+        };
         lock_ignoring_poison(&self.exec_sessions)
             .entry(run_id.to_string())
             .or_default()
-            .insert(session_id.to_string());
+            .insert(session_id.to_string(), input);
+    }
+
+    fn with_exec_session<T>(&self, run_id: &str, session_id: &str, f: impl FnOnce(&mut ExecSessionInput) -> T) -> Option<T> {
+        lock_ignoring_poison(&self.exec_sessions)
+            .get_mut(run_id)
+            .and_then(|sessions| sessions.get_mut(session_id))
+            .map(f)
+    }
+
+    /// Whether typed input to this session is a stream of commands.
+    pub(super) fn exec_session_reads_commands(&self, run_id: &str, session_id: &str) -> bool {
+        self.with_exec_session(run_id, session_id, |input| input.reads_commands).unwrap_or(false)
+    }
+
+    /// Takes the held (unsubmitted) text of a session.
+    pub(super) fn take_held_input(&self, run_id: &str, session_id: &str) -> String {
+        self.with_exec_session(run_id, session_id, |input| std::mem::take(&mut input.held)).unwrap_or_default()
+    }
+
+    pub(super) fn has_held_input(&self, run_id: &str, session_id: &str) -> bool {
+        self.with_exec_session(run_id, session_id, |input| !input.held.is_empty()).unwrap_or(false)
+    }
+
+    pub(super) fn set_held_input(&self, run_id: &str, session_id: &str, held: String) {
+        self.with_exec_session(run_id, session_id, |input| input.held = held);
     }
 
     pub(super) fn untrack_exec_session(&self, run_id: &str, session_id: &str) {
@@ -24,7 +66,7 @@ impl Orchestrator {
     pub fn exec_sessions(&self, run_id: &str) -> Vec<String> {
         lock_ignoring_poison(&self.exec_sessions)
             .get(run_id)
-            .map(|ids| ids.iter().cloned().collect())
+            .map(|ids| ids.keys().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -32,7 +74,7 @@ impl Orchestrator {
     /// run started. Used on cancel, failure, panic and run deletion.
     pub async fn kill_exec_sessions(&self, processes: &locagens_execpolicy::processes::ProcessManager, run_id: &str) {
         let ids = lock_ignoring_poison(&self.exec_sessions).remove(run_id).unwrap_or_default();
-        for id in ids {
+        for id in ids.into_keys() {
             processes.kill(&id).await;
             processes.drop_session(&id);
         }
@@ -102,7 +144,7 @@ impl AgentLoop {
             .processes
             .spawn_with_options(&command, workdir, options);
         // Tracked per run so cancel / failure kills it (QA-027).
-        self.state.orchestrator.track_exec_session(&self.run_id, &info.id);
+        self.state.orchestrator.track_exec_session(&self.run_id, &info.id, &command);
         let started = std::time::Instant::now();
         self.wait_exec_session(&info.id, yield_ms).await.map_err(|_| "cancelled".to_string())?;
         let poll = self.state.processes.poll_output(&info.id, max_chars).unwrap_or(
@@ -152,10 +194,10 @@ impl AgentLoop {
     }
 
     /// `write_stdin`: feeds characters to a running exec session and polls
-    /// its latest output. Only sessions this run started are reachable;
-    /// approving an interactive `exec_command` (a shell, a REPL) approves
-    /// what is later typed into it.
-    pub(super) async fn write_stdin_tool(&self, args: &Value) -> Result<String, AgentError> {
+    /// its latest output. Only sessions this run started are reachable.
+    /// Lines typed into a shell / REPL session are gated like commands
+    /// outside Full Access (QA-012, [`Self::gate_stdin_input`]).
+    pub(super) async fn write_stdin_tool(&self, call_id: &str, args: &Value) -> Result<String, AgentError> {
         let session_id = str_arg(args, "session_id").unwrap_or_default().to_string();
         if session_id.is_empty() {
             return Err(AgentError::Failed("write_stdin: session_id is empty.".into()));
@@ -163,9 +205,14 @@ impl AgentLoop {
         if !self.state.orchestrator.exec_sessions(&self.run_id).contains(&session_id) {
             return Err(AgentError::Failed(format!("write_stdin: unknown session {session_id}.")));
         }
+        let mut held = false;
         if let Some(chars) = str_arg(args, "chars") {
-            let sent = self.state.processes.write_stdin(&session_id, chars).await;
-            if !sent {
+            let to_send = match self.gate_stdin_input(call_id, &session_id, chars).await? {
+                Ok(to_send) => to_send,
+                Err(refusal) => return Ok(refusal),
+            };
+            held = self.state.orchestrator.has_held_input(&self.run_id, &session_id);
+            if !to_send.is_empty() && !self.state.processes.write_stdin(&session_id, &to_send).await {
                 return Err(AgentError::Failed(format!(
                     "write_stdin: session {session_id} has no writable stdin (unknown or already exited)."
                 )));
@@ -198,11 +245,20 @@ impl AgentLoop {
             })
             .to_string());
         }
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "session_id": session_id,
             "status": "running",
             "output": poll.output,
-        })
-        .to_string())
+        });
+        if held {
+            response["input_held"] = json!(
+                "Text after the last line break was not sent yet: this session reads commands, and a line is sent (and approved) once a later write ends it with a newline."
+            );
+        }
+        Ok(response.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "exec_session_tests.rs"]
+mod tests;

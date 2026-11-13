@@ -81,7 +81,13 @@ static PREPARE_LOCK: Mutex<()> = Mutex::new(());
 /// Applies the sandbox to `spec` and starts `request` inside it. Any error
 /// means the command did not start (fail closed); the message explains why.
 pub fn spawn_sandboxed(spec: &SandboxSpec, request: &SpawnRequest) -> Result<SandboxedChild, String> {
-    let plan = build_plan(spec.mode, &spec.project_path, &std::env::temp_dir(), &spec.writable_roots)?;
+    let plan = build_plan(
+        spec.mode,
+        &spec.project_path,
+        &std::env::temp_dir(),
+        &spec.writable_roots,
+        &spec.secret_paths,
+    )?;
     let capability = LocalSid::parse(&plan.capability_sid)
         .map_err(|err| format!("Windows sandbox: invalid capability SID: {err}"))?;
     {
@@ -114,7 +120,7 @@ fn apply_plan(plan: &WindowsSandboxPlan, capability: &LocalSid) -> Result<(), St
             format!("Windows sandbox: cannot grant workspace write access ({err}); refusing to run the command unsandboxed")
         })?;
     }
-    for path in &plan.deny_write_paths {
+    for path in plan.deny_write_paths.iter().chain(&plan.secret_deny_write_paths) {
         acl::deny_write(path, capability.as_ptr()).map_err(|err| {
             format!("Windows sandbox: cannot protect {} ({err}); refusing to run the command", path.display())
         })?;
@@ -123,20 +129,26 @@ fn apply_plan(plan: &WindowsSandboxPlan, capability: &LocalSid) -> Result<(), St
 }
 
 /// Removes every ACE the sandbox added for `project_path` (workspace root,
-/// protected paths and the private temp dir). Returns the paths changed.
-/// `extra_writable_roots` must list the extra roots that were granted (the
-/// capability SID is per workspace, so their ACEs are revoked too).
-pub fn revoke_workspace_access(project_path: &Path, extra_writable_roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+/// protected paths, protected credentials and the private temp dir).
+/// Returns the paths changed. `extra_writable_roots` and `secret_paths`
+/// must list what was used (the capability SID is per workspace, so their
+/// ACEs are revoked too).
+pub fn revoke_workspace_access(
+    project_path: &Path,
+    extra_writable_roots: &[PathBuf],
+    secret_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
     let plan = build_plan(
         locagens_protocol::SandboxMode::WorkspaceWrite,
         project_path,
         &std::env::temp_dir(),
         extra_writable_roots,
+        secret_paths,
     )?;
     let capability = LocalSid::parse(&plan.capability_sid).map_err(|err| err.to_string())?;
     let _guard = PREPARE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut changed = Vec::new();
-    for path in plan.deny_write_paths.iter().chain(plan.writable_roots.iter()) {
+    for path in plan.deny_write_paths.iter().chain(&plan.secret_deny_write_paths).chain(&plan.writable_roots) {
         if !path.exists() {
             continue;
         }

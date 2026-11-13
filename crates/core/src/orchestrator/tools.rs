@@ -2,10 +2,13 @@
 //!
 //! Every path argument is resolved against the run's project folder and
 //! canonicalized so nothing escapes the workspace (symlink-safe containment
-//! via `canonicalize` + `starts_with`). Dangerous tools (`run_command`,
+//! via `canonicalize` + `starts_with`), and every write, delete and move
+//! goes through `workspace_fs`, which never follows a link swapped in after
+//! that check (QA-017). Dangerous tools (`run_command`,
 //! `fetch_url`) are permission-gated by the orchestrator; `build_preview`
 //! produces the red/green diff payload the UI permission card renders.
 
+use locagens_apply_patch::workspace_fs;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -137,7 +140,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "network_domains": json!({ "type": "array", "items": { "type": "string" }, "description": "Outbound hosts the command needs (e.g. registry.npmjs.org); the user approves them with the command." }),
                 "justification": json!({ "type": "string", "description": "Short reason shown on the permission card." })
             }), &["cmd"]),
-        def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll.",
+        def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll. If the session is an interactive shell or REPL (exec_command started cmd, powershell/pwsh, bash/sh/zsh, python, node, a database or remote shell, ... without a script or command argument), every line you submit (text up to a newline) is treated as a command and needs the same approval as exec_command outside Full Access; text after the last newline is held and sent once a later write completes the line. Input to any other program (answering a prompt of a running build, data for a script) and Ctrl-C (\\u0003) / Ctrl-D (\\u0004) are sent as-is. Prefer exec_command for new commands.",
             json!({
                 "session_id": json!({ "type": "string", "description": "Session id returned by exec_command." }),
                 "chars": json!({ "type": "string", "description": "Characters to write to the session's stdin." }),
@@ -523,10 +526,7 @@ fn write_file(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("write_file: {err}"))?;
     let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("write_file: {err}"))?;
-    }
-    std::fs::write(&path, content).map_err(|err| format!("write_file: {err}"))?;
+    workspace_fs::write(project, &path, content.as_bytes()).map_err(|err| format!("write_file: {err}"))?;
     Ok(format!("Wrote {} ({} bytes).", path.display(), content.len()))
 }
 
@@ -543,7 +543,7 @@ fn edit_file(project: &Path, args: &Value) -> Result<String, String> {
     match content.find(old_text) {
         Some(_) => {
             let updated = content.replacen(old_text, new_text, 1);
-            std::fs::write(&path, &updated).map_err(|err| format!("edit_file: {err}"))?;
+            workspace_fs::write(project, &path, updated.as_bytes()).map_err(|err| format!("edit_file: {err}"))?;
             Ok(format!("Edited {}.", path.display()))
         }
         None => Err("edit_file: old_text was not found in the file.".to_string()),
@@ -556,7 +556,7 @@ fn delete_file(project: &Path, args: &Value) -> Result<String, String> {
     if path.is_dir() {
         return Err("delete_file: refusing to delete a directory; use a shell command instead.".to_string());
     }
-    std::fs::remove_file(&path).map_err(|err| format!("delete_file: {err}"))?;
+    workspace_fs::remove_file(project, &path).map_err(|err| format!("delete_file: {err}"))?;
     Ok(format!("Deleted {}.", path.display()))
 }
 
@@ -587,7 +587,7 @@ fn list_directory(project: &Path, args: &Value) -> Result<String, String> {
 fn create_directory(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("create_directory: {err}"))?;
-    std::fs::create_dir_all(&path).map_err(|err| format!("create_directory: {err}"))?;
+    workspace_fs::create_dir_all(project, &path).map_err(|err| format!("create_directory: {err}"))?;
     Ok(format!("Created {}.", path.display()))
 }
 
@@ -599,10 +599,7 @@ fn move_file(project: &Path, args: &Value) -> Result<String, String> {
     if !from.exists() {
         return Err("move_file: source does not exist.".to_string());
     }
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("move_file: {err}"))?;
-    }
-    std::fs::rename(&from, &to).map_err(|err| format!("move_file: {err}"))?;
+    workspace_fs::rename(project, &from, &to).map_err(|err| format!("move_file: {err}"))?;
     Ok(format!("Moved {} → {}.", from.display(), to.display()))
 }
 
@@ -731,7 +728,14 @@ pub fn command_sandbox_spec(
         allow_network,
         network: Some(network),
         writable_roots: crate::config_runtime::sandbox_writable_roots(),
+        secret_paths: sandbox_secret_paths(),
     }
+}
+
+/// Credential files of the user's home and the agent dirs that sandboxed
+/// commands must not read (macOS/Linux) or write (QA-020).
+pub fn sandbox_secret_paths() -> Vec<PathBuf> {
+    locagens_execpolicy::secret_paths::credential_paths(&crate::paths::user_home(), &crate::paths::agent_dir_chain())
 }
 
 async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String, String> {

@@ -90,7 +90,9 @@ fn sandbox_status() -> SecuritySandbox {
             warnings: vec![
                 "Windows network approval is best-effort: the allowlist is an HTTP proxy that programs can bypass (curl --noproxy, raw sockets), and local services stay reachable. Do not rely on it to contain a hostile command."
                     .to_string(),
-                "Windows Build mode restricts writes only: sandboxed commands can still read anything you can, including ~/.locagens/auth.json, .ssh and .env files."
+                "Windows Build mode restricts writes only: sandboxed commands can still read anything you can, including ~/.locagens/auth.json, .ssh and .env files (macOS and Linux hide these credential files from sandboxed commands)."
+                    .to_string(),
+                "Windows Build mode does not block deletes: a sandboxed command can delete (though not modify) files outside the workspace that you can delete."
                     .to_string(),
             ],
             can_install: false,
