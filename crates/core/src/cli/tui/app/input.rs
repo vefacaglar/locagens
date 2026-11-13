@@ -273,7 +273,7 @@ impl App {
         match trigger.kind {
             PopupKind::Slash => {
                 let items = slash_items(&trigger.query);
-                self.popup = (!items.is_empty()).then(|| Popup {
+                self.popup = (!items.is_empty()).then_some(Popup {
                     kind: PopupKind::Slash,
                     items,
                     selected: 0,
@@ -283,7 +283,7 @@ impl App {
             }
             PopupKind::Review => {
                 let items = review_items(&self.review_targets, &trigger.query);
-                self.popup = (!items.is_empty()).then(|| Popup {
+                self.popup = (!items.is_empty()).then_some(Popup {
                     kind: PopupKind::Review,
                     items,
                     selected: 0,

@@ -155,7 +155,7 @@ mod tests {
         std::fs::write(ws.path().join("crates/app/.agents.md"), "hidden notes").unwrap();
 
         let cwd = ws.path().join("crates/app/src");
-        let (docs, sources) = load_agents_md(&cwd, &ws.path());
+        let (docs, sources) = load_agents_md(&cwd, ws.path());
         assert!(docs.contains("root override"));
         assert!(!docs.contains("root instructions"), "override wins per level");
         assert!(docs.contains("--- project-doc ---"));
@@ -173,7 +173,7 @@ mod tests {
         std::fs::create_dir_all(&inner).unwrap();
         std::fs::write(ws.path().join("AGENTS.md"), "root").unwrap();
         // No .git → project root itself is scanned, no further up.
-        let (docs, sources) = load_agents_md(&inner, &ws.path());
+        let (docs, sources) = load_agents_md(&inner, ws.path());
         assert_eq!(docs, "root");
         assert_eq!(sources.len(), 1);
     }
@@ -182,14 +182,14 @@ mod tests {
     fn byte_budget_is_enforced() {
         let ws = temp_ws("budget");
         std::fs::write(ws.path().join("AGENTS.md"), "x".repeat(PROJECT_DOC_MAX_BYTES + 500)).unwrap();
-        let (docs, _) = load_agents_md(&ws.path(), &ws.path());
+        let (docs, _) = load_agents_md(ws.path(), ws.path());
         assert_eq!(docs.len(), PROJECT_DOC_MAX_BYTES);
     }
 
     #[test]
     fn empty_docs_yield_empty_string() {
         let ws = temp_ws("empty");
-        let (docs, sources) = load_agents_md(&ws.path(), &ws.path());
+        let (docs, sources) = load_agents_md(ws.path(), ws.path());
         assert!(docs.is_empty());
         assert!(sources.is_empty());
     }

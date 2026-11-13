@@ -426,7 +426,7 @@ fn view_image(project: &Path, args: &Value) -> Result<String, String> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
     let (width, height) = image_dimensions(&path, &extension)
-        .unwrap_or_else(|| (0, 0));
+        .unwrap_or((0, 0));
     Ok(serde_json::json!({
         "ok": true,
         "path": relative,
@@ -923,8 +923,7 @@ async fn fetch_url_guarded(args: &Value, blocked: &BlockedAddress) -> Result<Str
     if content_type.starts_with("text/html") {
         // Rough HTML→text strip so the model sees content, not markup soup.
         let without_scripts = Regex::new(r"(?is)<(script|style)[^>]*>[\s\S]*?</(script|style)>")
-            .ok()
-            .and_then(|regex| Some(regex.replace_all(&body, "").to_string()))
+            .ok().map(|regex| regex.replace_all(&body, "").to_string())
             .unwrap_or_else(|| body.clone());
         let text = Regex::new(r"<[^>]+>")
             .ok()

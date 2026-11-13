@@ -589,7 +589,7 @@ mod tests {
                     text_node && ends_node && looks_like_text
                 };
                 if flagged && !ALLOWED.contains(&literal.as_str()) {
-                    found.push(format!("{line}"));
+                    found.push(line.to_string());
                 }
             }
         }

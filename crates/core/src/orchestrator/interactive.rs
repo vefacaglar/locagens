@@ -136,11 +136,11 @@ pub(super) fn normalize_plan_args(args: &Value) -> (String, Option<String>, Valu
                                 .and_then(Value::as_str)
                                 .unwrap_or("pending")
                                 .to_string();
-                            let status = ["pending", "in_progress", "completed"]
-                                .iter()
-                                .any(|valid| *valid == status)
-                                .then_some(status.clone())
-                                .unwrap_or_else(|| "pending".to_string());
+                            let status = if ["pending", "in_progress", "completed"].contains(&status.as_str()) {
+                                status
+                            } else {
+                                "pending".to_string()
+                            };
                             Some(json!({ "text": text, "status": status }))
                         }
                     }

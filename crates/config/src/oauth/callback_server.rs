@@ -224,7 +224,7 @@ fn decide(config: &CallbackConfig, method: &str, target: &str) -> (Reply, Option
         let failure = format!("{} authorization failed: {description}", config.provider_name);
         return (Reply::error(400, &title, Some(description)), Some(Err(failure)));
     }
-    if params.get("code").map_or(true, |code| code.is_empty()) {
+    if params.get("code").is_none_or(|code| code.is_empty()) {
         return (Reply::error(400, "Missing authorization code.", None), None);
     }
     let message = format!("Signed in to {}. You may now close this page.", config.provider_name);
@@ -262,7 +262,7 @@ pub fn parse_redirect_url(input: &str, redirect_uri: &str, expected_state: Optio
     if let Some(error) = params.get("error") {
         bail!("Authorization failed: {}", params.get("error_description").unwrap_or(error));
     }
-    if params.get("code").map_or(true, |code| code.is_empty()) {
+    if params.get("code").is_none_or(|code| code.is_empty()) {
         bail!("Missing authorization code");
     }
     if let Some(expected_state) = expected_state {

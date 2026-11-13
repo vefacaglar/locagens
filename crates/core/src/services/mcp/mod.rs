@@ -313,7 +313,7 @@ pub fn list_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
         }
     }
 
-    configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    configs.sort_by_key(|a| a.name.to_lowercase());
     configs
 }
 
@@ -627,10 +627,7 @@ pub fn validate_input(input: &McpServerInput, registered_project: Option<&str>) 
         project_path = canonical;
     }
 
-    let transport = match input.transport.as_deref() {
-        Some(t @ ("sse" | "http" | "streamable-http")) => t,
-        _ => "stdio",
-    };
+    let transport = input.transport.as_deref().unwrap_or("stdio");
     if transport == "stdio" && input.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err("command is required for stdio transport.".to_string());
     }

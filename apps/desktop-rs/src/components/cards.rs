@@ -285,7 +285,7 @@ fn QuestionCard(request: Value) -> Element {
                 .unwrap_or(false)
     };
 
-    let can_submit = (0..questions.len()).all(|index| answered(&*selections.read(), &*notes.read(), index));
+    let can_submit = (0..questions.len()).all(|index| answered(&selections.read(), &notes.read(), index));
 
     rsx! {
         div {
@@ -371,7 +371,7 @@ fn QuestionCard(request: Value) -> Element {
                 }
                 if idx < questions.len().saturating_sub(1) {
                     button {
-                        disabled: !answered(&*selections.read(), &*notes.read(), idx),
+                        disabled: !answered(&selections.read(), &notes.read(), idx),
                         onclick: move |_| {
                             let mut current = current;
                             current.set(idx + 1);

@@ -59,15 +59,9 @@ pub(super) fn anthropic_body(endpoint: &Endpoint, system: &str, messages: &[LlmM
                 };
                 // Tool results must live in the following user message;
                 // consecutive tool messages merge into one.
-                let merge = match chat.last_mut() {
-                    Some(Value::Object(last))
-                        if last.get("role").and_then(Value::as_str) == Some("user")
-                            && last.get("content").map(Value::is_array).unwrap_or(false) =>
-                    {
-                        true
-                    }
-                    _ => false,
-                };
+                let merge = matches!(chat.last_mut(), Some(Value::Object(last))
+                    if last.get("role").and_then(Value::as_str) == Some("user")
+                        && last.get("content").is_some_and(Value::is_array));
                 if merge {
                     if let Some(Value::Array(blocks)) = chat.last_mut().unwrap().get_mut("content") {
                         blocks.push(tool_result);
