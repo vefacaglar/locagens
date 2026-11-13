@@ -27,17 +27,6 @@ Update this file continuously as phases complete.
 
 ## 2. Mandatory Agent & Development Rules
 
-- **Codebase exploration (read-only research & analysis)**: always use
-  `gemini-4-hydrogen` (`Gemini 4 Hydrogen`), default effort `medium` (`low` for
-  trivial lookups, `high`/`xhigh` for deep analysis), run as a read-only
-  subagent or swarm worker pinned to a `gemini-4-hydrogen-*` model. Never burn a
-  coding model on exploration.
-- **All coding & file modifications**: Always use `pi` CLI with `opencode-go/glm-5.3-flash`:
-
-  ```powershell
-  $null | pi --model opencode-go/glm-5.3-flash --no-mcp --no-extensions --approve -p @path/to/prompt.md "Execute instructions"
-  ```
-
 - **Git discipline**: Commit and push to `origin/main` after each completed phase,
   and update `state.md` continuously.
 
