@@ -6,7 +6,7 @@
 
 use crate::api::error::{ApiError, ApiResult};
 use crate::pi_providers::{
-    DeviceCodeSession, EditableProviderConfig, FetchModelsInput, OAuthProviderInfo, ProviderMetadata,
+    EditableProviderConfig, FetchModelsInput, LoginSession, OAuthFlow, OAuthProviderInfo, ProviderMetadata,
     SaveProviderConfigInput, SetPiAuthInput, TestProviderInput,
 };
 use crate::AppState;
@@ -58,20 +58,39 @@ impl Serialize for TestProviderResult {
     }
 }
 
-/// A started OAuth device login: show `user_code` and `verification_uri` to
-/// the user, then pass the whole value to [`finish_oauth_login`]. `handle`
-/// is opaque (it carries the private device code and is redacted from
-/// `Debug`).
+/// A started OAuth login; `flow` says what to show, then pass the whole value
+/// to [`finish_oauth_login`].
+///
+/// - `device_code`: show `user_code` and `verification_uri`.
+/// - `auth_url`: open `auth_url`; the redirect arrives on a loopback server,
+///   or the user pastes it ([`submit_oauth_redirect`]).
+///
+/// `handle` is opaque (it carries private device codes and PKCE verifiers and
+/// is redacted from `Debug`).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthLoginStart {
     pub provider_id: String,
-    pub user_code: String,
-    /// Validated https URL (the "complete" URL when the server sent one).
-    pub verification_uri: String,
+    pub flow: OAuthFlow,
+    /// Device flow only.
+    pub user_code: Option<String>,
+    /// Device flow only: the URL to open (the "complete" URL when the server
+    /// sent one).
+    pub verification_uri: Option<String>,
+    /// Authorization-URL flow only: the URL to open in the browser.
+    pub auth_url: Option<String>,
+    /// Seconds until the device code expires (0 for the authorization-URL flow).
     pub expires_in_secs: u64,
+    /// Device flow poll interval (0 for the authorization-URL flow).
     pub interval_secs: u64,
-    pub handle: DeviceCodeSession,
+    pub handle: LoginSession,
+}
+
+impl OAuthLoginStart {
+    /// The URL the user should open, whichever the flow.
+    pub fn url_to_open(&self) -> &str {
+        self.auth_url.as_deref().or(self.verification_uri.as_deref()).unwrap_or_default()
+    }
 }
 
 /// Lists all configured / authenticated providers (`GET /api/providers`).
@@ -158,40 +177,82 @@ pub async fn set_pi_auth(state: &AppState, input: &SetPiAuthInput) -> ApiResult<
         .map_err(|err| ApiError::bad_request(format!("Failed to update pi auth: {err}")))
 }
 
-/// Providers that support OAuth sign-in (currently `xai`).
+/// Providers that support OAuth sign-in, with the flow each one uses.
 pub fn oauth_providers() -> Vec<OAuthProviderInfo> {
     locagens_config::oauth::oauth_providers().to_vec()
 }
 
-/// Starts an OAuth device login: requests a device code from the provider.
+/// Starts an OAuth login: requests a device code, or starts the loopback
+/// receiver and builds the authorization URL.
 pub async fn start_oauth_login(state: &AppState, provider_id: &str) -> ApiResult<OAuthLoginStart> {
+    start_oauth_login_with_domain(state, provider_id, None).await
+}
+
+/// Like [`start_oauth_login`], for `github-copilot` on GitHub Enterprise:
+/// `enterprise_domain` is the company's GitHub URL or domain.
+pub async fn start_oauth_login_with_domain(
+    state: &AppState,
+    provider_id: &str,
+    enterprise_domain: Option<&str>,
+) -> ApiResult<OAuthLoginStart> {
     let provider_id = provider_id.trim();
-    if locagens_config::oauth::oauth_provider_info(provider_id).is_none() {
+    let Some(info) = locagens_config::oauth::oauth_provider_info(provider_id) else {
         return Err(ApiError::bad_request(format!(
             "Provider \"{provider_id}\" does not support OAuth login"
         )));
-    }
+    };
     let session = state
         .pi
-        .start_oauth_login(provider_id)
+        .start_oauth_login(provider_id, enterprise_domain)
         .await
         .map_err(|err| ApiError::internal(format!("Failed to start OAuth login: {err}")))?;
-    Ok(OAuthLoginStart {
-        provider_id: provider_id.to_string(),
-        user_code: session.user_code.clone(),
-        verification_uri: session.verification_uri.clone(),
-        expires_in_secs: session.expires_in_secs.ceil() as u64,
-        interval_secs: session.interval_secs.map(|secs| secs.ceil() as u64).unwrap_or(5),
-        handle: session,
-    })
+    Ok(login_start(info.id, info.flow, session))
 }
 
-/// Polls until the user approves the login and stores the credential in
-/// `~/.locagens/auth.json`. Cancel by dropping the future.
+fn login_start(provider_id: &str, flow: OAuthFlow, session: LoginSession) -> OAuthLoginStart {
+    let mut start = OAuthLoginStart {
+        provider_id: provider_id.to_string(),
+        flow,
+        user_code: None,
+        verification_uri: None,
+        auth_url: None,
+        expires_in_secs: 0,
+        interval_secs: 0,
+        handle: session.clone(),
+    };
+    match session {
+        LoginSession::DeviceCode(device) => {
+            start.user_code = Some(device.user_code);
+            start.verification_uri = Some(device.verification_uri);
+            start.expires_in_secs = device.expires_in_secs.ceil() as u64;
+            start.interval_secs = device.interval_secs.map(|secs| secs.ceil() as u64).unwrap_or(5);
+        }
+        LoginSession::AuthUrl(auth) => start.auth_url = Some(auth.auth_url),
+    }
+    start
+}
+
+/// Waits until the user completes the login (device approval or the loopback
+/// redirect) and stores the credential in `~/.locagens/auth.json`. Cancel by
+/// dropping the future.
 pub async fn finish_oauth_login(state: &AppState, start: &OAuthLoginStart) -> ApiResult<()> {
     state
         .pi
         .finish_oauth_login(&start.provider_id, &start.handle)
+        .await
+        .map_err(|err| ApiError::bad_request(format!("OAuth login failed: {err}")))
+}
+
+/// Manual fallback of an `auth_url` login: the user pasted the redirect URL
+/// (or authorization code) from the browser. Completes the login, so drop a
+/// pending [`finish_oauth_login`] future afterwards.
+pub async fn submit_oauth_redirect(state: &AppState, start: &OAuthLoginStart, pasted_url: &str) -> ApiResult<()> {
+    let LoginSession::AuthUrl(session) = &start.handle else {
+        return Err(ApiError::bad_request("This sign-in does not take a pasted redirect"));
+    };
+    state
+        .pi
+        .submit_oauth_redirect(&start.provider_id, session, pasted_url)
         .await
         .map_err(|err| ApiError::bad_request(format!("OAuth login failed: {err}")))
 }

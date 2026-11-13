@@ -2,9 +2,9 @@
 //! `xai.js`).
 
 use super::device_code::{poll_device_code, PollStep, PollTiming};
+pub use super::device_code::DeviceCodeSession;
 use super::OAuthTokens;
 use anyhow::{anyhow, bail, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -19,28 +19,6 @@ const DEFAULT_TOKEN_LIFETIME_SECS: f64 = 3600.0;
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Refresh runs while the auth.json lock is held, so keep it short.
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// A started device authorization. Show `user_code` and `verification_uri`
-/// to the user, then pass the session back to [`XaiOAuth::poll`]. The device
-/// code stays private and is redacted from `Debug` output.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DeviceCodeSession {
-    pub user_code: String,
-    /// `verification_uri_complete` when the server sent one, validated https.
-    pub verification_uri: String,
-    pub interval_secs: Option<f64>,
-    pub expires_in_secs: f64,
-    device_code: String,
-}
-
-impl std::fmt::Debug for DeviceCodeSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeviceCodeSession")
-            .field("user_code", &self.user_code)
-            .field("verification_uri", &self.verification_uri)
-            .finish_non_exhaustive()
-    }
-}
 
 /// xAI OAuth client; endpoints are injectable so tests can use a mock server.
 pub struct XaiOAuth {
@@ -195,6 +173,7 @@ fn parse_device_code(body: &Value) -> Result<DeviceCodeSession> {
             .filter(|value| value.is_finite() && *value > 0.0),
         expires_in_secs: positive_number(body, "expires_in")?,
         device_code: required_string(body, "device_code")?,
+        enterprise_domain: None,
     })
 }
 
@@ -209,11 +188,8 @@ fn tokens_from_response(body: &Value, previous_refresh: Option<&str>) -> Result<
         None => DEFAULT_TOKEN_LIFETIME_SECS,
         Some(_) => positive_number(body, "expires_in")?,
     };
-    Ok(OAuthTokens {
-        access,
-        refresh,
-        expires_ms: super::now_ms() + (lifetime_secs * 1000.0) as i64 - REFRESH_SKEW_MS,
-    })
+    let expires_ms = super::now_ms() + (lifetime_secs * 1000.0) as i64 - REFRESH_SKEW_MS;
+    Ok(OAuthTokens::new(access, refresh, expires_ms))
 }
 
 #[cfg(test)]

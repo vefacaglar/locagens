@@ -110,14 +110,33 @@ pub async fn test_provider(state, input: &TestProviderInput) -> ApiResult<TestPr
 pub async fn get_pi_auth(state) -> ApiResult<Vec<Value>>                // ~/.pi/agent/auth.json status
 pub async fn set_pi_auth(state, input: &SetPiAuthInput) -> ApiResult<()>
 
-// OAuth device login (xai today). Credentials go to ~/.locagens/auth.json only.
-pub fn oauth_providers() -> Vec<OAuthProviderInfo>                       // { id, name, loginLabel }
+// OAuth login: xai, github-copilot, kimi-coding (device code) and openai
+// ("Sign in with ChatGPT"), openrouter (authorization URL).
+// Credentials go to ~/.locagens/auth.json only.
+pub fn oauth_providers() -> Vec<OAuthProviderInfo>                       // { id, name, loginLabel, flow: "device_code" | "auth_url" }
 pub async fn start_oauth_login(state, provider_id: &str) -> ApiResult<OAuthLoginStart>
-    // { providerId, userCode, verificationUri (https), expiresInSecs, intervalSecs, handle (opaque) }
+    // { providerId, flow, userCode?, verificationUri? (https), authUrl?, expiresInSecs, intervalSecs, handle (opaque) }
+    // device_code: show userCode + verificationUri. auth_url: open authUrl; a loopback server on 127.0.0.1
+    // receives the redirect (userCode/verificationUri are absent, expiresInSecs/intervalSecs are 0).
+    // `OAuthLoginStart::url_to_open()` returns whichever URL applies.
+pub async fn start_oauth_login_with_domain(state, provider_id: &str, enterprise_domain: Option<&str>)
+    -> ApiResult<OAuthLoginStart>                                         // github-copilot on GitHub Enterprise
 pub async fn finish_oauth_login(state, start: &OAuthLoginStart) -> ApiResult<()>
-    // polls until approved/denied/expired and stores the credential; drop the future to cancel
+    // waits for approval (device) or the loopback redirect (auth_url) and stores the credential;
+    // drop the future to cancel (the loopback server stops with it)
+pub async fn submit_oauth_redirect(state, start: &OAuthLoginStart, pasted_url: &str) -> ApiResult<()>
+    // manual fallback of an auth_url login: the pasted redirect URL (openai: strict URL; openrouter:
+    // URL, `code=...` or bare code). Completes the login; drop a pending finish_oauth_login afterwards
 pub fn open_verification_url(url: &str) -> ApiResult<()>                 // https only, OS opener, no shell
 ```
+
+With an `openai` OAuth credential the provider uses the `openai-responses` API
+and the ChatGPT model list; requests carry `store: false` and no
+`max_output_tokens`. GitHub Copilot models each carry their own API and are
+narrowed to the account's `availableModelIds`; requests go to the host named
+in the token's `proxy-ep` with Copilot's editor headers. OpenRouter keys are
+stored as non-refreshing oauth credentials. OpenCode's `auth.json` API keys are
+a read-only, lowest-precedence fallback.
 
 `get_pi_auth` reports OAuth entries as `type: "oauth"`, `keyPreview: "oauth"`,
 `expiresAt` (epoch ms) and `expired`; tokens are never returned. Expired OAuth
