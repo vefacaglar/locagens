@@ -94,6 +94,7 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
                         &mut thinking,
                         &mut mode,
                         &mut session,
+                        &active_run,
                     )
                     .await
                     {
@@ -171,6 +172,7 @@ async fn handle_slash(
     thinking: &mut Option<String>,
     mode: &mut String,
     session: &mut Option<String>,
+    active_run: &ActiveRun,
 ) -> SlashResult {
     let mut parts = command.split_whitespace();
     let head = parts.next().unwrap_or("").to_lowercase();
@@ -236,6 +238,28 @@ async fn handle_slash(
                     let _ = std::io::stdout().flush();
                 }
                 Err(err) => eprintln!("lcgn: diff failed: {err}"),
+            }
+            SlashResult::Continue
+        }
+        ("/review", _) => {
+            let argument = command.trim_start_matches("/review").trim();
+            let target = match super::review::target_from_slash(argument) {
+                Ok(target) => target,
+                Err(message) => {
+                    eprintln!("lcgn: {message}");
+                    return SlashResult::Continue;
+                }
+            };
+            match model.as_ref() {
+                Some(model) => {
+                    let thinking = thinking.clone();
+                    super::review::run_review(
+                        state, &config.project, model, thinking, target, false, Some(active_run.clone()),
+                    )
+                    .await;
+                    eprintln!();
+                }
+                None => eprintln!("lcgn: no model selected. Use /model provider/id first."),
             }
             SlashResult::Continue
         }

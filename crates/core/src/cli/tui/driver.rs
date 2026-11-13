@@ -2,6 +2,7 @@
 //! answering prompts, cancelling, slash commands and file search.
 
 use super::app::{context_left_percent, Action, App, UsageInfo};
+use super::popup::PopupItem;
 use super::transcript::CellKind;
 use crate::api::runs as runs_api;
 use crate::api::runs::{ContinueRunPayload, CreateRunPayload};
@@ -61,13 +62,52 @@ pub fn build_prompt(text: &str, project: &Path) -> Result<String, String> {
     assemble_prompt(&messages, project, None)
 }
 
+/// The `/review ` popup entries for `project`: uncommitted changes, every
+/// other local branch and the newest commits (read-only git; empty outside a
+/// repository).
+pub fn review_target_items(project: &Path) -> Vec<PopupItem> {
+    use crate::orchestrator::review as engine;
+    if !engine::is_git_repo(project) {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    if engine::has_uncommitted_changes(project) {
+        items.push(PopupItem {
+            value: "uncommitted".into(),
+            label: "uncommitted".into(),
+            detail: "staged, unstaged and untracked changes".into(),
+        });
+    }
+    let current = engine::current_branch(project);
+    for branch in engine::local_branches(project) {
+        if current.as_deref() == Some(branch.as_str()) {
+            continue;
+        }
+        items.push(PopupItem {
+            value: format!("base {branch}"),
+            label: format!("base {branch}"),
+            detail: "changes against this branch".into(),
+        });
+    }
+    for (sha, subject) in engine::recent_commits(project, 15) {
+        let short: String = sha.chars().take(7).collect();
+        items.push(PopupItem {
+            value: format!("commit {sha}"),
+            label: format!("commit {short}"),
+            detail: subject,
+        });
+    }
+    items
+}
+
 impl Driver {
     pub fn new(
         state: Arc<AppState>,
-        app: App,
+        mut app: App,
         config: DriverConfig,
         files_tx: UnboundedSender<FileResults>,
     ) -> Self {
+        app.review_targets = review_target_items(&app.project);
         Self {
             state,
             app,
@@ -119,6 +159,7 @@ impl Driver {
             }
         }
         self.refresh_usage();
+        self.app.review_targets = review_target_items(&self.app.project);
         if let Some(prompt) = self.app.take_leftover_queued() {
             self.start_turn(prompt).await;
         }
@@ -348,6 +389,10 @@ impl Driver {
             }
             ("/model", [target]) => self.set_model(target).await,
             ("/diff", _) => self.show_diff(&project).await,
+            ("/review", _) if self.app.busy => {
+                self.app.push_notice("Wait for the current run to finish (or press Esc to interrupt).");
+            }
+            ("/review", _) => self.start_review(command.trim_start_matches("/review").trim()).await,
             ("/mcp", _) => self.show_mcp(&project).await,
             ("/skills", _) => self.show_skills(&project).await,
             ("/sessions", _) => self.show_sessions(&project),
@@ -402,6 +447,47 @@ impl Driver {
                 diff,
             }),
             Err(err) => self.app.push_error(format!("diff failed: {err}")),
+        }
+    }
+
+    /// `/review [target]`: starts a read-only review run and switches the
+    /// transcript to it (the review becomes the current session, so
+    /// follow-up messages continue it).
+    async fn start_review(&mut self, argument: &str) {
+        let target = match crate::cli::review::target_from_slash(argument) {
+            Ok(target) => target,
+            Err(message) => return self.app.push_error(message),
+        };
+        let Some(model) = self.app.model.clone() else {
+            return self.app.push_error("No model selected. Use /model provider/id (type /model to list models).");
+        };
+        if !self.state.pi.has_api_key(&model.provider_id) && model.provider_id != "ollama" {
+            return self.app.push_error(format!(
+                "Provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
+                model.provider_id
+            ));
+        }
+        crate::cli::runner::ensure_project(&self.state, &self.app.project);
+        let payload = crate::api::review::StartReviewPayload {
+            target: target.clone(),
+            project_path: Some(self.app.project.display().to_string()),
+            provider_id: model.provider_id,
+            model: model.model,
+            reasoning_effort: self.app.thinking.clone(),
+        };
+        match crate::api::review::start_review(&self.state, &payload).await {
+            Ok(started) => {
+                self.app.title = None;
+                self.app.cells.clear();
+                self.app.set_usage(UsageInfo::default());
+                self.app.viewport.follow = true;
+                self.app.push_notice(format!("Reviewing {} (read-only).", target.hint()));
+                self.app.session = Some(started.run.id);
+                self.rx = Some(started.events);
+                self.handle = Some(started.handle);
+                self.app.begin_turn();
+            }
+            Err(err) => self.app.push_error(err.message),
         }
     }
 

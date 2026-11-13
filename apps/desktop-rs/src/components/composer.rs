@@ -719,6 +719,10 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                     store.toast(store.t("toast.select_project").to_string());
                 }
             }
+            "/review" => {
+                let argument = prompt.trim_start_matches(head.as_str()).trim().to_string();
+                super::review::start_from_command(&store, &argument);
+            }
             "/plan" | "/build" | "/auto" | "/chat" => {
                 let mode = match head.as_str() {
                     "/plan" => "plan",

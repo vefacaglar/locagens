@@ -350,7 +350,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("toast.restored", "Restored snapshot {0}", "{0} anlık görüntüsü geri yüklendi"),
     ("toast.select_project", "Select a project first.", "Önce bir proje seç."),
     ("toast.mode_set", "Mode set to {0}", "Mod {0} olarak ayarlandı"),
-    ("toast.unknown_command", "Unknown command {0} — try /new /fork /undo /plan /build /auto /chat", "Bilinmeyen komut {0} — şunları dene: /new /fork /undo /plan /build /auto /chat"),
+    ("toast.unknown_command", "Unknown command {0} — try /new /fork /undo /review /plan /build /auto /chat", "Bilinmeyen komut {0} — şunları dene: /new /fork /undo /review /plan /build /auto /chat"),
     ("toast.resolve_first", "Resolve the pending permission or question first.", "Önce bekleyen izni ya da soruyu yanıtla."),
     ("toast.select_provider", "Select a provider and model first (Settings → Providers).", "Önce bir sağlayıcı ve model seç (Ayarlar → Sağlayıcılar)."),
     ("toast.queue_failed", "Failed to queue message: {0}", "Mesaj sıraya alınamadı: {0}"),

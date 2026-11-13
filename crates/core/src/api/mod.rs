@@ -9,6 +9,7 @@ pub mod plugins;
 pub mod processes;
 pub mod projects;
 pub mod providers;
+pub mod review;
 pub mod runs;
 pub mod security;
 pub mod skills;

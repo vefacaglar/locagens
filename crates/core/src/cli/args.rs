@@ -1,6 +1,6 @@
 //! `lcgn` command line definition (clap) and prompt assembly.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -106,6 +106,8 @@ pub enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+    /// Review code changes (read-only): uncommitted changes (default), a base branch, a commit, or custom instructions
+    Review(ReviewArgs),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -116,6 +118,42 @@ pub enum McpAction {
     Login { server: String },
     /// Remove the stored OAuth token of a remote MCP server
     Logout { server: String },
+}
+
+/// Arguments of `lcgn review`.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ReviewArgs {
+    /// Review the changes against this base branch (merge-base diff)
+    #[arg(long, value_name = "BRANCH", conflicts_with_all = ["commit", "uncommitted"])]
+    pub base: Option<String>,
+    /// Review the changes introduced by this commit
+    #[arg(long, value_name = "SHA", conflicts_with_all = ["base", "uncommitted"])]
+    pub commit: Option<String>,
+    /// Review staged, unstaged and untracked changes (the default)
+    #[arg(long, conflicts_with_all = ["base", "commit"])]
+    pub uncommitted: bool,
+    /// Custom review instructions (used when no target flag is given)
+    #[arg(conflicts_with_all = ["base", "commit", "uncommitted"])]
+    pub prompt: Vec<String>,
+    /// Model as provider/id (overrides the global --model)
+    #[arg(long, value_name = "PROVIDER/MODEL")]
+    pub model: Option<String>,
+    /// Provider for --model
+    #[arg(long, value_name = "NAME")]
+    pub provider: Option<String>,
+    /// Reasoning effort: off|minimal|low|medium|high|xhigh|max
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        value_parser = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    )]
+    pub thinking: Option<String>,
+    /// Project directory (default: current directory)
+    #[arg(long, value_name = "DIR")]
+    pub cwd: Option<String>,
+    /// Output mode: text (default) or json
+    #[arg(long, value_name = "MODE", value_parser = ["text", "json"])]
+    pub mode: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -367,6 +405,35 @@ mod tests {
             Some(Command::Mcp { action: McpAction::Logout { .. } })
         ));
         assert!(matches!(cli(&["mcp", "list"]).command, Some(Command::Mcp { action: McpAction::List })));
+    }
+
+    #[test]
+    fn parses_review_subcommand() {
+        let parsed = cli(&["review"]);
+        match parsed.command {
+            Some(Command::Review(args)) => {
+                assert!(args.base.is_none() && args.commit.is_none() && !args.uncommitted);
+                assert!(args.prompt.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let parsed = cli(&["--model", "p/m", "review", "--base", "main", "--mode", "json"]);
+        assert_eq!(parsed.model.as_deref(), Some("p/m"));
+        match parsed.command {
+            Some(Command::Review(args)) => {
+                assert_eq!(args.base.as_deref(), Some("main"));
+                assert_eq!(args.mode.as_deref(), Some("json"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let parsed = cli(&["review", "--commit", "abc123"]);
+        assert!(matches!(parsed.command, Some(Command::Review(ref a)) if a.commit.as_deref() == Some("abc123")));
+        let parsed = cli(&["review", "check", "the", "parser"]);
+        assert!(matches!(parsed.command, Some(Command::Review(ref a)) if a.prompt.len() == 3));
+        // Targets are mutually exclusive.
+        assert!(Cli::try_parse_from(["lcgn", "review", "--base", "main", "--commit", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["lcgn", "review", "--uncommitted", "--base", "main"]).is_err());
+        assert!(Cli::try_parse_from(["lcgn", "review", "--base", "main", "some prompt"]).is_err());
     }
 
     #[test]

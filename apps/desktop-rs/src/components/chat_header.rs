@@ -101,6 +101,9 @@ pub fn ChatHeader() -> Element {
                         {icon_stop()}
                     }
                 }
+                if !is_active {
+                    super::review::ReviewButton {}
+                }
                 button {
                     class: "icon-btn",
                     title: if dark { store.t("header.to_light") } else { store.t("header.to_dark") },

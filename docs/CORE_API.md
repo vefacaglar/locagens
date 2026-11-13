@@ -248,6 +248,30 @@ pub async fn skills_folder(state, input: InstallSkillInput) -> ApiResult<SkillsF
 pub async fn delete_skill(state, name, location) -> ApiResult<()>
 ```
 
+### `api::review` — code review
+
+```rust
+pub async fn start_review(state, payload: &StartReviewPayload) -> ApiResult<StartedRun>
+pub async fn review_choices(state, project_path: Option<&str>) -> ApiResult<ReviewChoices>
+pub fn review_of_message(message: &RunMessage) -> Option<ReviewPayload>
+pub fn is_review_run(state, run_id) -> bool
+```
+
+`start_review` takes a `ReviewTarget` (`locagens_core::protocol::review`:
+`Uncommitted`, `BaseBranch { branch }`, `Commit { sha, title }`,
+`Custom { instructions }`), builds the diff with read-only git
+(`orchestrator::review`: diff, merge-base, show, status, log, rev-parse,
+ls-files, for-each-ref, cat-file only) and starts a `chat`-mode run whose
+appended system prompt carries the reviewer rubric, the diff and a
+`<review_target>` marker. Invalid targets (not a repo, no changes, unknown
+branch or commit) fail fast with `bad_request`. When the run finishes, the
+drive loop rewrites the last assistant message: `content` becomes a readable
+summary and `rawResponse` a `ReviewPayload` JSON object (`kind` =
+`review_output`, `target`, `hint`, `output` with `findings[]`,
+`overall_correctness`, ...), read back with `review_of_message`. Output that
+is not valid JSON degrades to a findings-less review whose explanation is the
+raw text. `review_choices` lists branches/recent commits for target pickers.
+
 ### `api::symbols` — code symbol search
 
 ```rust

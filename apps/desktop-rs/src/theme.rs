@@ -182,8 +182,9 @@ pub fn build_stylesheet_with(platform: &str, appearance: &Appearance) -> String 
         String::new()
     };
     format!(
-        ":root {{\n  color-scheme: {scheme};\n{vars}{tokens}}}\n{system_override}{}",
-        scale_font_sizes(BASE_CSS)
+        ":root {{\n  color-scheme: {scheme};\n{vars}{tokens}}}\n{system_override}{}\n{}",
+        scale_font_sizes(BASE_CSS),
+        scale_font_sizes(crate::components::review::REVIEW_CSS)
     )
 }
 

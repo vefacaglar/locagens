@@ -20,6 +20,7 @@ pub mod command_safety;
 pub mod compact;
 pub mod env_context;
 pub mod llm;
+pub mod review;
 pub mod tools;
 pub mod turn_diff_tracker;
 
@@ -2300,6 +2301,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     }
     match result {
         Ok(final_output) => {
+            let final_output = review::finalize_review_run(&state.db, &run_full, &handle, final_output);
             state.db.patch_run(&run_id, |run| {
                 run.status = "done".into();
                 run.error_message = None;
