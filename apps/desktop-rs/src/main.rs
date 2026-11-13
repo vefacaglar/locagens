@@ -97,6 +97,24 @@ fn App() -> Element {
         }
     });
 
+    // Escape leaves Settings / Usage (open modals and popovers take Escape
+    // first, see the a11y script).
+    use_future(move || {
+        let mut page = store.page;
+        async move {
+            let mut keys = dioxus::document::eval(
+                r#"document.addEventListener('keydown', (e) => {
+                     if (e.key === 'Escape' && !document.querySelector('.modal-backdrop, .popover-backdrop')) dioxus.send(true);
+                   });"#,
+            );
+            while keys.recv::<bool>().await.is_ok() {
+                if *page.peek() != AppPage::Chat {
+                    page.set(AppPage::Chat);
+                }
+            }
+        }
+    });
+
     // The platform-native stylesheet (re-rendered when appearance changes).
     i18n::set_current(appearance.read().language);
     let stylesheet = theme::build_stylesheet_appearance(&appearance.read());
@@ -109,7 +127,9 @@ fn App() -> Element {
         style { dangerous_inner_html: stylesheet }
         div {
             class: "app-shell {theme::theme_class(store.is_dark())} {shell_inspector_class}",
+            style: "--sidebar-w: {store.layout.read().sidebar_width}px; --panel-w: {store.layout.read().right_panel_width}px;",
             components::sidebar::Sidebar {}
+            components::resize::ResizeHandle { edge: components::resize::Edge::Sidebar }
             div {
                 class: "main-column",
                 match *store.page.read() {
@@ -134,6 +154,7 @@ fn App() -> Element {
                 }
             }
             if show_right_panel {
+                components::resize::ResizeHandle { edge: components::resize::Edge::Panel }
                 div {
                     class: "right-panel",
                     components::right_panel::RightPanel {}

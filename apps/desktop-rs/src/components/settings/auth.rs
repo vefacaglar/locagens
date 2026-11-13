@@ -19,7 +19,7 @@ pub(super) fn AuthTab() -> Element {
     let data = accounts.read().clone();
     let waiting = pending.read().clone();
     rsx! {
-        for info in locagens_core::api::providers::oauth_providers() {
+        for info in signable_providers(&data) {
             div {
                 key: "{info.id}",
                 class: "settings-row",
@@ -104,6 +104,20 @@ pub(super) fn AuthTab() -> Element {
             }
         }
     }
+}
+
+/// OAuth sign-ins not yet taken: a login whose provider already has a stored
+/// OAuth credential (login id == credential `providerId`) is not offered
+/// again; it is listed under the stored credentials instead.
+fn signable_providers(accounts: &[Value]) -> Vec<locagens_core::pi_providers::OAuthProviderInfo> {
+    locagens_core::api::providers::oauth_providers()
+        .into_iter()
+        .filter(|info| {
+            !accounts
+                .iter()
+                .any(|account| account["type"] == "oauth" && account["providerId"] == info.id)
+        })
+        .collect()
 }
 
 pub(super) fn reload_accounts(accounts: Signal<Vec<Value>>) {

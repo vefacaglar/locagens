@@ -170,6 +170,9 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
                 key: "{message.id}",
                 "data-mid": "{message.id}",
                 div { class: "bubble", "{message.content}" }
+                if !message.content.is_empty() {
+                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
+                }
             }
         },
         Group::Assistant { message, tool_calls } => rsx! {
@@ -474,6 +477,9 @@ fn render_group_owned(group: &Group, depth: u8) -> Element {
                 key: "{message.id}",
                 "data-mid": "{message.id}",
                 div { class: "bubble", "{message.content}" }
+                if !message.content.is_empty() {
+                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
+                }
             }
         },
         Group::Assistant { message, tool_calls } => rsx! {

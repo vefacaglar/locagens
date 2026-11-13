@@ -1,6 +1,6 @@
 //! Sidebar: draggable brand strip with a navigation toolbar, top controls,
 //! project tree with runs, a Conversations section for orphaned runs and the
-//! footer navigation between Chat / Usage / Customizations / Settings.
+//! footer navigation between Chat / Usage / Settings.
 
 use std::collections::HashSet;
 
@@ -209,16 +209,6 @@ pub fn Sidebar() -> Element {
                     },
                     span { class: "sidebar-nav-icon", {icon_clock()} }
                     span { "{store.t(\"sidebar.usage\")}" }
-                }
-                button {
-                    class: if matches!(*store.page.read(), crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills | crate::state_ui::SettingsTab::Plugins)) { "sidebar-nav-item active" } else { "sidebar-nav-item" },
-                    onclick: move |_| {
-                        let mut store = store;
-                        forward_page.set(None);
-                        store.page.set(crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills));
-                    },
-                    span { class: "sidebar-nav-icon", {icon_briefcase()} }
-                    span { "{store.t(\"sidebar.customizations\")}" }
                 }
             }
             div {

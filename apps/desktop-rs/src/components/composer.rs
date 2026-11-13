@@ -131,7 +131,7 @@ pub fn Composer() -> Element {
         });
     });
 
-    let providers = store.providers_catalog.read().clone();
+    let providers = store.visible_catalog();
     let selected_provider = store.selected_provider.read().clone();
     let current_provider = providers.iter().find(|p| p.id == selected_provider);
     let selected_model = store.selected_model.read().clone();
@@ -611,6 +611,20 @@ pub fn Composer() -> Element {
                     }
                 }
                 span { class: "composer-spacer" }
+                // Run tokens and cost, quiet, next to the controls.
+                if let Some(usage) = store.run_usage.read().as_ref() {
+                    span {
+                        class: "composer-usage",
+                        title: store.t("composer.usage_title"),
+                        {store.tf(
+                            "header.tokens_cost",
+                            &[
+                                &crate::state_ui::fmt_tokens(usage.total_input_tokens + usage.total_output_tokens),
+                                &crate::state_ui::fmt_cost(usage.total_cost),
+                            ],
+                        )}
+                    }
+                }
                 // Execution mode selector.
                 div {
                     class: "composer-dropdown",
