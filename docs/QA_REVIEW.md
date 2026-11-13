@@ -21,6 +21,86 @@ This review covers the whole workspace at `e70d4f2` (plus the uncommitted `.loca
 
 **Format:** each finding has a severity, a location, then **Problem**, **Scenario** and **Fix**.
 
+## Fix status (2026-11-14)
+
+All 73 findings were worked through on `main`. 67 are fixed and 6 are partial; the "Notes" column says what is left. Each fix comes with regression tests, and the whole workspace passes `cargo test --workspace --no-fail-fast`.
+
+| ID | Status | Notes |
+| --- | --- | --- |
+| 001 | fixed | Project trust (`[projects."<path>"] trust_level`, `lcgn trust`, `--trust`, desktop trust banner). Untrusted projects load no hooks, MCP servers, plugins, `.rules` or agent roles. |
+| 002 | fixed | One protected-path list (`execpolicy::protected_paths`) shared by the sandboxes and the file tools. Protected writes always prompt and are approved once. |
+| 003 | fixed | "Allow for Run" applies to one tool only. Approving a command never writes `.rules`. |
+| 004 | fixed | `dispatch_tool` refuses tools that were not offered; read-only sub-agents act like plan mode. |
+| 005 | fixed | `fetch_url` prompts in every mode except `auto`. |
+| 006 | fixed | `PermissionDecision`: unknown answers deny; the facade rejects invalid decisions. |
+| 007 | fixed | The known-safe list is read-only commands only, with workspace-bound arguments and argument deny-lists. |
+| 008 | fixed | Windows commands are classified with `cmd.exe` quoting rules. |
+| 009 | fixed | `fetch_url` pins DNS, re-checks every redirect hop, uses no system proxy and caps the body at 2 MiB. |
+| 010 | fixed | The sandbox fails closed when its backend is missing. |
+| 011 | fixed | Unknown modes are rejected and fail closed; dangerous-command markers match on tokens. |
+| 012 | partial | `write_stdin` only reaches sessions of its own run. One approval still covers a whole interactive session (documented). |
+| 013 | fixed | Standing grants live only in `permissions.json` and match the exact command. |
+| 014 | fixed | The proxy checks private addresses for approved hosts too. |
+| 015 | fixed | One sandbox spec for every backend and tool. |
+| 016 | fixed | One env builder; `[shell_environment_policy]` applies on every spawn path. |
+| 017 | partial | Dangling symlinks and junctions are refused. A check-then-open race remains, because there is no `O_NOFOLLOW` open. |
+| 018 | fixed | Markers match tokens, not substrings. |
+| 019 | fixed | Dangerous commands always prompt outside Full Access; no grant covers them. |
+| 020 | partial | Windows cannot restrict reads in Build mode with a restricted token; the UI and docs warn about it. |
+| 021 | fixed | `locagens_protocol::text` char-boundary helpers are used at every byte-budget cut. |
+| 022 | fixed | One drive per run (`prepare_drive`); `continue_run` returns Conflict while a run is generating. |
+| 023 | fixed | Cancel is final and awaited; LLM calls and compaction race the stop signal. |
+| 024 | fixed | A drive supervisor marks a panicking run `failed` and cleans up its handle. |
+| 025 | fixed | SSE lines are split on bytes before decoding; one shared HTTP client with a read-idle timeout. |
+| 026 | fixed | The log ring has absolute sequence numbers, and the cursor reports dropped chunks. |
+| 027 | fixed | Exec sessions are killed on cancel, failure and panic, and kept after a `done` turn. |
+| 028 | fixed | One prompt path (`RunHandle::ask_permission`) queues tool and network prompts. |
+| 029 | fixed | A drop guard clears the permission slot when a prompt future is aborted. |
+| 030 | fixed | Undo only touches paths the turn changed, skips paths edited later, and can be redone. |
+| 031 | fixed | Grants are persisted once, by the asking side. |
+| 032 | fixed | Approved hosts live on the per-turn `RunHandle`. |
+| 033 | fixed | `spawn_agents` runs on the v2 agent hub; the v1 code is removed. |
+| 034 | fixed | `api::runs::delete_run` cancels, waits, then deletes; the store tombstones deleted ids. The desktop uses it. |
+| 035 | fixed | Streaming writes are coalesced (one `message_update` every 5 s plus the final one). |
+| 036 | fixed | The cross-process lock is held only for the usage id. |
+| 037 | fixed | Per-run owner locks: startup only fails runs whose owner is gone. |
+| 038 | fixed | The lock degrades instead of panicking; poisoned locks are recovered. |
+| 039 | fixed | Shared files are re-read when they change; `refresh_runs` is incremental. |
+| 040 | fixed | `--no-session` runs write no index or history, and are swept at startup. |
+| 041 | fixed | Snapshots live under `~/.locagens/projects/<project>/snapshots/`, and the old in-project store is migrated. `.locagens/rules/` stays in the project (it is user policy). |
+| 042 | fixed | The config reloads on change at `create_run` / `continue_run`. |
+| 043 | fixed | Fallback files are lenient; the primary file stays strict. |
+| 044 | fixed | `--provider X` only takes the config model when X is the configured provider. |
+| 045 | fixed | MCP tool filters are wired, dead keys removed, masking widened. MCP `cwd` and timeouts are still ignored (documented). |
+| 046 | fixed | `resync_run` runs on a lagged stream (CLI, TUI and desktop). |
+| 047 | fixed | Per-message render state; sub-agent text goes to stderr. |
+| 048 | fixed | One prompt builder (`cli/prompt.rs`). |
+| 049 | partial | The CLI and TUI share one command table (`cli/commands.rs`). The desktop keeps its own UI subset, which includes `/auto` and `/chat`, because coupling it to the CLI module would break layering. |
+| 050 | fixed | Desktop events are routed by the active run, with a stream generation guard. |
+| 051 | fixed | Desktop MCP settings include project-scoped servers. |
+| 052 | fixed | The remaining strings go through i18n. |
+| 053 | fixed | Accessibility basics: labels, focus and roles. |
+| 054 | fixed | Dead event wiring removed; the missing events are handled. |
+| 055 | fixed | `write_private_atomic`: owner-only mode, fsync, atomic rename. |
+| 056 | fixed | MCP secrets are masked, and masked values are restored on save. |
+| 057 | fixed | Lock heartbeat plus a `.lock.owner` sidecar. |
+| 058 | fixed | `!command` credentials have a timeout and correct Windows quoting. |
+| 059 | fixed | MCP OAuth robustness. |
+| 060 | fixed | The key preview shows the last 4 characters only. |
+| 061 | fixed | Smaller credential hygiene items. |
+| 062 | partial | Snapshots and undo moved to `services/snapshots.rs`; `orchestrator/mod.rs` and `config/providers.rs` are split into submodules. `db.rs`, `llm.rs`, `tui/app.rs` and `settings.rs` are not split yet. |
+| 063 | fixed | Unused dependencies removed; clippy runs in CI. It only reports for now, because 53 style-only lints remain. |
+| 064 | fixed | One `now_ms`, `open_browser`, env allowlist, private-IP check, atomic writer, prompt builder and usage aggregation (`UsageTotals`). |
+| 065 | fixed | Stale route, SSE and `apps/backend` comments rewritten; the main usage role is `main`, and legacy `planner` is read as `main`. |
+| 066 | fixed | README rewritten for the current product. |
+| 067 | fixed | CORE_API signatures re-checked against the code; code fences fixed. |
+| 068 | fixed | CLI.md corrected. |
+| 069 | fixed | RELEASING.md names the real crates and steps. |
+| 070 | fixed | state.md updated, plan.md marked historical, Claude.md and SANDBOX.md corrected, leftover db files removed. |
+| 071 | fixed | Tests use a per-process temp home (`crate::paths` under `cfg(test)`); hooks take an injectable agent-dir chain; the integration test isolates every home variable. |
+| 072 | partial | Regression tests cover every listed class. The Unix-only `auth.json` mode test still needs a Linux/macOS CI run. There is no desktop end-to-end run test yet. |
+| 073 | fixed | A shared async `ENV_TEST_LOCK`; `config_toml_servers` takes an explicit env lookup. |
+
 ---
 
 ## 1. Security: trust boundary, permissions, sandbox
