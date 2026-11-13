@@ -48,7 +48,7 @@ fn epoch_seconds(iso: &str) -> Option<i64> {
 
 /// Compact relative age of a timestamp: `"now"` (< 60s), `"5m"` (< 60m),
 /// `"3h"` (< 24h) or `"14d"` (days). Empty string when parsing fails.
-pub fn relative_age(iso: &str) -> String {
+pub fn relative_age(iso: &str, lang: crate::i18n::Lang) -> String {
     let Some(then) = epoch_seconds(iso) else {
         return String::new();
     };
@@ -57,13 +57,13 @@ pub fn relative_age(iso: &str) -> String {
     };
     let elapsed = (now - then).max(0);
     if elapsed < 60 {
-        "now".to_string()
+        crate::i18n::t(lang, "time.now").to_string()
     } else if elapsed < 3600 {
-        format!("{}m", elapsed / 60)
+        crate::i18n::tf(lang, "time.minutes", &[&(elapsed / 60).to_string()])
     } else if elapsed < 86400 {
-        format!("{}h", elapsed / 3600)
+        crate::i18n::tf(lang, "time.hours", &[&(elapsed / 3600).to_string()])
     } else {
-        format!("{}d", elapsed / 86400)
+        crate::i18n::tf(lang, "time.days", &[&(elapsed / 86400).to_string()])
     }
 }
 
@@ -134,7 +134,7 @@ pub fn Sidebar() -> Element {
                     ondoubleclick: move |event| event.stop_propagation(),
                     button {
                         class: "toolbar-btn",
-                        title: "Toggle sidebar",
+                        title: store.t("sidebar.toggle"),
                         onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| {
                             if !on_chat {
@@ -153,7 +153,7 @@ pub fn Sidebar() -> Element {
                     }
                     button {
                         class: "toolbar-btn",
-                        title: "Back",
+                        title: store.t("sidebar.back"),
                         disabled: on_chat,
                         onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| {
@@ -167,7 +167,7 @@ pub fn Sidebar() -> Element {
                     }
                     button {
                         class: "toolbar-btn",
-                        title: "Forward",
+                        title: store.t("sidebar.forward"),
                         disabled: !forward_available,
                         onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| {
@@ -181,7 +181,7 @@ pub fn Sidebar() -> Element {
                     }
                     button {
                         class: "toolbar-btn",
-                        title: "Search conversations",
+                        title: store.t("sidebar.search"),
                         onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| {
                             let closing = *search_open.read();
@@ -201,7 +201,7 @@ pub fn Sidebar() -> Element {
                     class: "new-conv-btn",
                     onclick: move |_| new_chat(&store),
                     span { class: "sidebar-nav-icon", {icon_plus()} }
-                    span { "New Conversation" }
+                    span { "{store.t(\"conversation.new\")}" }
                 }
                 button {
                     class: if *store.page.read() == crate::state_ui::AppPage::UsageLogs { "sidebar-nav-item active" } else { "sidebar-nav-item" },
@@ -211,7 +211,7 @@ pub fn Sidebar() -> Element {
                         store.page.set(crate::state_ui::AppPage::UsageLogs);
                     },
                     span { class: "sidebar-nav-icon", {icon_clock()} }
-                    span { "Usage" }
+                    span { "{store.t(\"sidebar.usage\")}" }
                 }
                 button {
                     class: if matches!(*store.page.read(), crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills | crate::state_ui::SettingsTab::Plugins)) { "sidebar-nav-item active" } else { "sidebar-nav-item" },
@@ -221,7 +221,7 @@ pub fn Sidebar() -> Element {
                         store.page.set(crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills));
                     },
                     span { class: "sidebar-nav-icon", {icon_briefcase()} }
-                    span { "Customizations" }
+                    span { "{store.t(\"sidebar.customizations\")}" }
                 }
             }
             div {
@@ -230,7 +230,7 @@ pub fn Sidebar() -> Element {
                     div { class: "sidebar-search",
                         input {
                             r#type: "text",
-                            placeholder: "Filter conversations…",
+                            placeholder: store.t("sidebar.filter_conversations"),
                             value: "{store.search_query.read()}",
                             oninput: move |event| {
                                 let mut store = store;
@@ -240,11 +240,11 @@ pub fn Sidebar() -> Element {
                     }
                 }
                 div { class: "sidebar-section-header",
-                    span { "Projects" }
+                    span { "{store.t(\"sidebar.projects\")}" }
                     div { class: "sidebar-section-actions",
                         button {
                             class: "subtle icon-btn",
-                            title: "Filter projects & conversations",
+                            title: store.t("sidebar.filter_projects"),
                             onmousedown: move |event| event.stop_propagation(),
                             onclick: move |_| {
                                 let closing = *search_open.read();
@@ -258,7 +258,7 @@ pub fn Sidebar() -> Element {
                         }
                         button {
                             class: "subtle icon-btn",
-                            title: "Add project folder",
+                            title: store.t("sidebar.add_project"),
                             onmousedown: move |event| event.stop_propagation(),
                             onclick: move |_| show_add_modal.set(true),
                             {icon_folder_plus()}
@@ -310,7 +310,7 @@ pub fn Sidebar() -> Element {
                                     span { class: "project-name", "{project.name}" }
                                     button {
                                         class: "subtle icon-btn project-menu-btn",
-                                        title: "Project options",
+                                        title: store.t("sidebar.project_options"),
                                         onmousedown: move |event| event.stop_propagation(),
                                         onclick: move |event| {
                                             event.stop_propagation();
@@ -326,7 +326,7 @@ pub fn Sidebar() -> Element {
                                     }
                                     button {
                                         class: "subtle icon-btn project-new-btn",
-                                        title: "New conversation in project",
+                                        title: store.t("sidebar.new_in_project"),
                                         onmousedown: move |event| event.stop_propagation(),
                                         onclick: move |event| {
                                             event.stop_propagation();
@@ -346,7 +346,7 @@ pub fn Sidebar() -> Element {
                                                     open_project_menu.set(None);
                                                     delete_project(&store, &path_delete.clone());
                                                 },
-                                                "Remove workspace"
+                                                "{store.t(\"sidebar.remove_workspace\")}"
                                             }
                                         }
                                     }
@@ -368,7 +368,7 @@ pub fn Sidebar() -> Element {
                                                     let mut expanded = expanded_all_projects;
                                                     expanded.insert(path_expand.clone());
                                                 },
-                                                "See all ({run_count})"
+                                                "{store.t(\"sidebar.see_all\")} ({run_count})"
                                             }
                                         }
                                     }
@@ -379,10 +379,10 @@ pub fn Sidebar() -> Element {
                 }
                 // Orphaned runs (project not registered) in their own section.
                 div { class: "sidebar-section-header",
-                    span { "Conversations" }
+                    span { "{store.t(\"sidebar.conversations\")}" }
                     button {
                         class: "subtle icon-btn",
-                        title: "New conversation",
+                        title: store.t("sidebar.new_conversation"),
                         onmousedown: move |event| event.stop_propagation(),
                         onclick: move |_| new_chat(&store),
                         {icon_plus()}
@@ -402,7 +402,7 @@ pub fn Sidebar() -> Element {
                     }
                 }
                 if filtered.is_empty() {
-                    div { class: "settings-empty", "No conversations yet — start a New Conversation." }
+                    div { class: "settings-empty", "{store.t(\"sidebar.empty\")}" }
                 }
             }
             div {
@@ -417,7 +417,7 @@ pub fn Sidebar() -> Element {
                         store.page.set(crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Providers));
                     },
                     span { class: "sidebar-nav-icon", {icon_gear()} }
-                    span { "Settings" }
+                    span { "{store.t(\"settings.title\")}" }
                 }
             }
         }
@@ -442,7 +442,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
     let status = run.status.clone();
     let is_live = status == "generating" || status == "created";
     let age_source = if run.updated_at.is_empty() { run.created_at.clone() } else { run.updated_at.clone() };
-    let age = relative_age(&age_source);
+    let age = relative_age(&age_source, store.lang());
     let is_active = active_run_id == Some(run.id.as_str());
     let menu_open = open_run_menu.read().as_deref() == Some(run.id.as_str());
     let item_class = match (is_active, menu_open) {
@@ -468,7 +468,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
             span { class: "run-age", "{age}" }
             button {
                 class: "subtle icon-btn run-action",
-                title: "Conversation options",
+                title: store.t("sidebar.conversation_options"),
                 onmousedown: move |event| event.stop_propagation(),
                 onclick: move |event| {
                     event.stop_propagation();
@@ -491,7 +491,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
                             open_run_menu.set(None);
                             fork_run_action(&store, &run_id_fork.clone());
                         },
-                        "Fork"
+                        "{store.t(\"sidebar.fork\")}"
                     }
                     button {
                         class: "danger",
@@ -499,7 +499,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
                             open_run_menu.set(None);
                             delete_run(&store, &run_id_delete.clone());
                         },
-                        "Delete"
+                        "{store.t(\"common.delete\")}"
                     }
                 }
             }
@@ -521,8 +521,8 @@ fn AddProjectModal(on_close: EventHandler) -> Element {
             div {
                 class: "modal",
                 onclick: move |event| event.stop_propagation(),
-                h3 { "Add Project" }
-                label { "Project folder" }
+                h3 { "{store.t(\"sidebar.add_project_title\")}" }
+                label { "{store.t(\"sidebar.project_folder\")}" }
                 div {
                     class: "composer-row-top",
                     input {
@@ -540,12 +540,12 @@ fn AddProjectModal(on_close: EventHandler) -> Element {
                                 }
                             });
                         },
-                        "Browse…"
+                        "{store.t(\"common.browse\")}"
                     }
                 }
                 div {
                     class: "modal-actions",
-                    button { onclick: move |_| on_close.call(()), "Cancel" }
+                    button { onclick: move |_| on_close.call(()), "{store.t(\"common.cancel\")}" }
                     button {
                         class: "primary",
                         disabled: *busy.read() || path.read().trim().is_empty(),
@@ -569,12 +569,12 @@ fn AddProjectModal(on_close: EventHandler) -> Element {
                                         store.refresh_projects();
                                         on_close.call(());
                                     }
-                                    Err(err) => store.toast(format!("Failed to add project: {err}")),
+                                    Err(err) => store.toast(store.tf("toast.add_project_failed", &[&err.to_string()])),
                                 }
                                 busy.set(false);
                             });
                         },
-                        "Add Project"
+                        "{store.t(\"sidebar.add_project_title\")}"
                     }
                 }
             }
@@ -604,7 +604,7 @@ fn delete_project(store: &UiStore, path: &str) {
     spawn(async move {
         let state = crate::state_ui::core();
         if let Err(err) = locagens_core::api::projects::delete_project(&state, &path).await {
-            store.toast(format!("Failed to remove project: {err}"));
+            store.toast(store.tf("toast.remove_project_failed", &[&err.to_string()]));
         }
         let projects = locagens_core::api::projects::list_projects(&state).await.unwrap_or_default();
         store.projects.set(projects);
@@ -629,9 +629,9 @@ fn fork_run_action(store: &UiStore, run_id: &str) {
             Ok(forked) => {
                 store.refresh_runs();
                 store.select_run(forked.id.clone());
-                store.toast("Conversation forked".to_string());
+                store.toast(store.t("toast.forked").to_string());
             }
-            Err(err) => store.toast(format!("Fork failed: {err}")),
+            Err(err) => store.toast(store.tf("toast.fork_failed", &[&err.to_string()])),
         }
     });
 }

@@ -24,11 +24,11 @@ pub fn PendingCards() -> Element {
 
 /// The five permission decisions in display order.
 const DECISIONS: [(&str, &str, &str); 5] = [
-    ("Allow Once", "allow_once", "primary"),
-    ("Allow for Run", "allow_run", ""),
-    ("Allow in Project", "allow_project", ""),
-    ("Always Allow", "allow_always", ""),
-    ("Deny", "deny", "danger"),
+    ("perm.allow_once", "allow_once", "primary"),
+    ("perm.allow_run", "allow_run", ""),
+    ("perm.allow_project", "allow_project", ""),
+    ("perm.allow_always", "allow_always", ""),
+    ("perm.deny", "deny", "danger"),
 ];
 
 /// Permission approval card with the five decision buttons.
@@ -100,7 +100,7 @@ fn PermissionCard(request: Value) -> Element {
                     if network.is_empty() {
                         display_path.clone()
                     } else {
-                        format!("{}  (network: {})", display_path, network)
+                        format!("{}  ({}: {})", display_path, store.t("perm.network"), network)
                     }
                 })
         }
@@ -139,7 +139,7 @@ fn PermissionCard(request: Value) -> Element {
         if let Err(err) =
             locagens_core::api::runs::permission_decision(&state, &run_id, decision).await
         {
-            store.toast(format!("Failed to apply decision: {err}"));
+            store.toast(store.tf("toast.decision_failed", &[&err.to_string()]));
         }
         store.pending_permission.set(None);
         busy.set(false);
@@ -150,15 +150,15 @@ fn PermissionCard(request: Value) -> Element {
             class: "permission-card",
             div {
                 class: "pc-title",
-                span { class: "badge warn", "Permission requested" }
+                span { class: "badge warn", "{store.t(\"perm.requested\")}" }
                 span { class: "tool-name", "{tool_name}" }
             }
             div {
                 class: "pc-detail",
-                "The agent wants to run "
+                "{store.t(\"perm.wants_run\")} "
                 strong { "{tool_name}" }
                 if !display_path.is_empty() {
-                    " on "
+                    " {store.t(\"perm.on\")} "
                     strong { "{display_path}" }
                 }
                 "."
@@ -185,7 +185,7 @@ fn PermissionCard(request: Value) -> Element {
                                     let run_id_call = run_id_for_call.clone();
                                     spawn(async move { decide(store, run_id_call, decision, busy).await });
                                 },
-                                "{label}"
+                                "{store.t(label)}"
                             }
                         }
                     }
@@ -288,7 +288,7 @@ fn QuestionCard(request: Value) -> Element {
             class: "question-card",
             div {
                 class: "qc-title",
-                span { class: "badge accent", "Agent question" }
+                span { class: "badge accent", "{store.t(\"question.title\")}" }
                 if questions.len() > 1 {
                     span { class: "badge", "{idx + 1} / {questions.len()}" }
                 }
@@ -341,7 +341,7 @@ fn QuestionCard(request: Value) -> Element {
             div {
                 class: "qc-note",
                 input {
-                    placeholder: "Or type a custom answer…",
+                    placeholder: store.t("question.custom"),
                     value: "{notes.read().get(idx).cloned().unwrap_or_default()}",
                     oninput: move |event| {
                         let value = event.value();
@@ -362,7 +362,7 @@ fn QuestionCard(request: Value) -> Element {
                             let mut current = current;
                             current.set(idx - 1);
                         },
-                        {icon_arrow_left()} "Back"
+                        {icon_arrow_left()} "{store.t(\"common.back\")}"
                     }
                 }
                 if idx < questions.len().saturating_sub(1) {
@@ -372,7 +372,7 @@ fn QuestionCard(request: Value) -> Element {
                             let mut current = current;
                             current.set(idx + 1);
                         },
-                        "Next" {icon_arrow_right()}
+                        "{store.t(\"common.next\")}" {icon_arrow_right()}
                     }
                 }
                 button {
@@ -390,13 +390,13 @@ fn QuestionCard(request: Value) -> Element {
                             if let Err(err) =
                                 locagens_core::api::runs::answer_question(&state, &run_id, selections, notes).await
                             {
-                                store.toast(format!("Failed to answer: {err}"));
+                                store.toast(store.tf("toast.answer_failed", &[&err.to_string()]));
                             }
                             store.pending_question.set(None);
                             busy.set(false);
                         });
                     },
-                    "Submit Answer"
+                    "{store.t(\"question.submit\")}"
                 }
             }
         }

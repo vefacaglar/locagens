@@ -15,7 +15,7 @@ pub fn ChatHeader() -> Element {
     let title = run
         .as_ref()
         .map(|run| run.title.clone())
-        .unwrap_or_else(|| "New Conversation".to_string());
+        .unwrap_or_else(|| store.t("conversation.new").to_string());
     let project_path = run
         .as_ref()
         .map(|run| run.project_path.clone())
@@ -26,7 +26,7 @@ pub fn ChatHeader() -> Element {
         .map(|run| run.status.clone())
         .unwrap_or_else(|| "done".to_string());
     let is_active = run_active(run.as_ref());
-    let dark = *store.dark_mode.read();
+    let dark = store.is_dark();
     let inspector_open = *store.right_panel_open.read();
     let files_changed = store
         .turn_diff
@@ -84,7 +84,7 @@ pub fn ChatHeader() -> Element {
                 if is_active {
                     button {
                         class: "icon-btn danger",
-                        title: "Stop the running turn",
+                        title: store.t("header.stop"),
                         onclick: move |_| {
                             let store = store;
                             let run_id = run.as_ref().map(|run| run.id.clone());
@@ -92,7 +92,7 @@ pub fn ChatHeader() -> Element {
                                 if let Some(run_id) = run_id {
                                     let state = crate::state_ui::core();
                                     if let Err(err) = locagens_core::api::runs::cancel_run(&state, &run_id).await {
-                                        store.toast(format!("Failed to stop run: {err}"));
+                                        store.toast(store.tf("toast.stop_failed", &[&err.to_string()]));
                                     }
                                     store.refresh_runs();
                                 }
@@ -103,17 +103,15 @@ pub fn ChatHeader() -> Element {
                 }
                 button {
                     class: "icon-btn",
-                    title: if dark { "Switch to light theme" } else { "Switch to dark theme" },
+                    title: if dark { store.t("header.to_light") } else { store.t("header.to_dark") },
                     onclick: move |_| {
-                        let mut store = store;
-                        let dark = *store.dark_mode.read();
-                        store.dark_mode.set(!dark);
+                        store.toggle_theme();
                     },
                     if dark { {icon_sun()} } else { {icon_moon()} }
                 }
                 button {
                     class: if inspector_open { "icon-btn on" } else { "icon-btn" },
-                    title: "Toggle inspector panel",
+                    title: store.t("header.inspector"),
                     onclick: move |_| {
                         let mut store = store;
                         let open = *store.right_panel_open.read();

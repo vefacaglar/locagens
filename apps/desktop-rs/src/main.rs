@@ -6,8 +6,10 @@
 //! the desktop runtime with the root `App` component.
 
 mod components;
+mod i18n;
 mod logo;
 mod markdown;
+mod prefs;
 mod state_ui;
 mod theme;
 
@@ -58,7 +60,8 @@ fn main() {
 /// renders the 3-column shell (sidebar / main column / inspector panel).
 #[component]
 fn App() -> Element {
-    let dark_mode = use_signal(|| true);
+    let appearance = use_signal(prefs::load);
+    let system_dark = use_signal(|| true);
     let page: Signal<AppPage> = use_signal(|| AppPage::Chat);
     let projects = use_signal(Vec::new);
     let selected_project: Signal<Option<String>> = use_signal(|| None);
@@ -84,7 +87,8 @@ fn App() -> Element {
     let spawned_agents: Signal<Vec<serde_json::Value>> = use_signal(Vec::new);
 
     let store = UiStore {
-        dark_mode,
+        appearance,
+        system_dark,
         page,
         projects,
         selected_project,
@@ -123,8 +127,25 @@ fn App() -> Element {
         store.refresh_initial();
     });
 
-    // The platform-native stylesheet (re-rendered when dark mode flips).
-    let stylesheet = theme::build_stylesheet(*dark_mode.read());
+    // Track the OS colour scheme so the header toggle / theme class know
+    // whether `System` currently resolves to dark. (The stylesheet itself
+    // follows the OS through a `prefers-color-scheme` rule.)
+    use_future(move || {
+        let mut system_dark = system_dark;
+        async move {
+            let mut watcher = dioxus::document::eval(
+                r#"const m = window.matchMedia('(prefers-color-scheme: dark)');
+                   dioxus.send(m.matches);
+                   m.addEventListener('change', e => dioxus.send(e.matches));"#,
+            );
+            while let Ok(dark) = watcher.recv::<bool>().await {
+                system_dark.set(dark);
+            }
+        }
+    });
+
+    // The platform-native stylesheet (re-rendered when appearance changes).
+    let stylesheet = theme::build_stylesheet_appearance(&appearance.read());
 
     let show_right_panel = *store.right_panel_open.read();
     // The main column clears the window controls only while it is rightmost.
@@ -133,7 +154,7 @@ fn App() -> Element {
     rsx! {
         style { dangerous_inner_html: stylesheet }
         div {
-            class: "app-shell {theme::theme_class(*dark_mode.read())} {shell_inspector_class}",
+            class: "app-shell {theme::theme_class(store.is_dark())} {shell_inspector_class}",
             components::sidebar::Sidebar {}
             div {
                 class: "main-column",

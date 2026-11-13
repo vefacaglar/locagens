@@ -8,16 +8,16 @@ use dioxus::prelude::*;
 use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload};
 use locagens_core::pi_providers::ProviderMetadata;
 
-/// Concise display label for a reasoning-effort value.
-fn effort_display_label(effort: &str) -> &'static str {
+/// i18n key of the display label for a reasoning-effort value.
+fn effort_key(effort: &str) -> &'static str {
     match effort {
-        "minimal" => "Minimal",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        _ => "Medium",
+        "minimal" => "effort.minimal",
+        "low" => "effort.low",
+        "medium" => "effort.medium",
+        "high" => "effort.high",
+        "xhigh" => "effort.xhigh",
+        "max" => "effort.max",
+        _ => "effort.medium",
     }
 }
 
@@ -75,7 +75,7 @@ fn render_effort_flyout(
                 for effort in efforts.iter() {
                     {
                         let val = effort.as_str();
-                        let label = effort_display_label(val);
+                        let label = store.t(effort_key(val));
                         let is_active = val == active_effort;
                         let m_pick = model_id.clone();
                         let val_pick = val.to_string();
@@ -150,13 +150,13 @@ pub fn Composer() -> Element {
         .map(|p| p.display_name.clone())
         .unwrap_or_else(|| {
             if selected_provider.is_empty() {
-                "Provider".to_string()
+                store.t("common.provider").to_string()
             } else {
                 selected_provider.clone()
             }
         });
     let model_label = if selected_model.is_empty() {
-        "Model".to_string()
+        store.t("common.model").to_string()
     } else {
         selected_model.clone()
     };
@@ -167,13 +167,13 @@ pub fn Composer() -> Element {
             None
         } else {
             let active = effective_effort(&selected_effort, &efforts).unwrap_or("medium");
-            Some(effort_display_label(active).to_string())
+            Some(store.t(effort_key(active)).to_string())
         }
     };
     let mode_label = match selected_mode.as_str() {
-        "plan" => "Plan",
-        "auto" => "Full Access",
-        _ => "Build",
+        "plan" => store.t("mode.plan"),
+        "auto" => store.t("mode.auto"),
+        _ => store.t("mode.build"),
     };
 
     let run = store.active_run.read().clone();
@@ -183,11 +183,11 @@ pub fn Composer() -> Element {
         matches!(run_status.as_deref(), Some("awaiting_permission") | Some("awaiting_input"));
     let has_run = run.is_some();
     let send_label = if is_generating {
-        "Queue"
+        store.t("composer.queue")
     } else if has_run {
-        "Continue"
+        store.t("composer.continue")
     } else {
-        "Send"
+        store.t("composer.send")
     };
 
     // Hovered-model effort flyout data: looked up once per render so the
@@ -224,7 +224,7 @@ pub fn Composer() -> Element {
             }
             // Full-width borderless prompt input.
             textarea {
-                placeholder: "Ask anything, @ to mention, / for commands",
+                placeholder: store.t("composer.placeholder"),
                 value: "{prompt_text}",
                 rows: "2",
                 oninput: move |event| {
@@ -249,7 +249,7 @@ pub fn Composer() -> Element {
                     class: "composer-dropdown",
                     button {
                         class: "composer-plus-btn",
-                        title: "Add Context",
+                        title: store.t("composer.add_context"),
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("root") { None } else { Some("root") };
                             hovered_model.set(None);
@@ -263,7 +263,7 @@ pub fn Composer() -> Element {
                             div {
                                 class: "composer-context-menu",
                                 onclick: move |e| e.stop_propagation(),
-                                div { class: "ccm-header", "Add Context" }
+                                div { class: "ccm-header", "{store.t(\"composer.add_context\")}" }
                                 button {
                                     class: "ccm-item",
                                     onclick: move |_| {
@@ -282,7 +282,7 @@ pub fn Composer() -> Element {
                                         });
                                     },
                                     {icon_paperclip()}
-                                    span { "Files" }
+                                    span { "{store.t(\"composer.files\")}" }
                                 }
                                 button {
                                     class: "ccm-item",
@@ -297,7 +297,7 @@ pub fn Composer() -> Element {
                                         });
                                     },
                                     {icon_folder()}
-                                    span { "Folder" }
+                                    span { "{store.t(\"composer.folder\")}" }
                                 }
                                 button {
                                     class: "ccm-item",
@@ -306,7 +306,7 @@ pub fn Composer() -> Element {
                                         context_menu.set(Some("mentions"));
                                     },
                                     {icon_at()}
-                                    span { "Mentions" }
+                                    span { "{store.t(\"composer.mentions\")}" }
                                 }
                                 button {
                                     class: "ccm-item",
@@ -324,7 +324,7 @@ pub fn Composer() -> Element {
                                         context_menu.set(Some("actions"));
                                     },
                                     {icon_actions()}
-                                    span { "Actions" }
+                                    span { "{store.t(\"composer.actions\")}" }
                                 }
                             }
                         },
@@ -337,20 +337,20 @@ pub fn Composer() -> Element {
                                     button {
                                         class: "subtle icon-btn",
                                         onclick: move |_| context_menu.set(Some("root")),
-                                        "← Add Context"
+                                        "← {store.t(\"composer.add_context\")}"
                                     }
                                 }
                                 input {
                                     class: "ccm-search",
                                     r#type: "text",
-                                    placeholder: "Filter files…",
+                                    placeholder: store.t("composer.filter_files"),
                                     value: "{file_query.read()}",
                                     oninput: move |event| file_query.set(event.value()),
                                 }
                                 div {
                                     class: "ccm-list",
                                     if project_files.read().is_empty() {
-                                        div { class: "ccm-empty", "No matching files" }
+                                        div { class: "ccm-empty", "{store.t(\"composer.no_files\")}" }
                                     }
                                     for (index, file) in project_files.read().iter().take(10).enumerate() {
                                         {
@@ -383,13 +383,13 @@ pub fn Composer() -> Element {
                                     button {
                                         class: "subtle icon-btn",
                                         onclick: move |_| context_menu.set(Some("root")),
-                                        "← Add Context"
+                                        "← {store.t(\"composer.add_context\")}"
                                     }
                                 }
                                 div {
                                     class: "ccm-list",
                                     if skills.read().is_empty() {
-                                        div { class: "ccm-empty", "No skills found" }
+                                        div { class: "ccm-empty", "{store.t(\"composer.no_skills\")}" }
                                     }
                                     for (index, skill) in skills.read().iter().take(12).enumerate() {
                                         {
@@ -423,7 +423,7 @@ pub fn Composer() -> Element {
                     class: "composer-dropdown",
                     button {
                         class: if *context_menu.read() == Some("provider") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: "Provider",
+                        title: store.t("common.provider"),
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("provider") { None } else { Some("provider") };
                             hovered_model.set(None);
@@ -436,11 +436,11 @@ pub fn Composer() -> Element {
                         div {
                             class: "composer-context-menu",
                             onclick: move |e| e.stop_propagation(),
-                            div { class: "ccm-header", "Provider" }
+                            div { class: "ccm-header", "{store.t(\"common.provider\")}" }
                             div {
                                 class: "ccm-list",
                                 if providers.is_empty() {
-                                    div { class: "ccm-empty", "No providers configured" }
+                                    div { class: "ccm-empty", "{store.t(\"composer.no_providers\")}" }
                                 }
                                 for provider in providers.iter() {
                                     {
@@ -476,7 +476,7 @@ pub fn Composer() -> Element {
                     class: "composer-dropdown",
                     button {
                         class: if *context_menu.read() == Some("model") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: "Model",
+                        title: store.t("common.model"),
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("model") { None } else { Some("model") };
                             if next.is_some() {
@@ -497,13 +497,13 @@ pub fn Composer() -> Element {
                             class: "composer-context-menu model-menu",
                             onclick: move |e| e.stop_propagation(),
                             onmouseleave: move |_| hovered_model.set(None),
-                            div { class: "ccm-header", "Model" }
+                            div { class: "ccm-header", "{store.t(\"common.model\")}" }
                             div {
                                 class: "ccm-list model-list",
                                 onscroll: move |_| hovered_model.set(None),
                                 if provider_models.is_empty() {
                                     if selected_model.is_empty() {
-                                        div { class: "ccm-empty", "No models" }
+                                        div { class: "ccm-empty", "{store.t(\"composer.no_models\")}" }
                                     } else {
                                         div { class: "ccm-empty", "{selected_model}" }
                                     }
@@ -525,7 +525,7 @@ pub fn Composer() -> Element {
                                                 effective_effort(&selected_effort, &efforts)
                                                     .unwrap_or("medium")
                                             })
-                                            .map(effort_display_label)
+                                            .map(|effort| store.t(effort_key(effort)))
                                             .unwrap_or("");
                                         rsx! {
                                             div {
@@ -583,7 +583,7 @@ pub fn Composer() -> Element {
                     class: "composer-dropdown",
                     button {
                         class: if *context_menu.read() == Some("mode") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: "Execution mode",
+                        title: store.t("composer.mode_title"),
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("mode") { None } else { Some("mode") };
                             hovered_model.set(None);
@@ -597,10 +597,10 @@ pub fn Composer() -> Element {
                         div {
                             class: "composer-context-menu align-right",
                             onclick: move |e| e.stop_propagation(),
-                            div { class: "ccm-header", "Mode" }
+                            div { class: "ccm-header", "{store.t(\"composer.mode\")}" }
                             div {
                                 class: "ccm-list",
-                                for (val, label) in [("accept_edits", "Build"), ("plan", "Plan"), ("auto", "Full Access")] {
+                                for (val, label) in [("accept_edits", store.t("mode.build")), ("plan", store.t("mode.plan")), ("auto", store.t("mode.auto"))] {
                                     {
                                         let is_active = val == selected_mode;
                                         rsx! {
@@ -625,7 +625,7 @@ pub fn Composer() -> Element {
                 if is_generating {
                     button {
                         class: "icon-btn danger",
-                        title: "Stop the running turn",
+                        title: store.t("header.stop"),
                         onclick: move |_| {
                             let Some(run_id) = run.as_ref().map(|run| run.id.clone()) else {
                                 return;
@@ -642,7 +642,7 @@ pub fn Composer() -> Element {
                     class: "composer-send-btn",
                     disabled: *busy.read() || is_awaiting || prompt_text.trim().is_empty(),
                     title: if is_awaiting {
-                        "Resolve the pending card above first".to_string()
+                        store.t("composer.resolve_first").to_string()
                     } else {
                         send_label.to_string()
                     },
@@ -690,13 +690,13 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                             Ok(forked) => {
                                 store.refresh_runs();
                                 store.select_run(forked.id);
-                                store.toast("Conversation forked".to_string());
+                                store.toast(store.t("toast.forked").to_string());
                             }
-                            Err(err) => store.toast(format!("Fork failed: {err}")),
+                            Err(err) => store.toast(store.tf("toast.fork_failed", &[&err.to_string()])),
                         }
                     });
                 } else {
-                    store.toast("No active conversation to fork.".to_string());
+                    store.toast(store.t("toast.no_fork").to_string());
                 }
             }
             "/undo" => {
@@ -711,12 +711,12 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                     spawn(async move {
                         let state = core();
                         match locagens_core::api::projects::undo_last_turn(&state, &project, run_id.as_deref()).await {
-                            Ok(snapshot) => store.toast(format!("Restored snapshot {}", snapshot.id)),
-                            Err(err) => store.toast(format!("Undo failed: {err}")),
+                            Ok(snapshot) => store.toast(store.tf("toast.restored", &[&snapshot.id])),
+                            Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
                         }
                     });
                 } else {
-                    store.toast("Select a project first.".to_string());
+                    store.toast(store.t("toast.select_project").to_string());
                 }
             }
             "/plan" | "/build" | "/auto" | "/chat" => {
@@ -728,24 +728,24 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                 };
                 store.selected_mode.set(mode.to_string());
                 store.prompt.set(String::new());
-                store.toast(format!("Mode set to {mode}"));
+                store.toast(store.tf("toast.mode_set", &[mode]));
             }
             _ => {
-                store.toast(format!("Unknown command {head} — try /new /fork /undo /plan /build /auto /chat"));
+                store.toast(store.tf("toast.unknown_command", &[&head]));
             }
         }
         return;
     }
     // A pending card must be resolved first.
     if store.pending_permission.read().is_some() || store.pending_question.read().is_some() {
-        store.toast("Resolve the pending permission or question first.".to_string());
+        store.toast(store.t("toast.resolve_first").to_string());
         return;
     }
 
     let provider_id = store.selected_provider.read().clone();
     let model = store.selected_model.read().clone();
     if provider_id.is_empty() || model.is_empty() {
-        store.toast("Select a provider and model first (Settings → Providers).".to_string());
+        store.toast(store.t("toast.select_provider").to_string());
         return;
     }
     let mode = store.selected_mode.read().clone();
@@ -773,7 +773,7 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                 Ok(()) => {
                     store.prompt.set(String::new());
                 }
-                Err(err) => store.toast(format!("Failed to queue message: {err}")),
+                Err(err) => store.toast(store.tf("toast.queue_failed", &[&err.to_string()])),
             }
             busy.set(false);
         });
@@ -813,7 +813,7 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                     store.attach_event_stream(run_id, continued.events);
                     store.refresh_runs();
                 }
-                Err(err) => store.toast(format!("Failed to continue run: {err}")),
+                Err(err) => store.toast(store.tf("toast.continue_failed", &[&err.to_string()])),
             }
             busy.set(false);
         });
@@ -856,7 +856,7 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                 store.attach_event_stream(run_id, started.events);
                 store.refresh_runs();
             }
-            Err(err) => store.toast(format!("Failed to start run: {err}")),
+            Err(err) => store.toast(store.tf("toast.start_failed", &[&err.to_string()])),
         }
         busy.set(false);
     });

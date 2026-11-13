@@ -52,7 +52,7 @@ pub fn RightPanel() -> Element {
             ondoubleclick: move |_| {
                 dioxus::desktop::use_window().toggle_maximized();
             },
-            span { class: "head-title", "Inspector" }
+            span { class: "head-title", "{store.t(\"inspector.title\")}" }
         }
         div {
             class: "right-panel-body",
@@ -60,7 +60,7 @@ pub fn RightPanel() -> Element {
             ContextSection {}
             for tab in RightPanelTab::ALL {
                 InspectorSection {
-                    key: "{tab.label()}",
+                    key: "{tab.label_key()}",
                     tab,
                     count: match tab {
                         RightPanelTab::Plan => task_count,
@@ -97,17 +97,17 @@ fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
         || *store.right_panel_tab.peek() == tab;
     let mut open = use_signal(|| initially_open);
     let (name, icon) = match tab {
-        RightPanelTab::Plan => ("Plan", icon_list_checks()),
-        RightPanelTab::Agents => ("Agents", icon_users()),
-        RightPanelTab::Git => ("Changes", icon_git_branch()),
-        RightPanelTab::Terminal => ("Terminal", icon_terminal()),
+        RightPanelTab::Plan => (store.t("inspector.plan"), icon_list_checks()),
+        RightPanelTab::Agents => (store.t("inspector.agents"), icon_users()),
+        RightPanelTab::Git => (store.t("inspector.changes"), icon_git_branch()),
+        RightPanelTab::Terminal => (store.t("inspector.terminal"), icon_terminal()),
     };
     rsx! {
         section {
             class: "inspector-section",
             button {
                 class: "section-head",
-                title: "{tab.label()}",
+                title: "{name}",
                 onclick: move |_| {
                     let mut store = store;
                     let next = !*open.read();
@@ -157,15 +157,15 @@ fn EnvironmentSection() -> Element {
         .and_then(|path| std::path::Path::new(path).file_name())
         .map(|name| name.to_string_lossy().to_string());
     let mode = match store.selected_mode.read().as_str() {
-        "plan" => "Plan",
-        "auto" => "Full Access",
-        _ => "Build",
+        "plan" => store.t("mode.plan"),
+        "auto" => store.t("mode.auto"),
+        _ => store.t("mode.build"),
     };
     let branch = branch.read().clone().flatten();
     rsx! {
         section {
             class: "inspector-section",
-            div { class: "section-label", "Environment" }
+            div { class: "section-label", "{store.t(\"inspector.environment\")}" }
             div {
                 class: "section-body",
                 if let Some(folder) = folder {
@@ -222,12 +222,12 @@ fn ContextSection() -> Element {
     rsx! {
         section {
             class: "inspector-section",
-            div { class: "section-label", "Context" }
+            div { class: "section-label", "{store.t(\"inspector.context\")}" }
             div {
                 class: "section-body",
                 div {
                     class: "info-row",
-                    span { class: "grow", "Window used" }
+                    span { class: "grow", "{store.t(\"inspector.window_used\")}" }
                     if let Some(percent) = percent {
                         span { class: "mono", "{percent}%" }
                     } else {
@@ -253,8 +253,8 @@ fn PlanTab() -> Element {
         return rsx! {
             EmptyState {
                 icon: icon_list_checks(),
-                title: "No plan yet",
-                hint: "Switch to Plan mode and ask for one.".to_string(),
+                title: store.t("inspector.no_plan"),
+                hint: store.t("inspector.no_plan_hint").to_string(),
             }
         };
     };
@@ -342,8 +342,8 @@ fn AgentsTab() -> Element {
         return rsx! {
             EmptyState {
                 icon: icon_users(),
-                title: "No sub-agents yet",
-                hint: "Agents the model spawns will show up here.".to_string(),
+                title: store.t("inspector.no_agents"),
+                hint: store.t("inspector.no_agents_hint").to_string(),
             }
         };
     }
@@ -476,7 +476,7 @@ fn GitTab() -> Element {
                 class: "panel-card",
                 div {
                     class: "panel-section-title",
-                    "Active Turn Diff ({files_changed} files)"
+                    "{store.tf(\"git.turn_diff\", &[&files_changed.to_string()])}"
                 }
                 crate::components::cards::DiffViewInline { diff: diff }
             }
@@ -491,9 +491,9 @@ fn GitTab() -> Element {
                             {icon_git_branch()}
                             span { class: "grow mono", "{git_status.branch.clone().unwrap_or_default()}" }
                             if git_status.has_changes.unwrap_or(false) {
-                                span { class: "tree-state dirty", "Uncommitted changes" }
+                                span { class: "tree-state dirty", "{store.t(\"git.dirty\")}" }
                             } else {
-                                span { class: "tree-state clean", "Clean" }
+                                span { class: "tree-state clean", "{store.t(\"git.clean\")}" }
                             }
                         }
                     }
@@ -502,10 +502,10 @@ fn GitTab() -> Element {
                             class: "panel-card",
                             div {
                                 class: "panel-row",
-                                span { class: "panel-section-title grow", "Changed files" }
+                                span { class: "panel-section-title grow", "{store.t(\"git.changed_files\")}" }
                                 button {
                                     class: "subtle small",
-                                    title: "Restore the project to the pre-turn snapshot (git)",
+                                    title: store.t("git.undo_title"),
                                     onclick: move |_| {
                                         let path = path_for_undo.clone();
                                         let run_id = active_run_id.clone();
@@ -514,14 +514,14 @@ fn GitTab() -> Element {
                                             let Some(path) = path else { return };
                                             match locagens_core::api::projects::undo_last_turn(&state, &path, run_id.as_deref()).await {
                                                 Ok(snapshot) => {
-                                                    store.toast(format!("Restored snapshot {}", snapshot.id));
+                                                    store.toast(store.tf("toast.restored", &[&snapshot.id]));
                                                 }
-                                                Err(err) => store.toast(format!("Undo failed: {err}")),
+                                                Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
                                             }
                                             version.with_mut(|value| *value += 1);
                                         });
                                     },
-                                    "Undo"
+                                    "{store.t(\"git.undo\")}"
                                 }
                                 button {
                                     class: "subtle small",
@@ -531,12 +531,12 @@ fn GitTab() -> Element {
                                             let state = core();
                                             let Some(path) = path else { return };
                                             if let Err(err) = locagens_core::api::projects::git_stage(&state, &path, &[]).await {
-                                                store.toast(format!("Stage failed: {err}"));
+                                                store.toast(store.tf("toast.stage_failed", &[&err.to_string()]));
                                             }
                                             version.with_mut(|value| *value += 1);
                                         });
                                     },
-                                    "Stage all"
+                                    "{store.t(\"git.stage_all\")}"
                                 }
                                 button {
                                     class: "subtle small",
@@ -546,12 +546,12 @@ fn GitTab() -> Element {
                                             let state = core();
                                             let Some(path) = path else { return };
                                             if let Err(err) = locagens_core::api::projects::git_unstage(&state, &path, &[]).await {
-                                                store.toast(format!("Unstage failed: {err}"));
+                                                store.toast(store.tf("toast.unstage_failed", &[&err.to_string()]));
                                             }
                                             version.with_mut(|value| *value += 1);
                                         });
                                     },
-                                    "Unstage all"
+                                    "{store.t(\"git.unstage_all\")}"
                                 }
                             }
                             for diff in changed_files.iter() {
@@ -591,12 +591,12 @@ fn GitTab() -> Element {
                                                         let state = core();
                                                         let Some(path) = path else { return };
                                                         if let Err(err) = locagens_core::api::projects::git_stage(&state, &path, &files).await {
-                                                            store.toast(format!("Stage failed: {err}"));
+                                                            store.toast(store.tf("toast.stage_failed", &[&err.to_string()]));
                                                         }
                                                         version.with_mut(|value| *value += 1);
                                                     });
                                                 },
-                                                "Stage"
+                                                "{store.t(\"git.stage\")}"
                                             }
                                             button {
                                                 class: "subtle small",
@@ -607,12 +607,12 @@ fn GitTab() -> Element {
                                                         let state = core();
                                                         let Some(path) = path else { return };
                                                         if let Err(err) = locagens_core::api::projects::git_unstage(&state, &path, &files).await {
-                                                            store.toast(format!("Unstage failed: {err}"));
+                                                            store.toast(store.tf("toast.unstage_failed", &[&err.to_string()]));
                                                         }
                                                         version.with_mut(|value| *value += 1);
                                                     });
                                                 },
-                                                "Unstage"
+                                                "{store.t(\"git.unstage\")}"
                                             }
                                         }
                                     }
@@ -625,7 +625,7 @@ fn GitTab() -> Element {
                             class: "panel-card",
                             div {
                                 class: "panel-section-title",
-                                "Diff · {diff_path}"
+                                "{store.t(\"git.diff\")} · {diff_path}"
                             }
                             DiffView { diff: diff_text }
                         }
@@ -634,12 +634,12 @@ fn GitTab() -> Element {
                         class: "panel-card",
                         div {
                             class: "panel-section-title",
-                            "Worktrees"
+                            "{store.t(\"git.worktrees\")}"
                         }
                         div {
                             class: "panel-row",
                             input {
-                                placeholder: "Branch…",
+                                placeholder: store.t("git.branch"),
                                 class: "grow",
                                 value: "{worktree_branch.read()}",
                                 oninput: move |event| worktree_branch.set(event.value()),
@@ -656,24 +656,24 @@ fn GitTab() -> Element {
                                         match locagens_core::api::projects::create_worktree(&state, &path, &branch, true).await {
                                             Ok(_) => {
                                                 worktree_branch.set(String::new());
-                                                store.toast(format!("Worktree created ({branch})"));
+                                                store.toast(store.tf("toast.worktree_created", &[&branch]));
                                                 store.refresh_projects();
                                             }
-                                            Err(err) => store.toast(format!("Worktree failed: {err}")),
+                                            Err(err) => store.toast(store.tf("toast.worktree_failed", &[&err.to_string()])),
                                         }
                                         version.with_mut(|value| *value += 1);
                                     });
                                 },
-                                {icon_plus()} "Worktree"
+                                {icon_plus()} "{store.t(\"git.worktree\")}"
                             }
                         }
                         if worktree_list.is_empty() {
-                            div { class: "empty-hint inline", "No worktrees." }
+                            div { class: "empty-hint inline", "{store.t(\"git.no_worktrees\")}" }
                         }
                         for worktree in worktree_list.iter() {
                             {
                                 let wt_path = worktree.path.clone();
-                                let wt_branch = worktree.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                                let wt_branch = worktree.branch.clone().unwrap_or_else(|| store.t("git.detached").to_string());
                                 let switch_path = worktree.path.clone();
                                 let remove_path = worktree.path.clone();
                                 let remove_project = project_path.clone();
@@ -695,7 +695,7 @@ fn GitTab() -> Element {
                                                             name: None,
                                                         },
                                                     ).await {
-                                                        store.toast(format!("Switch failed: {err}"));
+                                                        store.toast(store.tf("toast.switch_failed", &[&err.to_string()]));
                                                         return;
                                                     }
                                                     store.refresh_projects();
@@ -718,7 +718,7 @@ fn GitTab() -> Element {
                                         if !worktree.is_main {
                                             button {
                                                 class: "icon-btn danger",
-                                                title: "Remove worktree",
+                                                title: store.t("git.remove_worktree"),
                                                 onclick: move |_| {
                                                     let project = remove_project.clone();
                                                     let remove_path = remove_path.clone();
@@ -727,10 +727,10 @@ fn GitTab() -> Element {
                                                         let Some(project) = project else { return };
                                                         match locagens_core::api::projects::remove_worktree(&state, &project, &remove_path, false).await {
                                                             Ok(()) => {
-                                                                store.toast("Worktree removed".to_string());
+                                                                store.toast(store.t("toast.worktree_removed").to_string());
                                                                 store.refresh_projects();
                                                             }
-                                                            Err(err) => store.toast(format!("Remove failed: {err}")),
+                                                            Err(err) => store.toast(store.tf("toast.remove_failed", &[&err.to_string()])),
                                                         }
                                                         version.with_mut(|value| *value += 1);
                                                     });
@@ -746,7 +746,7 @@ fn GitTab() -> Element {
                     div {
                         class: "composer-row-top",
                         input {
-                            placeholder: "Commit message…",
+                            placeholder: store.t("git.commit_message"),
                             value: "{message.read()}",
                             oninput: move |event| message.set(event.value()),
                         }
@@ -773,16 +773,16 @@ fn GitTab() -> Element {
                                     )
                                     .await;
                                     if let Err(err) = result {
-                                        store.toast(format!("Commit failed: {err}"));
+                                        store.toast(store.tf("toast.commit_failed", &[&err.to_string()]));
                                     } else {
-                                        store.toast("Committed.".to_string());
+                                        store.toast(store.t("toast.committed").to_string());
                                         message.set(String::new());
                                     }
                                     busy.set(false);
                                     version.with_mut(|value| *value += 1);
                                 });
                             },
-                            "Commit"
+                            "{store.t(\"git.commit\")}"
                         }
                         button {
                             disabled: *busy.read(),
@@ -802,23 +802,23 @@ fn GitTab() -> Element {
                                     )
                                     .await;
                                     if let Err(err) = result {
-                                        store.toast(format!("Push failed: {err}"));
+                                        store.toast(store.tf("toast.push_failed", &[&err.to_string()]));
                                     } else {
-                                        store.toast("Pushed.".to_string());
+                                        store.toast(store.t("toast.pushed").to_string());
                                     }
                                     busy.set(false);
                                 });
                             },
-                            "Push"
+                            "{store.t(\"git.push\")}"
                         }
                     }
                 }
             }
             Some(_) => rsx! {
-                EmptyState { icon: icon_git_branch(), title: "Not a git repository", hint: "The selected folder has no git history.".to_string() }
+                EmptyState { icon: icon_git_branch(), title: store.t("git.not_repo"), hint: store.t("git.not_repo_hint").to_string() }
             },
             None => rsx! {
-                EmptyState { icon: icon_git_branch(), title: "No project selected", hint: "Select a project to inspect its changes.".to_string() }
+                EmptyState { icon: icon_git_branch(), title: store.t("git.no_project"), hint: store.t("git.no_project_hint").to_string() }
             },
         }
     }
@@ -896,7 +896,7 @@ fn TerminalTab() -> Element {
         div {
             class: "composer-row-top",
             input {
-                placeholder: "Command to run in the background…",
+                placeholder: store.t("term.command"),
                 value: "{command.read()}",
                 oninput: move |event| command.set(event.value()),
                 onkeydown: move |event: KeyboardEvent| {
@@ -922,7 +922,7 @@ fn TerminalTab() -> Element {
                                     selected.set(Some(info.id.clone()));
                                     version.with_mut(|value| *value += 1);
                                 }
-                                Err(err) => store.toast(format!("Failed to start: {err}")),
+                                Err(err) => store.toast(store.tf("toast.proc_start_failed", &[&err.to_string()])),
                             }
                             busy.set(false);
                         });
@@ -954,16 +954,16 @@ fn TerminalTab() -> Element {
                                 selected.set(Some(info.id.clone()));
                                 version.with_mut(|value| *value += 1);
                             }
-                            Err(err) => store.toast(format!("Failed to start: {err}")),
+                            Err(err) => store.toast(store.tf("toast.proc_start_failed", &[&err.to_string()])),
                         }
                         busy.set(false);
                     });
                 },
-                "Run"
+                "{store.t(\"term.run\")}"
             }
         }
         if process_list.is_empty() {
-            EmptyState { icon: icon_terminal(), title: "No processes", hint: "Run a command above to start one in the background.".to_string() }
+            EmptyState { icon: icon_terminal(), title: store.t("term.none"), hint: store.t("term.none_hint").to_string() }
         }
         for process in process_list.iter() {
             {
@@ -983,15 +983,15 @@ fn TerminalTab() -> Element {
                         }
                         button {
                             class: "icon-btn danger",
-                            title: "Stop process",
+                            title: store.t("term.stop"),
                             onclick: move |event: Event<MouseData>| {
                                 event.stop_propagation();
                                 let kill_id = kill_id.clone();
                                 spawn(async move {
                                     let state = core();
                                     match locagens_core::api::processes::kill_process(&state, &kill_id).await {
-                                        Ok(_) => store.toast("Process stopped.".to_string()),
-                                        Err(err) => store.toast(format!("Stop failed: {err}")),
+                                        Ok(_) => store.toast(store.t("toast.proc_stopped").to_string()),
+                                        Err(err) => store.toast(store.tf("toast.stop_proc_failed", &[&err.to_string()])),
                                     }
                                     version.with_mut(|value| *value += 1);
                                 });
@@ -1007,12 +1007,12 @@ fn TerminalTab() -> Element {
                 class: "panel-card",
                 div {
                     class: "panel-section-title",
-                    "Logs · {data.process.command}"
+                    "{store.t(\"term.logs\")} · {data.process.command}"
                 }
                 div {
                     class: "tool-output log-view",
                     if data.logs.is_empty() {
-                        "No output yet…"
+                        "{store.t(\"term.no_output\")}"
                     }
                     for (index, entry) in data.logs.iter().enumerate() {
                         div {

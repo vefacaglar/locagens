@@ -9,6 +9,8 @@
 //! the chosen mode and appends the static [`BASE_CSS`], which only reads
 //! tokens through `var(--…)`. Components never hard-code colours.
 
+use crate::prefs::{Appearance, CodeFont, ThemeChoice, UiFont};
+
 /// The CSS class applied to `.app-shell` for dark/light scoping.
 pub fn theme_class(dark_mode: bool) -> &'static str {
     if dark_mode {
@@ -18,7 +20,9 @@ pub fn theme_class(dark_mode: bool) -> &'static str {
     }
 }
 
-/// Builds the full stylesheet for the detected OS and the given dark mode.
+/// Builds the default-font stylesheet for the detected OS (tests only; the
+/// app uses [`build_stylesheet_appearance`]).
+#[cfg(test)]
 pub fn build_stylesheet(dark_mode: bool) -> String {
     build_stylesheet_for(std::env::consts::OS, dark_mode)
 }
@@ -113,26 +117,50 @@ const LIGHT_TOKENS: &str = "
   --syn-comment: #8b8b95;
 ";
 
-/// Builds the full stylesheet for an explicit platform (`"windows"`,
-/// `"macos"`, anything else = Linux/other) and the given dark mode. Split out
-/// of [`build_stylesheet`] so every platform's output is unit-testable.
+/// Builds the stylesheet for an explicit platform (`"windows"`, `"macos"`,
+/// anything else = Linux/other) and a fixed dark/light mode with the default
+/// fonts. Split out so every platform's output is unit-testable.
+#[cfg(test)]
 pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
-    let (font_ui, font_mono) = match platform {
-        "macos" => (
-            "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"SF Pro Display\", system-ui, sans-serif",
-            "\"SF Mono\", \"Menlo\", monospace",
-        ),
-        "windows" => (
-            "\"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif",
-            "\"Cascadia Code\", \"Consolas\", monospace",
-        ),
-        _ => (
-            "system-ui, \"Ubuntu\", \"Cantarell\", sans-serif",
-            "\"JetBrains Mono\", \"DejaVu Sans Mono\", monospace",
-        ),
+    let appearance = Appearance {
+        theme: if dark_mode { ThemeChoice::Dark } else { ThemeChoice::Light },
+        ..Appearance::default()
     };
-    let color_scheme = if dark_mode { "dark" } else { "light" };
-    let tokens = if dark_mode { DARK_TOKENS } else { LIGHT_TOKENS };
+    build_stylesheet_with(platform, &appearance)
+}
+
+/// Builds the stylesheet for the detected OS and the user's appearance.
+pub fn build_stylesheet_appearance(appearance: &Appearance) -> String {
+    build_stylesheet_with(std::env::consts::OS, appearance)
+}
+
+/// The full stylesheet: a `:root` block of tokens + font variables, then the
+/// static [`BASE_CSS`] with its pixel font sizes routed through `--font-scale`.
+/// `ThemeChoice::System` emits the dark tokens plus a
+/// `prefers-color-scheme: light` override, so the webview follows the OS
+/// without any script.
+pub fn build_stylesheet_with(platform: &str, appearance: &Appearance) -> String {
+    let platform_ui = match platform {
+        "macos" => "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"SF Pro Display\", system-ui, sans-serif",
+        "windows" => "\"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif",
+        _ => "system-ui, \"Ubuntu\", \"Cantarell\", sans-serif",
+    };
+    let platform_mono = match platform {
+        "macos" => "\"SF Mono\", \"Menlo\", ",
+        "windows" => "",
+        _ => "\"JetBrains Mono\", \"DejaVu Sans Mono\", ",
+    };
+    let font_ui = ui_font_stack(appearance, platform_ui);
+    let font_code = code_font_stack(appearance, platform_mono);
+    let mono_ui = appearance.ui_font == UiFont::CascadiaCode;
+    // A monospace UI font reads larger than a proportional one: shrink it.
+    let scale = format_scale(appearance.font_size.factor() * if mono_ui { 0.94 } else { 1.0 });
+    let ui_ligatures = if mono_ui { "none" } else { "normal" };
+    let (code_ligatures, code_features) = if appearance.code_ligatures {
+        ("normal", "\"calt\" 1, \"liga\" 1")
+    } else {
+        ("none", "\"calt\" 0, \"liga\" 0")
+    };
     // macOS traffic lights sit at x: 14..72 inside the full-size content view,
     // so the brand strip must clear them; other platforms draw their own
     // window controls (3 x 46px) at the top right.
@@ -141,10 +169,89 @@ pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
     } else {
         ("0 12px 0 14px", "144px")
     };
-
+    let vars = format!(
+        "  --font-ui: {font_ui};\n  --font-code: {font_code};\n  --font-mono: var(--font-code);\n  --font-scale: {scale};\n  --ui-ligatures: {ui_ligatures};\n  --code-ligatures: {code_ligatures};\n  --code-features: {code_features};\n  --brand-pad: {brand_pad};\n  --controls-w: {controls_w};"
+    );
+    let (scheme, tokens) = match appearance.theme {
+        ThemeChoice::Light => ("light", LIGHT_TOKENS),
+        ThemeChoice::Dark | ThemeChoice::System => ("dark", DARK_TOKENS),
+    };
+    let system_override = if appearance.theme == ThemeChoice::System {
+        format!("@media (prefers-color-scheme: light) {{\n:root {{\n  color-scheme: light;{LIGHT_TOKENS}}}\n}}\n")
+    } else {
+        String::new()
+    };
     format!(
-        ":root {{\n  color-scheme: {color_scheme};\n  --font-ui: {font_ui};\n  --font-mono: {font_mono};\n  --brand-pad: {brand_pad};\n  --controls-w: {controls_w};{tokens}}}\n{BASE_CSS}"
+        ":root {{\n  color-scheme: {scheme};\n{vars}{tokens}}}\n{system_override}{}",
+        scale_font_sizes(BASE_CSS)
     )
+}
+
+/// `0.94`, `1`, `1.1` — no trailing zeros.
+fn format_scale(scale: f32) -> String {
+    let text = format!("{scale:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Keeps only characters that are safe inside a quoted CSS font-family name.
+fn sanitize_family(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn ui_font_stack(appearance: &Appearance, platform_ui: &str) -> String {
+    match appearance.ui_font {
+        UiFont::System => platform_ui.to_string(),
+        UiFont::Inter => format!("\"Inter\", \"Inter Variable\", {platform_ui}"),
+        UiFont::Geist => format!("\"Geist\", \"Geist Variable\", {platform_ui}"),
+        UiFont::CascadiaCode => "\"Cascadia Code\", \"Cascadia Mono\", Consolas, monospace".to_string(),
+        UiFont::Custom => match sanitize_family(&appearance.ui_font_custom) {
+            name if name.is_empty() => platform_ui.to_string(),
+            name => format!("\"{name}\", {platform_ui}"),
+        },
+    }
+}
+
+fn code_font_stack(appearance: &Appearance, platform_mono: &str) -> String {
+    let tail = format!("\"Cascadia Mono\", Consolas, {platform_mono}monospace");
+    match appearance.code_font {
+        CodeFont::CascadiaCode => format!("\"Cascadia Code\", {tail}"),
+        CodeFont::JetBrainsMono => format!("\"JetBrains Mono\", {tail}"),
+        CodeFont::Consolas => format!("Consolas, \"Cascadia Mono\", {platform_mono}monospace"),
+        CodeFont::Custom => match sanitize_family(&appearance.code_font_custom) {
+            name if name.is_empty() => format!("\"Cascadia Code\", {tail}"),
+            name => format!("\"{name}\", {tail}"),
+        },
+    }
+}
+
+/// Rewrites every `font-size: <n>px` into `calc(<n>px * var(--font-scale))`
+/// so the whole UI follows the font-size setting.
+fn scale_font_sizes(css: &str) -> String {
+    const KEY: &str = "font-size:";
+    let mut out = String::with_capacity(css.len() + 4096);
+    let mut rest = css;
+    while let Some(pos) = rest.find(KEY) {
+        let (before, after) = rest.split_at(pos + KEY.len());
+        out.push_str(before);
+        let trimmed = after.trim_start();
+        let skipped = after.len() - trimmed.len();
+        let number_len = trimmed
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(trimmed.len());
+        if number_len > 0 && trimmed[number_len..].starts_with("px") {
+            out.push_str(&after[..skipped]);
+            out.push_str(&format!("calc({}px * var(--font-scale))", &trimmed[..number_len]));
+            rest = &trimmed[number_len + 2..];
+        } else {
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Static rules; every colour comes from the `:root` tokens above.
@@ -154,6 +261,7 @@ html, body { height: 100%; overflow: hidden; }
 body {
   font-family: var(--font-ui);
   font-size: 13px;
+  font-variant-ligatures: var(--ui-ligatures);
   line-height: 1.4;
   color: var(--text);
   background: var(--bg-app);
@@ -161,7 +269,22 @@ body {
   cursor: default;
 }
 #main { height: 100vh; width: 100vw; display: flex; overflow: hidden; }
-code, pre, .mono { font-family: var(--font-mono); }
+code, pre, .mono {
+  font-family: var(--font-code);
+  font-variant-ligatures: var(--code-ligatures);
+  font-feature-settings: var(--code-features);
+}
+.font-preview { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input); color: var(--text); }
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden; flex: none; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 5px 12px; color: var(--text-2); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.active { background: var(--accent-soft); color: var(--text); font-weight: 500; }
+.appearance-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.appearance-row .ar-label { font-weight: 500; color: var(--text); }
+.appearance-row .ar-desc { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.appearance-row .ar-controls { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.appearance-row .ar-controls input { width: 220px; }
+.appearance-preview-row { padding: 6px 0 14px; }
 
 /* Selectable text: chat content, alerts and inputs only. */
 .msg-user .bubble, .msg-user .bubble *,
@@ -938,6 +1061,77 @@ mod tests {
             .filter(|rest| rest.chars().take_while(|c| c.is_ascii_hexdigit()).count() >= 6)
             .count();
         assert!(hex_colours <= 4, "too many hard-coded colours in base rules: {hex_colours}");
+    }
+
+    fn with(change: impl FnOnce(&mut Appearance)) -> String {
+        let mut appearance = Appearance::default();
+        change(&mut appearance);
+        build_stylesheet_with("windows", &appearance)
+    }
+
+    #[test]
+    fn default_appearance_keeps_current_size_and_ligatures() {
+        let style = with(|_| {});
+        assert!(style.contains("--font-scale: 1;"));
+        assert!(style.contains("--ui-ligatures: normal;"));
+        assert!(style.contains("--code-ligatures: normal;"));
+        assert!(style.contains("--font-code: \"Cascadia Code\", \"Cascadia Mono\", Consolas, monospace;"));
+        assert!(style.contains("--font-mono: var(--font-code);"));
+    }
+
+    #[test]
+    fn chosen_ui_and_code_fonts_land_in_the_stacks() {
+        let style = with(|a| {
+            a.ui_font = UiFont::Inter;
+            a.code_font = CodeFont::JetBrainsMono;
+        });
+        assert!(style.contains("--font-ui: \"Inter\", \"Inter Variable\", \"Segoe UI Variable Text\""));
+        assert!(style.contains("--font-code: \"JetBrains Mono\", \"Cascadia Mono\", Consolas, monospace;"));
+        let style = with(|a| {
+            a.ui_font = UiFont::Custom;
+            a.ui_font_custom = "My Font\"; } body { x: y".into();
+            a.code_font = CodeFont::Custom;
+            a.code_font_custom = "Fira Code".into();
+        });
+        assert!(style.contains("--font-ui: \"My Font  body  x y\", "), "custom family must be sanitized");
+        assert!(!style.contains("} body { x"));
+        assert!(style.contains("--font-code: \"Fira Code\", \"Cascadia Mono\""));
+    }
+
+    #[test]
+    fn monospace_ui_font_shrinks_and_drops_ligatures() {
+        let style = with(|a| a.ui_font = UiFont::CascadiaCode);
+        assert!(style.contains("--font-ui: \"Cascadia Code\", \"Cascadia Mono\", Consolas, monospace;"));
+        assert!(style.contains("--font-scale: 0.94;"));
+        assert!(style.contains("--ui-ligatures: none;"));
+    }
+
+    #[test]
+    fn code_ligature_toggle_changes_the_rules() {
+        let on = with(|a| a.code_ligatures = true);
+        let off = with(|a| a.code_ligatures = false);
+        assert!(on.contains("--code-features: \"calt\" 1, \"liga\" 1;"));
+        assert!(off.contains("--code-ligatures: none;") && off.contains("--code-features: \"calt\" 0, \"liga\" 0;"));
+        assert!(on.contains("font-variant-ligatures: var(--code-ligatures);"));
+    }
+
+    #[test]
+    fn font_size_scales_root_variable_and_pixel_sizes() {
+        assert!(with(|a| a.font_size = crate::prefs::FontSize::Small).contains("--font-scale: 0.92;"));
+        let large = with(|a| a.font_size = crate::prefs::FontSize::Large);
+        assert!(large.contains("--font-scale: 1.1;"));
+        assert!(large.contains("font-size: calc(13px * var(--font-scale));"));
+        assert!(!large.contains("font-size: 13px;"));
+    }
+
+    #[test]
+    fn system_theme_follows_prefers_color_scheme() {
+        let system = with(|a| a.theme = ThemeChoice::System);
+        assert!(system.contains("@media (prefers-color-scheme: light)"));
+        assert!(system.contains("--bg-chat: #ffffff;") && system.contains("--bg-app: #0e0e10;"));
+        for theme in [ThemeChoice::Dark, ThemeChoice::Light] {
+            assert!(!with(|a| a.theme = theme).contains("prefers-color-scheme"));
+        }
     }
 
     #[test]
