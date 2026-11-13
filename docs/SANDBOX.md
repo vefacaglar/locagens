@@ -56,7 +56,9 @@ every agent dir (`~/.locagens`, `~/.codex`, `~/.pi/agent`) `auth.json`,
 - **Linux:** bwrap mounts an empty tmpfs over directories and `/dev/null` over
   files (after the workspace mounts; a directory that contains the workspace
   or a writable root is never masked).
-- **Windows:** see "Not covered on Windows" below.
+- **Windows:** each existing path gets a Medium mandatory label with
+  no-read-up and no-write-up while the command runs at Low integrity, so it
+  cannot be read, written, deleted or renamed (see "Windows backend").
 
 The rest of this document describes the Windows backend (`crates/execpolicy/src/windows_sandbox/`) and the per-domain
 network proxy (`crates/execpolicy/src/network_proxy.rs`).
@@ -80,8 +82,14 @@ accounts.
    user's own token with `DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED`
    and the restricting SIDs `[capability SID, logon-session SID, Everyone]`.
    Reads are checked as usual; every *write* must also be granted to one of
-   the restricting SIDs. The token's default DACL grants the logon session
-   full access so the child (and Locagens) can use the objects it creates.
+   the restricting SIDs. The token is then lowered to **Low integrity**
+   (`S-1-16-4096`): unlabeled objects count as Medium, so the mandatory
+   integrity check refuses every write-type right on them (write, append,
+   `DELETE`, delete-child, `WRITE_DAC`, hard links) before the DACL is
+   consulted. This closes what the write-restricted check alone misses
+   (deletes, renames and moves outside the workspace). The token's default
+   DACL grants the logon session full access so the child (and Locagens) can
+   use the objects it creates.
 5. **Process** (`windows_sandbox/process.rs`): `CreateProcessAsUserW` with
    piped stdin/stdout/stderr, `CREATE_NO_WINDOW`, desktop `Winsta0\Default`,
    an explicit inheritable-handle list (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`)
@@ -120,6 +128,13 @@ All changes only name the sandbox capability SID. Existing ACEs are kept.
 | `<workspace>\.locagens` | created if missing; explicit inheritable **deny** ACE: write data, append, write EA/attributes, delete, delete child. |
 | `<workspace>\.git\hooks` | same deny ACE (only if it exists). |
 | `<workspace>\.git\config` | same deny ACE, not inheritable (only if it exists). |
+| `<workspace>`, the sandbox temp dir, extra writable roots | inheritable **Low** mandatory label (so the Low-integrity child may write there). |
+| `.locagens`, `.git\hooks`, `.git\config` | explicit **Medium** label (no write-up), on top of the deny ACE. |
+| existing credential paths (`execpolicy::secret_paths`, also in read-only mode) | **Medium** label with no-read-up + no-write-up: unreadable and unchangeable for the sandboxed child; Medium-or-higher processes (the user's own) are unaffected. |
+
+Labels are only written when they differ and `revoke_workspace_access` removes
+exactly the labels it wrote. Setting a label needs no admin rights; if it fails
+(no `WRITE_OWNER` on a path) the command is refused.
 
 The capability SID has the shape `S-1-5-21-a-b-c-d` and is derived from the
 lowercased workspace path (`plan::capability_sid_for`), so every workspace
@@ -138,15 +153,18 @@ temp dir). Manually: `icacls "<workspace>"` lists the entry as a raw
 
 ### Not covered on Windows
 
-- **Reads** are not restricted (same as Codex's non-elevated backend and the
-  macOS profile's `file-read*`): a sandboxed command can read anything the
-  user can.
+- **Reads** are restricted only for the known credential paths above: other
+  files the user can read (`.env` files of other projects, documents) stay
+  readable, as on Codex's non-elevated backend.
+- **Deletes inside folders that are already Low-labeled** (another workspace
+  used with the sandbox earlier, its sandbox temp dir, `AppData\LocalLow`,
+  app-container data) still succeed; writes there are blocked by the
+  capability-SID check.
 - **Network approval is best-effort on Windows** (the permission card and
-  the security tab say so). `NO_PROXY` also exposes local services. Deny-read
-  ACEs for `~/.locagens` or `.ssh` are not possible with this token model:
-  `WRITE_RESTRICTED` applies the restricting-SID check to writes only, so an
-  ACE naming the capability SID never affects reads. Only dedicated sandbox
-  user accounts (the elevated Codex backend) would close this.
+  the security tab say so). `NO_PROXY` also exposes local services. (A
+  deny-read ACE naming the capability SID has no effect under
+  `WRITE_RESTRICTED`; credential reads are blocked with the integrity label
+  instead.)
 - **Network isolation is proxy-based only.** Programs that ignore the proxy
   variables (raw sockets, some native tools) can still connect directly.
   Codex blocks that with dedicated sandbox user accounts plus Windows
@@ -276,7 +294,8 @@ approved command starts a shell or REPL (`cmd`, `powershell`/`pwsh`,
 `bash`/`sh`/`zsh`/`fish`, `python`, `node`, database or remote shells,
 `docker exec -it`, ... — also behind `env` / `sudo` / `cd x &&` wrappers;
 unknown cases count as a shell), every submitted line (up to `
-` / ``)
+` / `
+`)
 is classified like an `exec_command` outside Full Access: forbidden lines are
 blocked, known-safe lines and exact standing grants / Allow-for-Run pass,
 dangerous lines always prompt and are approved once, everything else
