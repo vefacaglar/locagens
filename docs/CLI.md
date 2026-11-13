@@ -1,9 +1,8 @@
 # `lcgn` — the Locagens CLI
 
-`lcgn` is a pi-like command line for Locagens. It runs the **same Rust core as
-the desktop app** (orchestrator, `PiProviderManager` tools, permission flow,
-file-based sessions) **in-process** — no HTTP server and no spawned `pi`
-process. Sessions it creates are normal Locagens runs, so they show up in the
+`lcgn` is the Locagens command line. It runs the **same Rust core as the
+desktop app** (orchestrator, `PiProviderManager`, tools, permission flow,
+file-based sessions) **in-process** — no HTTP server and no helper process. Sessions it creates are normal Locagens runs, so they show up in the
 desktop app and can be continued from there.
 
 ## Install / build
@@ -34,14 +33,21 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
   (reasoning, tool lines like `✔ read_file src/main.rs`, sub-agent text tagged
   `[name]`, usage/cost) to **stderr** — so `lcgn -p "..." > out.txt` captures
   only the answer. Consecutive assistant messages are separated by a newline.
-- `--mode json` prints one JSON event per line on stdout (the same run-event
-  objects the SSE endpoint emits).
+- `--mode json` prints one JSON event per line on stdout (the run-event
+  objects of `locagens_core::api`, see `docs/CORE_API.md`).
 - Exit codes: `0` success, `1` run failed/cancelled, `2` usage or
   configuration error (unknown model, provider not authenticated, …).
-- Without `--approve`, dangerous tool calls (`run_command`, `fetch_url`, file
-  mutations in ask-permissions flows) are **denied with a message** unless a
-  standing grant exists in `permissions.json`. Use `-a/--approve` for full
-  access, or drop `-p` to approve interactively.
+- `-p` runs in Build mode (`accept_edits`) unless config.toml or a flag says otherwise. Without `--approve`, every call
+  that needs a permission prompt is **denied with a message** unless a
+  standing grant exists in `permissions.json`. The gated tools are
+  `run_command`, `exec_command`, `write_stdin` and `fetch_url`; known-safe
+  commands (read-only ones such as `git status`) and commands a `.rules` file
+  allows run without a prompt. Dangerous commands (`rm -rf`, `git reset --hard`,
+  ...) and writes to protected paths (`.git`, `.locagens`, `.codex`,
+  `.agents`) are always denied here, even with a standing grant, because they
+  need a live per-call answer. Use `-a/--approve` (Full Access) to skip
+  prompts, or drop `-p` to approve interactively. See the README for the full
+  gating rules.
 
 ## Project trust
 
@@ -126,8 +132,11 @@ Slash commands (TUI and REPL):
                        popup of targets: uncommitted changes, branches, commits
 /sessions              list sessions for this directory
 /usage                 usage/cost of the current session
-/help, /exit
+/help
+/exit                  (alias /quit)
 ```
+
+`/clear` is an alias of `/new`. `/help` lists the commands and key bindings.
 
 `/new`, `/fork`, `/undo` and `/review` are refused while a run is generating
 (Esc interrupts it first). The commands are parsed and executed by one shared
@@ -141,8 +150,11 @@ replayed (`cli/events.rs`).
 ## Code review
 
 `lcgn review` reviews code changes on the selected model in a read-only run
-(chat mode: file read/search tools only, no edits, no commands; the diff is
-gathered with read-only `git` and handed to the model). The result is
+(chat mode: the model gets `read_file`, `list_directory`, `search_files`,
+`view_image`, `load_skill`, `remember`, `set_chat_title`, `compact_context`,
+the question tools, the MCP resource tools, `get_context_remaining` and
+`host_executable`, but no edits, commands or network; the diff is gathered
+with read-only `git` and handed to the model). The result is
 structured: findings with title, priority (`P0`..`P3`), confidence, file and
 line range, plus an overall verdict.
 
@@ -156,8 +168,13 @@ lcgn review --base main --mode json                           # events as JSON l
 ```
 
 Findings print to stdout (progress on stderr); the exit code is 0 when the
-review ran, whatever it found. `--model`, `--provider`, `--thinking`, `--cwd`
-and `--mode` work before or after `review`. The review is stored as a normal
+review ran, whatever it found. A model is required: without `--model` (or a
+default in `config.toml`) it exits 2, as it does for an unauthenticated
+provider or an invalid target (not a git repo, no changes, unknown branch or
+commit). A failed or cancelled review exits 1 and prints no findings; in
+`--mode json` the final `review_completed` line is emitted only when the run
+succeeded. `--model`, `--provider`, `--thinking`, `--cwd` and `--mode` work
+before or after `review`. The review is stored as a normal
 session titled `Review: ...`; the last assistant message carries the
 structured result in `rawResponse` (`{"kind":"review_output", ...}`), so it
 reopens after a restart. In the REPL/TUI, `/review` starts a review the same
@@ -194,8 +211,11 @@ lcgn --provider opencode-go --model glm-5.3-flash
 
 ## Auth
 
-Credentials live in `~/.pi/agent/auth.json`, shared with `pi` and the desktop
-app. Keys are prompted with no echo when `--api-key` is omitted.
+Credentials are written to `~/.locagens/auth.json` (`$LOCAGENS_HOME`), shared
+with the desktop app; `~/.codex` and `~/.pi/agent` are read-only fallbacks.
+For an API-key provider the key is prompted with no echo when `--api-key` is
+omitted; OAuth providers (below) start a browser or device flow instead.
+Anthropic is API key only.
 
 ```powershell
 lcgn auth                       # provider table (id, name, sign-in method, status) + usage hint
@@ -217,7 +237,7 @@ the table and exits 2.
 
 `lcgn auth login xai` prints a verification URL and a code, opens the URL in
 your browser (https only), and waits for approval (Ctrl+C cancels). The OAuth
-credential is written to `~/.locagens/auth.json` in pi's format
+credential is written to `~/.locagens/auth.json`
 (`type: "oauth"`, `access`, `refresh`, `expires`) and refreshed automatically
 before it expires. Pass `--api-key` to store an API key instead.
 
@@ -288,6 +308,10 @@ lcgn [options] [@files...] [messages...]
   --profile <name>             Config profile from config.toml [profiles.<name>]
   config [show]                Print the effective config.toml (secrets masked)
   trust [PATH] [--revoke|--status]  Persist or inspect project trust
+  mcp list|login|logout        MCP servers and their OAuth sign-in
+  review [--uncommitted|--base B|--commit SHA] [text]  Read-only code review
+  sessions [--json]            List sessions for this directory
+  auth [login|logout|check]    Provider credentials
   -v, --version, -h, --help
 ```
 
@@ -322,11 +346,10 @@ warning rather than failing `lcgn`; a broken `~/.locagens/config.toml` still
 fails and names the file. `--provider X` without `--model` no longer borrows the
 `model` of another provider from `config.toml`.
 
-## Auth & providers (Codex / Locagens compatible)
+## Credential fallbacks
 
-`lcgn auth login` stores credentials in `~/.locagens/auth.json`
-(`$LOCAGENS_HOME`). Reads fall back to Codex's `~/.codex/auth.json`
-(`OPENAI_API_KEY`, `config.toml` `[model_providers.*]`) and the legacy
+Reads fall back from `~/.locagens` to Codex's `~/.codex/auth.json`
+(`OPENAI_API_KEY`, `config.toml` `[model_providers.*]`) and
 `~/.pi/agent/auth.json` / `models.json`, plus OpenCode's `auth.json` (API
 keys only, lowest precedence), so existing credentials on the machine keep
-working out of the box.
+working. Only `~/.locagens` is ever written.

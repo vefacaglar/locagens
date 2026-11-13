@@ -1,19 +1,28 @@
 # Locagens — Release Guide
 
 How to release the Locagens desktop app and CLI. The product is **100% pure
-Rust**: `apps/backend` (`locagens_core` library + `lcgn` CLI) and
-`apps/desktop-rs` (native Dioxus 0.7 desktop app, binary `locagens`). There is
-no Node.js, no Electron, no Vue web app, and no HTTP server to release.
+Rust**, released as two binaries:
+
+| Crate | Path | Binary |
+| --- | --- | --- |
+| `locagens-cli` | `apps/cli` | `lcgn` (the CLI; its code lives in the `locagens-core` library) |
+| `locagens-desktop` | `apps/desktop-rs` | `locagens` (native Dioxus 0.7 desktop app) |
+
+`locagens-core` (`crates/core`) and the other `crates/*` are internal libraries
+and are not versioned per release. Versions are **not** workspace-inherited:
+`apps/cli/Cargo.toml` and `apps/desktop-rs/Cargo.toml` each carry their own
+`version`. There is no Node.js, Electron, web app or HTTP server to release.
 
 ---
 
 ## Method 1: Recommended (tag-triggered release)
 
-1. Bump the `version` fields in `apps/backend/Cargo.toml` and
-   `apps/desktop-rs/Cargo.toml` (e.g. `0.2.0` → `0.3.0`).
+1. Bump the `version` fields in `apps/cli/Cargo.toml` and
+   `apps/desktop-rs/Cargo.toml` (e.g. `0.2.0` → `0.3.0`), then refresh the
+   lock file with `cargo check --workspace`.
 2. Commit:
    ```bash
-   git add apps/backend/Cargo.toml apps/desktop-rs/Cargo.toml
+   git add apps/cli/Cargo.toml apps/desktop-rs/Cargo.toml Cargo.lock
    git commit -m "bump: v0.3.0"
    ```
 3. Tag and push:
@@ -21,7 +30,11 @@ no Node.js, no Electron, no Vue web app, and no HTTP server to release.
    git tag v0.3.0
    git push origin v0.3.0
    ```
-4. GitHub Actions triggers **"Release (macOS & Windows binaries)"**, which:
+4. GitHub Actions triggers **"Release (macOS & Windows binaries)"**
+   (`.github/workflows/release-mac.yml`), which:
+   - Rewrites the first `version` line of `apps/cli/Cargo.toml` and
+     `apps/desktop-rs/Cargo.toml` from the tag, so the binaries carry the tag
+     version even if step 1 was skipped.
    - Builds `locagens` (desktop) and `lcgn` (CLI) release binaries for
      `aarch64-apple-darwin`, `x86_64-apple-darwin` and
      `x86_64-pc-windows-msvc`.
@@ -43,7 +56,7 @@ To build without creating a release:
    (kept for 14 days).
 
 If you enter a `tag_name` on manual dispatch (e.g. `v0.3.1`), the workflow
-bumps the crate versions, builds, and creates a GitHub Release with that tag.
+sets the crate versions, builds, and creates a GitHub Release with that tag.
 
 ---
 
@@ -52,12 +65,12 @@ bumps the crate versions, builds, and creates a GitHub Release with that tag.
 Everything builds with cargo alone:
 
 ```bash
-cargo build --release -p locagens-backend   # lcgn CLI
+cargo build --release -p locagens-cli       # lcgn CLI
 cargo build --release -p locagens-desktop   # locagens desktop app
 ```
 
 Binaries land in `target/release/` (`lcgn` / `lcgn.exe`, `locagens` /
-`locagens.exe`).
+`locagens.exe`). Before tagging, run `cargo test --workspace`.
 
 ---
 
@@ -83,5 +96,5 @@ GitHub Releases page.
 
 ## Platform support
 
-macOS (Apple Silicon + Intel) and Windows (x86_64 MSVC). Linux support may be
-added later.
+Release binaries: macOS (Apple Silicon + Intel) and Windows (x86_64 MSVC).
+The code builds on Linux (CI) but no Linux release binary is published yet.

@@ -1,259 +1,225 @@
 # Locagens
 
-Locagens is a local-first workspace assistant for local projects — 100% pure
-Rust, no Node.js, no Electron, no web frontend, no HTTP server.
+Locagens is a local-first AI coding agent written in pure Rust (no Node.js,
+Electron, web frontend, SQLite or HTTP server). You pick one provider/model and
+a project folder, send a task, and the model works it with workspace tools
+until it returns a final answer. Everything runs in-process on your machine;
+there is no telemetry.
 
-The user selects one provider/model, chooses a project folder, sends a task, and
-the in-process orchestrator runs a tool-calling chat loop. The assistant can
-read, edit, create, move, delete, and search files inside the selected
-workspace. It can also ask for permission to run commands or fetch URLs.
+It ships as:
 
-The product is a **single-model workspace agent**: one provider/model drives the
-whole run, and the agent can fan work out to sub-agents with `spawn_agents`
-(`explorer` read-only research / `worker` full workspace tools). The UI is a
-native Rust desktop app built with Dioxus.
+- a native desktop app (Dioxus 0.7, binary `locagens`),
+- `lcgn`, a command line with a full-screen terminal UI (ratatui), a plain
+  line REPL, one-shot `-p` runs and `lcgn review`.
 
-```txt
-User Task
-  -> Selected Model
-  -> Optional Workspace Tool Calls
-  -> Optional spawn_agents Fan-Out (explorer / worker)
-  -> Tool Results Back To Model
-  -> Final Assistant Response
-```
-
-## Current Features
+Both use the same core (`locagens_core`) and the same on-disk store, so a
+session started in one shows up in the other.
 
 ```txt
-Native Rust desktop UI (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
-Rust core (modular crates/* + apps/cli `lcgn`) built on top of pi
-in-process typed API facade (locagens_core::api, see docs/CORE_API.md)
-Codex-style persistence under ~/.locagens: append-only JSONL session rollouts, Markdown memories (no SQLite)
-pi provider engine (~/.pi/agent/auth.json & models.json, models-store.json)
-OpenAI-compatible provider adapter
-Anthropic provider adapter
-provider config in pi's agent directory (not the project)
-API keys live in auth.json (literal, !command, $ENV_VAR, or OAuth), never in app data
-per-model context limits and tiered pricing -> local cost / usage logs
-reasoning-effort conversion per model (reasoningWire)
-single provider/model run creation with `spawn_agents` fan-out
-build, plan, and full-access modes
-workspace filesystem + web search tools
-ask_user_question multiple-choice flow
-two-tier persistent memory (global + project)
-skill loading (SKILL.md packs via load_skill; Settings → Skills)
-permission flow for commands and URL fetches
-live event stream (in-process channels, no SSE / HTTP)
-run/message/project/permission/memory/usage persistence
-right-hand plan panel
-lcgn CLI (pi-like command line on the same Rust core)
+User task -> selected model -> workspace tool calls (permission-gated)
+          -> optional sub-agents (explorer / worker)
+          -> tool results back to the model -> final answer
 ```
 
-## Tech Stack
+Runs are single-model: one provider/model drives the whole run, and the main
+agent can fan work out to sub-agents on the same model. There are no agent
+presets and no coder/utility model tiers.
+
+## Layout
 
 ```txt
-Desktop: native Rust app (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
-Core:    Rust (Tokio) modular workspace (crates/*) built directly on top of
-         pi (apps/cli `lcgn`, apps/desktop-rs `locagens`)
-API:     in-process typed facade (locagens_core::api, docs/CORE_API.md)
-Storage: Codex-style rollouts (~/.locagens/sessions/YYYY/MM/DD/rollout-*.jsonl, session_index.jsonl, history.jsonl, memories/*.md; no SQLite)
-Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
-Package manager: cargo (backend/desktop)
-Repository style: monorepo
+crates/protocol      locagens-protocol: shared data types, ApprovalPolicy, SandboxMode
+crates/apply-patch   locagens-apply-patch: Codex `*** Begin Patch` parser/applier
+crates/execpolicy    locagens-execpolicy: command safety, .rules policy, sandboxes,
+                     network proxy, ProcessManager
+crates/config        locagens-config: paths, config.toml, auth.json, provider/model catalog
+crates/context       locagens-context: AGENTS.md discovery, <environment_context>,
+                     TurnDiffTracker
+crates/core          locagens-core (lib locagens_core):
+  src/api/             typed in-process facade (docs/CORE_API.md)
+  src/orchestrator/    run driver, streaming LLM client, tools, compaction, agents
+  src/services/        processes, plugins, hooks, skills, symbols, MCP, project trust
+  src/cli/             lcgn implementation (args, REPL, TUI, runner, review, auth)
+  src/db.rs            file-based JSON/JSONL store
+apps/cli             locagens-cli, binary `lcgn` (thin entry into locagens_core::cli)
+apps/desktop-rs      locagens-desktop, binary `locagens`
+docs/                CORE_API.md, CLI.md, CONFIG.md, HOOKS.md, SANDBOX.md,
+                     database-schema.md, RELEASING.md
 ```
 
-## Project Structure
-
-```txt
-locagens/
-  crates/
-    protocol/              locagens-protocol: shared data models, ApprovalPolicy,
-                           SandboxMode
-    apply-patch/           locagens-apply-patch: Codex `*** Begin Patch` parser,
-                           seek_sequence fuzzy matcher, unified diff generator
-    execpolicy/            locagens-execpolicy: command_safety classifier +
-                           ProcessManager
-    config/                locagens-config: ~/.locagens + ~/.codex config.toml &
-                           auth.json, provider/model catalog
-    context/               locagens-context: hierarchical AGENTS.md discovery,
-                           <environment_context>, TurnDiffTracker
-    core/                  locagens-core: orchestrator, OpenAI Responses + Chat
-                           Completions + Anthropic SSE streaming, tools,
-                           MCP/skills/plugins/symbols, in-process
-                           locagens_core::api facade
-  apps/
-    cli/                   locagens-cli, binary `lcgn` (args, repl, runner, render)
-    desktop-rs/            native Dioxus 0.7 desktop app (binary `locagens`)
-      src/
-  docs/                    CORE_API.md, CLI.md, RELEASING.md, database-schema.md
-  Agents.md  Claude.md  GEMINI.md  README.md
-```
-
-## Provider Configuration
-
-The core is built directly on top of `pi` and reads/writes `pi`'s configuration
-files under the `pi` agent directory (`~/.pi/agent`, overridable via
-`PI_CODING_AGENT_DIR`), not in the project:
-
-```txt
-~/.pi/agent/auth.json           provider id -> credential
-                                ({ "type": "api_key", "key": "..." },
-                                 "!command", "$ENV_VAR", or OAuth)
-~/.pi/agent/models.json         custom provider configs & model overrides
-~/.pi/agent/models-store.json   pi's cached dynamic model catalog
-```
-
-Locagens UI metadata lives under the OS app-support directory:
-
-```txt
-locagens-providers-meta.json    display names / model settings
-```
-
-API keys never enter the app data or session files — credentials live only in
-`auth.json` (or environment variables via the fallback chain such as
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …).
-
-Example `auth.json`:
-
-```json
-{
-  "openai": { "type": "api_key", "key": "sk-..." },
-  "anthropic": { "type": "api_key", "key": "$ANTHROPIC_API_KEY" }
-}
-```
-
-Public provider metadata omits credentials. Provider settings return editable
-config with the API key masked by a preserve marker
-(`__LOCAGENS_PRESERVE_API_KEY__`), so the UI can edit other fields without
-receiving or re-posting the secret.
-
-Locagens model settings may carry a `reasoning` effort, a `contextLimit`, and
-`pricing` (tiered input/output/cache rates per 1M tokens). Cost is computed
-locally from these rates and the provider's reported token counts, then stored
-per call as `usage` lines of the run rollout. A model with no configured pricing costs 0.
-
-## Modes
-
-```txt
-Build         applies file edits directly through workspace tools
-Plan          writes a stable plan to the plan panel; no file mutations
-Full Access   autonomous build; still gates dangerous tools
-```
-
-The core also keeps `chat`, `ask_permissions`, and `auto` modes for older
-persisted runs, but the UI only exposes the three above. `run_command`,
-`fetch_url`, and `search_web` always require permission unless a matching
-standing grant exists.
-
-When the main agent fans work out with `spawn_agents`, `explorer` sub-agents get
-read-only tools (read, list, search) and `worker` sub-agents get the full
-workspace toolset. Sub-agents run with the run's own model and depth is capped
-at 1 (sub-agents cannot spawn further agents).
-
-## Workspace Tools
-
-The orchestrator exposes:
-
-```txt
-write_file
-edit_file
-delete_file
-read_file
-list_directory
-create_directory
-move_file
-search_files
-run_command
-fetch_url
-search_web
-set_chat_title
-ask_user_question
-remember
-update_plan            (plan mode)
-spawn_agents           (explorer / worker fan-out)
-```
-
-All file paths are resolved relative to the selected project folder and cannot
-escape it.
-
-## Command line (`lcgn`)
-
-Locagens ships a pi-like CLI that runs the same Rust core in-process:
+## Build and run
 
 ```bash
-lcgn -p "say OK" --model opencode-go/glm-5.3-flash --no-tools
-lcgn --model opencode-go/glm-5.3-flash        # interactive REPL
-lcgn --list-models                            # table of authenticated models
-lcgn auth login opencode-go                   # store a key in ~/.pi/agent/auth.json
-lcgn -c "keep going"                          # continue the most recent session
-```
-
-Sessions are normal Locagens runs, so they also appear in the desktop app.
-See `docs/CLI.md` for the full flag reference.
-
-## Development
-
-Everything builds with cargo alone — no Node.js, pnpm, or Electron:
-
-```bash
-cargo test -p locagens-cli
-cargo build --release -p locagens-cli
-cargo run -p locagens-cli --bin lcgn -- -p "say OK"
+cargo check --workspace
+cargo test --workspace
 cargo run -p locagens-desktop
+cargo run -p locagens-cli --bin lcgn -- -p "say OK" --model <provider/model>
+cargo build --release -p locagens-cli -p locagens-desktop
 ```
 
-## Phase 9 — Codex Harness Architecture (implemented)
+On Windows with the GNU toolchain, put `w64devkit` on `PATH` and use
+`rustup run stable-x86_64-pc-windows-gnu cargo ...` (see `state.md`).
 
-Locagens now ships the Codex tool harness (ported from `codex-rs`):
+## Configuration, providers and logins
 
-- **`apply_patch`** (`crates/apply-patch`): full `*** Begin Patch` …
-  `*** End Patch` parser (add / delete / update / move, multi-chunk updates,
-  `@@ context`, `*** End of File`), the fuzzy `seek_sequence` matcher (exact →
-  `trim_end` → `trim` → Unicode-punctuation normalization), workspace-safe
-  application, `preview_patch` and Codex's exact
-  `Success. Updated the following files:` summary. Every target/move path is
-  validated through `safe_path`, so patches cannot escape the workspace.
-- **`exec_command` / `write_stdin`** (unified exec): commands run through the
-  ProcessManager with a secret-stripped environment; they return
-  `{ exit_code, output, wall_time_ms }` when they finish within
-  `yield_time_ms` (default 10000 ms, clamped 500..60000) and otherwise
-  register an interactive session the model can drive with `write_stdin`.
-- **Command safety & policy** (`crates/execpolicy`): Codex's
-  `ApprovalPolicy` (`untrusted` / `on-request` / `on-failure` / `never`) and
-  `SandboxMode` (`read-only` / `workspace-write` / `danger-full-access`)
-  mapped from Locagens modes (`chat`/`plan` → read-only, `accept_edits` →
-  workspace-write + on-request, `ask_permissions` → untrusted, `auto` →
-  danger-full-access + never). Known-safe read-only commands (`git status`,
-  `rg`, `cargo check`, …) run without prompting in `accept_edits`; dangerous
-  commands (`rm -rf`, `git reset --hard`, `sudo`, …) always prompt.
-- **Hierarchical `AGENTS.md` discovery** (`crates/context`): walks
-  from the git root down to the cwd picking at most one doc per level
-  (`AGENTS.override.md` > `AGENTS.md` > `CLAUDE.md` > `.agents.md`), joined
-  with `
+The agent directory chain is, primary first: `~/.locagens` (`$LOCAGENS_HOME`),
+then `~/.codex` (`$CODEX_HOME`) and `~/.pi/agent` (`$PI_CODING_AGENT_DIR`) as
+**read-only fallbacks**. New credentials and settings are written to
+`~/.locagens`; nothing is stored in the project or in app data.
 
---- project-doc ---
+```txt
+~/.locagens/auth.json         provider id -> credential
+                              (literal key, "!command", "$ENV_VAR", or OAuth tokens)
+~/.locagens/models.json       custom providers and model overrides
+~/.locagens/config.toml       Codex-compatible subset, see docs/CONFIG.md
+~/.locagens/hooks.json        lifecycle hooks, see docs/HOOKS.md
+~/.locagens/mcp-oauth.json    MCP OAuth tokens
+```
 
-` under a 32 KiB budget and injected into
-  the system prompt.
-- **`<environment_context>`** (`crates/context`): Codex-format
-  XML block (cwd / shell / approval_policy / sandbox_mode / network_access /
-  workspace_roots / current_date) seeded as the first user message of a run.
-- **`TurnDiffTracker`** (`crates/context`): snapshots file
-  baselines before mutations (`apply_patch`, `write_file`, `edit_file`,
-  `delete_file`, `move_file`) and streams `turn_diff_updated` events with the
-  aggregate unified diff and changed-file count.
-- **Context compaction** (`locagens-core` orchestrator): automatic compaction
-  when the estimated input tokens exceed 90k (also on demand via
-  `compact_context`): older history is summarized with Codex's
-  SUMMARIZATION_PROMPT and replaced by a `[Compacted context summary]` block
-  while the last 8 messages stay intact.
-- **Codex sub-agent tools**: `spawn_agent` (background agent with id),
-  `wait_agent`, `send_input`, `close_agent`, `list_agents`, plus
-  `request_user_input` (Codex question schema) and `view_image`.
-- **Config & auth**: the primary agent directory is now `~/.locagens`
-  (`$LOCAGENS_HOME`); `~/.codex` (`$CODEX_HOME`: `auth.json` OPENAI_API_KEY
-  and `config.toml` `[model_providers.*]`) and the legacy `~/.pi/agent`
-  directory are read as credential/config fallbacks.
-- **`.vscode/tasks.json` + `.vscode/launch.json`**: w64devkit PATH, rustup-run
-  GNU toolchain tasks (check/build/test/run) and cppdbg/gdb + CodeLLDB debug
-  configurations for the desktop app and the `lcgn` CLI.
+Secret files are written atomically with mode 0600 on unix. API keys are never
+logged or returned by settings (the UI gets a preserve marker,
+`__LOCAGENS_PRESERVE_API_KEY__`, instead).
+
+Providers are OpenAI-compatible Chat Completions, OpenAI Responses and
+Anthropic Messages endpoints. Sign in with `lcgn auth login <provider>` or the
+desktop Settings:
+
+| Provider | Login |
+| --- | --- |
+| most providers | API key (`auth.json`, or the provider's env var such as `OPENAI_API_KEY`) |
+| `openai` | API key, or "Sign in with ChatGPT" (browser + loopback redirect; uses the Responses API) |
+| `github-copilot` | GitHub device login (Enterprise domains supported) |
+| `xai` | xAI / Grok device login |
+| `openrouter` | Sign in with OpenRouter (browser + loopback redirect; stores a permanent key) |
+| `kimi-coding` | Kimi Code device login |
+| `anthropic` | **API key only.** No Claude subscription OAuth. |
+
+OAuth tokens are refreshed automatically. Only providers you have configured
+appear in the model list. There is no built-in pricing table: set `pricing` on
+a model in `models.json` to get cost in the usage logs; unpriced models cost 0.
+
+## Modes and permissions
+
+The UI offers three modes; the core also keeps `chat` and `ask_permissions`.
+
+| Mode | Codex policy | Behaviour |
+| --- | --- | --- |
+| Build (`accept_edits`) | on-request + workspace-write | file edits apply directly; commands and `fetch_url` prompt (known-safe commands excepted) |
+| Plan (`plan`) | on-request + read-only | read-only tools, `update_plan`, research and sub-agents; no mutations or commands |
+| Full Access (`auto`) | never + danger-full-access | no prompts, no sandbox |
+| `chat` | read-only | conversation with read-only tools |
+| `ask_permissions` | untrusted + workspace-write | everything that mutates or executes prompts |
+
+What prompts (`orchestrator::tools::needs_permission` plus the gate in the
+orchestrator), outside Full Access:
+
+- `run_command`, `exec_command`, `write_stdin` and `fetch_url` prompt in every
+  mode that offers them. In Build, **known-safe** commands (read-only ones
+  such as `git status`, `rg`, `cargo check`) and commands an execpolicy
+  `.rules` file allows run without a prompt, unless the call asks for
+  `network_domains`. A `.rules` `forbidden` match blocks the command outright.
+- File mutations (`write_file`, `edit_file`, `delete_file`, `move_file`,
+  `create_directory`, `apply_patch`) and MCP tool calls prompt in
+  `ask_permissions`, not in Build.
+- **Dangerous** commands (`rm -rf`, `git reset --hard`, `sudo`, ...) and writes
+  to **protected paths** (`.git`, `.locagens`, `.codex`, `.agents`) always
+  prompt. No standing grant or "allow for run" covers them, and the answer
+  approves that one call only.
+- Answers are `allow_once | allow_project | allow_run | allow_always | deny`;
+  unknown answers deny. Standing grants persist in `permissions.json`.
+- **Project trust.** `<project>/.locagens/` (hooks, `mcp.json`, plugins,
+  `.rules`, `agents/*.toml`) loads only for trusted folders: `lcgn trust`,
+  `--trust` for one invocation, or the desktop trust banner. Trust is stored in
+  `~/.locagens/config.toml` under `[projects."<path>"]`.
+
+All file paths resolve inside the project folder (symlink-aware containment).
+
+## Sandboxing
+
+Commands run inside a native sandbox chosen from the mode (`workspace-write`
+in Build and `ask_permissions`, none in Full Access):
+
+- **Windows:** restricted token (write-restricted, capability-SID ACLs) with a
+  Job Object, and a per-domain allowlist network proxy.
+- **macOS:** Seatbelt (`sandbox-exec`).
+- **Linux:** Bubblewrap (`bwrap`).
+
+On macOS/Linux a missing backend fails closed (commands refuse to run outside
+Full Access), and approving `network_domains` opens the whole network for that
+command because no per-domain proxy exists there. Details and limits are in
+`docs/SANDBOX.md`.
+
+## Tools
+
+The main agent's toolset depends on the mode (`chat` is the smallest, Plan adds
+planning and delegation, Build and Full Access get everything).
+
+```txt
+Files        read_file, write_file, edit_file, apply_patch, delete_file, move_file,
+             create_directory, list_directory, search_files, view_image
+Commands     exec_command (+ write_stdin for running sessions), run_command,
+             host_executable
+Network      fetch_url
+Agents       spawn_agent, send_message, followup_task, wait_agent, interrupt_agent,
+             close_agent, list_agents (persistent named agents, max 4 live),
+             spawn_agents (one-shot parallel batch)
+Interaction  ask_user_question, request_user_input, update_plan, set_chat_title
+Context      compact_context, get_context_remaining, remember, load_skill
+MCP          list_mcp_resources, read_mcp_resource, mcp__<server>__<tool>,
+             tool_search (only when more than 8 MCP tools are connected)
+```
+
+Sub-agent roles: `explorer` (read-only, the default) and `worker` (full
+tools), plus custom roles from `agents/*.toml` in `<project>/.locagens/` and
+the agent directories. Children share the parent's run (cancel and permission
+prompts go through the parent), get no agent tools (depth 1), and Plan/chat
+force read-only.
+
+Context is auto-compacted above about 90k estimated input tokens (last 8
+messages kept). `AGENTS.md` files are discovered from the git root down to the
+working directory and injected into the system prompt, and a Codex-style
+`<environment_context>` block seeds each run.
+
+## Extensions
+
+- **MCP** servers over stdio and streamable HTTP (`http`, `streamable-http`,
+  `sse` entries), configured in `mcp_servers.json` or `<project>/.locagens/mcp.json`.
+  Remote servers can use bearer tokens, custom headers or OAuth
+  (`lcgn mcp login <server>`: discovery, dynamic registration, PKCE).
+- **Skills**: `SKILL.md` packs loaded with `load_skill`.
+- **Plugins**: registry of MCP servers, custom tools and hooks.
+- **Hooks**: Codex/Claude-style lifecycle hooks (`PreToolUse`, `Stop`, ...) in
+  `hooks.json`; see `docs/HOOKS.md`.
+
+## Command line
+
+```bash
+lcgn --model <provider/model>              # full-screen TUI (or --no-tui for the line REPL)
+lcgn -p "say OK" --model <provider/model>  # one-shot, answer on stdout
+lcgn -c "keep going"                       # continue the most recent session
+lcgn auth login openai                     # sign in (see the table above)
+lcgn review --base main                    # read-only code review
+lcgn trust .                               # trust this project's .locagens config
+lcgn mcp list | login <server> | logout <server>
+lcgn config                                # effective config.toml, secrets masked
+```
+
+Slash commands (`/model`, `/thinking`, `/plan`, `/build`, `/auto`, `/chat`,
+`/new`, `/fork`, `/undo`, `/diff`, `/review`, `/mcp`, `/skills`, `/sessions`,
+`/usage`, `/help`, `/exit`) work in the TUI and the REPL. See `docs/CLI.md`.
+
+## Storage
+
+Codex-style files under `~/.locagens` (`$LOCAGENS_HOME`; `LOCAGENS_DATA_DIR`
+overrides the root for tests): one append-only JSONL rollout per run at
+`sessions/YYYY/MM/DD/rollout-<ts>-<run_id>.jsonl`, plus `session_index.jsonl`,
+`history.jsonl`, `memories/*.md`, `projects.json` and `permissions.json`.
+Every message is persisted and runs reopen after a restart; startup marks runs
+that were active when a process died as `failed`. The desktop app and `lcgn`
+can run at the same time (advisory lock on `<root>/.lock`). Layout:
+`docs/database-schema.md`.
+
+## Not implemented
+
+A reviewer/acceptance loop after sub-agent fan-out, extra approval checkpoints
+beyond the permission flow, multi-user auth and cloud deployment.

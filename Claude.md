@@ -78,8 +78,8 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   Codex `ApprovalPolicy` / `SandboxMode` in `locagens-protocol`.
 - Tools live in `orchestrator/tools.rs`. All paths must stay inside the
   project workspace (dangling symlinks are refused). Commands (`exec_command`,
-  `run_command`) are permission-gated outside Full Access unless a standing
-  grant matches or the command is known-safe; `fetch_url` prompts in every
+  `run_command`, `write_stdin`) are permission-gated outside Full Access unless a standing
+  grant matches or, in Build only, the command is known-safe or `.rules`-allowed; `fetch_url` prompts in every
   mode except Full Access and only reaches public addresses (redirects are
   re-validated, DNS is pinned). Outside Full Access, dangerous commands and
   mutations of protected paths (`.git`, `.locagens`, `.codex`, `.agents`;

@@ -7,7 +7,7 @@ native sandbox chosen from the run's mode (`locagens-protocol`
 | Mode | Sandbox mode | Effect |
 | --- | --- | --- |
 | `chat`, `plan` | `read-only` | (commands are not offered in these modes) |
-| `accept_edits` (Build), `ask_permissions` | `workspace-write` | writes only inside the workspace + a temp dir; network see "Network by platform" below |
+| `accept_edits` (Build), `ask_permissions` | `workspace-write` | writes only inside the workspace + a temp dir; network: Windows uses a per-domain allowlist proxy, macOS/Linux are offline (or fully open once `network_domains` is approved), see "Network by platform" |
 | `auto` (Full Access) | `danger-full-access` | no sandbox, no proxy, unrestricted network |
 
 ### Network by platform
