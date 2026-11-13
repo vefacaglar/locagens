@@ -28,7 +28,7 @@ User Task
 Native Rust desktop UI (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
 Rust core (modular crates/* + apps/cli `lcgn`) built on top of pi
 in-process typed API facade (locagens_core::api, see docs/CORE_API.md)
-file-based JSON/JSONL persistence under <app_support_dir>/data/ (no SQLite)
+Codex-style persistence under ~/.locagens: append-only JSONL session rollouts, Markdown memories (no SQLite)
 pi provider engine (~/.pi/agent/auth.json & models.json, models-store.json)
 OpenAI-compatible provider adapter
 Anthropic provider adapter
@@ -56,7 +56,7 @@ Desktop: native Rust app (Dioxus 0.7, apps/desktop-rs, binary `locagens`)
 Core:    Rust (Tokio) modular workspace (crates/*) built directly on top of
          pi (apps/cli `lcgn`, apps/desktop-rs `locagens`)
 API:     in-process typed facade (locagens_core::api, docs/CORE_API.md)
-Storage: file-based JSON/JSONL (projects.json, sessions/<run_id>/…, no SQLite)
+Storage: Codex-style rollouts (~/.locagens/sessions/YYYY/MM/DD/rollout-*.jsonl, session_index.jsonl, history.jsonl, memories/*.md; no SQLite)
 Providers: pi (~/.pi/agent/auth.json & models.json, models-store.json)
 Package manager: cargo (backend/desktop)
 Repository style: monorepo
@@ -130,7 +130,7 @@ receiving or re-posting the secret.
 Locagens model settings may carry a `reasoning` effort, a `contextLimit`, and
 `pricing` (tiered input/output/cache rates per 1M tokens). Cost is computed
 locally from these rates and the provider's reported token counts, then stored
-per call in `usage_logs.jsonl`. A model with no configured pricing costs 0.
+per call as `usage` lines of the run rollout. A model with no configured pricing costs 0.
 
 ## Modes
 

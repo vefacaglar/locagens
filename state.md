@@ -8,7 +8,7 @@ The Electron + Vue + Node.js (Fastify, SQLite) app has been fully replaced by
 a pure Rust cargo workspace (see `Claude.md` / `Agents.md` for the layout):
 
 - `crates/*`: `protocol`, `apply-patch`, `execpolicy`, `config`, `context`,
-  `core` (`locagens_core`: api facade, orchestrator, services, CLI, JSON/JSONL
+  `core` (`locagens_core`: api facade, orchestrator, services, CLI, rollout JSONL
   store).
 - `apps/cli` (binary `lcgn`) and `apps/desktop-rs` (Dioxus 0.7, binary
   `locagens`); both call `locagens_core::api` in-process. No HTTP server.

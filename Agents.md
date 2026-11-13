@@ -18,7 +18,7 @@ crates/execpolicy    command safety, rules, sandbox, ProcessManager
 crates/config        paths + provider/auth/model catalog (PiProviderManager)
 crates/context       AGENTS.md discovery, <environment_context>, TurnDiffTracker
 crates/core          locagens_core: api/ facade, orchestrator/, services/,
-                     cli/ (lcgn), db.rs (JSON/JSONL store)
+                     cli/ (lcgn), db.rs (rollout JSONL store)
 apps/cli             binary `lcgn`
 apps/desktop-rs      binary `locagens` (Dioxus 0.7 UI)
 ```

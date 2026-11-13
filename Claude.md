@@ -66,7 +66,7 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   marker `__LOCAGENS_PRESERVE_API_KEY__`).
 - `llm.rs` streams OpenAI-compatible, Anthropic Messages and OpenAI Responses
   APIs. No built-in pricing table: unpriced models cost 0; cost goes to
-  `usage_logs`.
+  `usage` lines of the run rollout.
 
 ## Runtime
 
@@ -89,8 +89,15 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
 
 ## Persistence
 
-File-based JSON/JSONL under `<app_support>/Locagens/data/` (see
-`docs/database-schema.md`). Every message persists and runs must reopen after
+Codex-style files under the Locagens home `~/.locagens` (`$LOCAGENS_HOME`;
+`LOCAGENS_DATA_DIR` overrides the root for tests): one append-only JSONL
+rollout per run at `sessions/YYYY/MM/DD/rollout-<ts>-<run_id>.jsonl`
+(`session_meta`, `run_update`, `message`, `message_update`, `plan`, `usage`
+lines; updates are appended, load replays, a corrupt last line is skipped),
+plus `session_index.jsonl`, `history.jsonl`, `memories/*.md` and
+`projects.json` / `permissions.json`. The legacy `<app_support>/Locagens/data/`
+is imported once on first open and never modified. See
+`docs/database-schema.md`. Every message persists and runs must reopen after
 restart; startup marks stuck active runs `failed`. Errors go to the run's
 `error_message` without dropping prior messages. No telemetry.
 
