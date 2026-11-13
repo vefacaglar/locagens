@@ -108,7 +108,7 @@ pub fn AssistantBody(message: RunMessage) -> Element {
         .unwrap_or(false);
     let trimmed = message.content.trim_start();
     if streaming_review && (trimmed.starts_with('{') || trimmed.starts_with("```")) {
-        return rsx! { div { class: "review-pending", "Writing the review..." } };
+        return rsx! { div { class: "review-pending", "{store.t(\"review.writing\")}" } };
     }
     rsx! {
         div { class: "bubble md", dangerous_inner_html: render_markdown(&message.content) }
@@ -117,6 +117,7 @@ pub fn AssistantBody(message: RunMessage) -> Element {
 
 #[component]
 pub fn ReviewCard(payload: ReviewPayload) -> Element {
+    let store: UiStore = use_context();
     let output = &payload.output;
     let verdict = verdict_ok(&payload);
     let findings: Vec<FindingView> = output.findings.iter().map(finding_view).collect();
@@ -126,7 +127,7 @@ pub fn ReviewCard(payload: ReviewPayload) -> Element {
             class: "review-card",
             div {
                 class: "review-head",
-                span { class: "review-name", {icon_list_checks()} "Code review" }
+                span { class: "review-name", {icon_list_checks()} "{store.t(\"review.title\")}" }
                 span { class: "review-hint", "{payload.hint}" }
                 if let Some(ok) = verdict {
                     span {
@@ -140,7 +141,7 @@ pub fn ReviewCard(payload: ReviewPayload) -> Element {
                 p { class: "review-summary", "{summary}" }
             }
             if findings.is_empty() {
-                div { class: "review-empty", "No findings." }
+                div { class: "review-empty", "{store.t(\"review.none\")}" }
             }
             for (index, finding) in findings.into_iter().enumerate() {
                 div {
@@ -168,7 +169,7 @@ pub fn ReviewButton() -> Element {
     rsx! {
         button {
             class: "icon-btn",
-            title: "Review uncommitted changes",
+            title: store.t("review.button"),
             onclick: move |_| start(&store, ReviewTarget::Uncommitted),
             {icon_list_checks()}
         }
@@ -193,7 +194,7 @@ pub fn start(store: &UiStore, target: ReviewTarget) {
     let provider_id = store.selected_provider.read().clone();
     let model = store.selected_model.read().clone();
     if provider_id.is_empty() || model.is_empty() {
-        store.toast("Select a provider and model first (Settings > Providers).".to_string());
+        store.toast(store.t("toast.select_provider").to_string());
         return;
     }
     let project_path = store
@@ -229,7 +230,7 @@ pub fn start(store: &UiStore, target: ReviewTarget) {
                 store.attach_event_stream(run_id, started.events);
                 store.refresh_runs();
             }
-            Err(err) => store.toast(format!("Review failed: {}", err.message)),
+            Err(err) => store.toast(store.tf("review.failed", &[&err.message])),
         }
     });
 }

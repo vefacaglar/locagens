@@ -722,6 +722,11 @@ fn SkillsTab() -> Element {
     }
 }
 
+/// The project whose `.locagens/mcp.json` servers the MCP tab should include.
+fn selected_project(store: &UiStore) -> Option<String> {
+    store.selected_project.read().clone().filter(|path| !path.is_empty())
+}
+
 /// MCP servers: list, add / save, toggle and delete (user scope).
 #[component]
 fn McpTab() -> Element {
@@ -735,9 +740,10 @@ fn McpTab() -> Element {
 
     use_effect(move || {
         let mut servers = servers;
+        let project = selected_project(&store);
         spawn(async move {
             let state = core();
-            if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+            if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, project.as_deref()).await {
                 servers.set(response.servers);
             }
         });
@@ -762,9 +768,9 @@ fn McpTab() -> Element {
                 select {
                     value: "{transport_value}",
                     onchange: move |event| new_transport.set(event.value()),
-                    option { value: "stdio", "stdio" }
-                    option { value: "sse", "sse" }
-                    option { value: "streamable-http", "streamable-http" }
+                    option { value: "stdio", "{store.t(\"mcp.transport_stdio\")}" }
+                    option { value: "sse", "{store.t(\"mcp.transport_sse\")}" }
+                    option { value: "streamable-http", "{store.t(\"mcp.transport_http\")}" }
                 }
             }
             div {
@@ -817,7 +823,7 @@ fn McpTab() -> Element {
                                 }
                                 Err(err) => error.set(err.message),
                             }
-                            if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+                            if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, selected_project(&store).as_deref()).await {
                                 servers.set(response.servers);
                             }
                         });
@@ -872,27 +878,27 @@ fn McpTab() -> Element {
                                     spawn(async move {
                                         let state = core();
                                         let result = if signed_in {
-                                            locagens_core::api::mcp::logout_mcp_server(&state, &auth_name, None)
+                                            locagens_core::api::mcp::logout_mcp_server(&state, &auth_name, selected_project(&store).as_deref())
                                                 .await
                                                 .map(|_| ())
                                         } else {
-                                            store.toast("Opening the browser to sign in…".to_string());
+                                            store.toast(store.t("mcp.signin_opening").to_string());
                                             let on_url = |url: &str| {
                                                 let _ = locagens_core::services::mcp::oauth::open_browser(url);
                                             };
-                                            locagens_core::api::mcp::login_mcp_server(&state, &auth_name, None, &on_url)
+                                            locagens_core::api::mcp::login_mcp_server(&state, &auth_name, selected_project(&store).as_deref(), &on_url)
                                                 .await
                                                 .map(|_| ())
                                         };
                                         if let Err(err) = result {
-                                            store.toast(format!("MCP sign-in failed: {err}"));
+                                            store.toast(store.tf("mcp.signin_failed", &[&err.to_string()]));
                                         }
-                                        if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+                                        if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, selected_project(&store).as_deref()).await {
                                             servers.set(response.servers);
                                         }
                                     });
                                 },
-                                if signed_in { "Sign out" } else { "Sign in" }
+                                if signed_in { "{store.t(\"mcp.sign_out\")}" } else { "{store.t(\"mcp.sign_in\")}" }
                             }
                         }
                         button {
@@ -903,11 +909,11 @@ fn McpTab() -> Element {
                                 spawn(async move {
                                     let state = core();
                                     if let Err(err) =
-                                        locagens_core::api::mcp::toggle_mcp_server(&state, &toggle_name, toggle_enabled, None).await
+                                        locagens_core::api::mcp::toggle_mcp_server(&state, &toggle_name, toggle_enabled, selected_project(&store).as_deref()).await
                                     {
                                         store.toast(store.tf("toast.toggle_failed", &[&err.to_string()]));
                                     }
-                                    if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+                                    if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, selected_project(&store).as_deref()).await {
                                         servers.set(response.servers);
                                     }
                                 });
@@ -922,11 +928,11 @@ fn McpTab() -> Element {
                                 spawn(async move {
                                     let state = core();
                                     if let Err(err) =
-                                        locagens_core::api::mcp::delete_mcp_server(&state, &delete_name, None).await
+                                        locagens_core::api::mcp::delete_mcp_server(&state, &delete_name, selected_project(&store).as_deref()).await
                                     {
                                         store.toast(store.tf("toast.delete_failed", &[&err.to_string()]));
                                     }
-                                    if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, None).await {
+                                    if let Ok(response) = locagens_core::api::mcp::list_mcp_servers(&state, selected_project(&store).as_deref()).await {
                                         servers.set(response.servers);
                                     }
                                 });
@@ -1006,7 +1012,7 @@ fn PluginsTab() -> Element {
                             )
                             .await;
                             match result {
-                                Ok(plugin) => store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or("plugin")])),
+                                Ok(plugin) => store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or(store.t("plugin.fallback_name"))])),
                                 Err(err) => store.toast(store.tf("toast.install_failed", &[&err.to_string()])),
                             }
                             if let Ok(response) = locagens_core::api::plugins::list_plugins(&state, None).await {
@@ -1043,7 +1049,7 @@ fn PluginsTab() -> Element {
                             .await;
                             match result {
                                 Ok(plugin) => {
-                                    store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or("plugin")]));
+                                    store.toast(store.tf("toast.installed", &[plugin.get("name").and_then(Value::as_str).unwrap_or(store.t("plugin.fallback_name"))]));
                                     local_path.set(String::new());
                                 }
                                 Err(err) => store.toast(store.tf("toast.install_failed", &[&err.to_string()])),

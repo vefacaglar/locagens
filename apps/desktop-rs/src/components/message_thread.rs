@@ -150,7 +150,7 @@ pub fn MessageThread() -> Element {
                     div {
                         class: "msg-meta patch-progress",
                         "{store.t(\"thread.writing_patch\")}"
-                        for file in patch_progress_files(&progress) {
+                        for file in patch_progress_files(&progress, store.lang()) {
                             span { class: "mono", " · {file}" }
                         }
                     }
@@ -392,6 +392,9 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
             key: "{call.id}",
             div {
                 class: "tool-head",
+                role: "button",
+                tabindex: "0",
+                "aria-expanded": "{*open.read()}",
                 onclick: move |_| {
                     let mut open = open;
                     let is_open = *open.read();
@@ -426,6 +429,7 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
 /// Sub-agent (explorer / worker) group with nested message groups.
 #[component]
 fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> Element {
+    let store: UiStore = use_context();
     let open = use_signal(|| true);
     let is_explorer = role == "explorer";
     rsx! {
@@ -433,6 +437,9 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
             class: "coder-group",
             div {
                 class: "coder-head",
+                role: "button",
+                tabindex: "0",
+                "aria-expanded": "{*open.read()}",
                 onclick: move |_| {
                     let mut open = open;
                     let is_open = *open.read();
@@ -440,7 +447,7 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
                 },
                 span {
                     class: "badge",
-                    if is_explorer { {icon_search()} "explorer" } else { {icon_wrench()} "worker" }
+                    if is_explorer { {icon_search()} "{store.t(\"agent.explorer\")}" } else { {icon_wrench()} "{store.t(\"agent.worker\")}" }
                 }
                 span { "{name}" }
                 span { class: "spacer", {chevron(*open.read())} }
@@ -514,7 +521,7 @@ pub fn DiffView(diff: String) -> Element {
 }
 
 /// `path +added −removed` labels from a `patch_progress` event.
-fn patch_progress_files(event: &serde_json::Value) -> Vec<String> {
+fn patch_progress_files(event: &serde_json::Value, lang: crate::i18n::Lang) -> Vec<String> {
     let Some(files) = event.get("files").and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
@@ -524,7 +531,7 @@ fn patch_progress_files(event: &serde_json::Value) -> Vec<String> {
             let path = file.get("path").and_then(serde_json::Value::as_str).unwrap_or("?");
             let count = |key: &str| file.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
             match file.get("op").and_then(serde_json::Value::as_str) {
-                Some("delete") => format!("{path} (deleted)"),
+                Some("delete") => crate::i18n::tf(lang, "thread.file_deleted", &[path]),
                 _ => format!("{path} +{} \u{2212}{}", count("added"), count("removed")),
             }
         })
@@ -540,7 +547,7 @@ mod patch_progress_tests {
             { "path": "old.txt", "op": "delete" }
         ]});
         assert_eq!(
-            super::patch_progress_files(&event),
+            super::patch_progress_files(&event, crate::i18n::Lang::En),
             vec!["src/a.rs +3 \u{2212}1".to_string(), "old.txt (deleted)".to_string()]
         );
     }

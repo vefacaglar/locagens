@@ -40,6 +40,28 @@ pub fn t(lang: Lang, key: &'static str) -> &'static str {
     }
 }
 
+static CURRENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Records the UI language for code that has no `UiStore` (markdown HTML).
+pub fn set_current(lang: Lang) {
+    CURRENT.store(lang as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// [`t`] in the language last recorded with [`set_current`].
+pub fn tc(key: &'static str) -> &'static str {
+    let lang = if CURRENT.load(std::sync::atomic::Ordering::Relaxed) == 1 { Lang::Tr } else { Lang::En };
+    t(lang, key)
+}
+
+/// i18n key of a sub-agent role label (`explorer`, `worker`, else the main agent).
+pub fn role_key(role: &str) -> &'static str {
+    match role {
+        "explorer" => "agent.explorer",
+        "worker" => "agent.worker",
+        _ => "agent.planner",
+    }
+}
+
 /// [`t`] with `{0}`, `{1}`… replaced by `args`.
 pub fn tf(lang: Lang, key: &'static str, args: &[&str]) -> String {
     let mut text = t(lang, key).to_string();
@@ -384,6 +406,35 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("toast.install_failed", "Install failed: {0}", "Kurulum başarısız: {0}"),
     ("toast.uninstall_failed", "Uninstall failed: {0}", "Kaldırma başarısız: {0}"),
     ("toast.sandbox_failed", "Sandbox setup failed: {0}", "Korumalı alan kurulumu başarısız: {0}"),
+    // --- desktop QA fixes (QA-052/053): review, MCP sign-in, badges, markdown ---
+    ("review.title", "Code review", "Kod incelemesi"),
+    ("review.writing", "Writing the review…", "İnceleme yazılıyor…"),
+    ("review.none", "No findings.", "Bulgu yok."),
+    ("review.button", "Review uncommitted changes", "Commit edilmemiş değişiklikleri incele"),
+    ("review.failed", "Review failed: {0}", "İnceleme başarısız: {0}"),
+    ("mcp.signin_opening", "Opening the browser to sign in…", "Giriş için tarayıcı açılıyor…"),
+    ("mcp.signin_failed", "MCP sign-in failed: {0}", "MCP girişi başarısız: {0}"),
+    ("mcp.sign_in", "Sign in", "Giriş yap"),
+    ("mcp.sign_out", "Sign out", "Çıkış yap"),
+    ("mcp.transport_stdio", "stdio (local process)", "stdio (yerel süreç)"),
+    ("mcp.transport_sse", "SSE (server-sent events)", "SSE (sunucu olayları)"),
+    ("mcp.transport_http", "Streamable HTTP", "Streamable HTTP"),
+    ("plugin.fallback_name", "plugin", "eklenti"),
+    ("agent.explorer", "explorer", "gezgin"),
+    ("agent.worker", "worker", "işçi"),
+    ("agent.planner", "planner", "planlayıcı"),
+    ("thread.file_deleted", "{0} (deleted)", "{0} (silindi)"),
+    ("header.tokens_cost", "{0} tok · {1}", "{0} tok · {1}"),
+    ("header.tokens", "{0} tok", "{0} tok"),
+    ("inspector.plan_version", "{0} · v{1}", "{0} · sürüm {1}"),
+    ("git.badge_created", "A", "E"),
+    ("git.badge_deleted", "D", "S"),
+    ("git.badge_modified", "M", "D"),
+    ("git.kind_created", "Added", "Eklendi"),
+    ("git.kind_deleted", "Deleted", "Silindi"),
+    ("git.kind_modified", "Modified", "Değiştirildi"),
+    ("md.copy", "Copy", "Kopyala"),
+    ("md.file_deleted", "+ (file deleted)", "+ (dosya silindi)"),
 ];
 
 #[cfg(test)]
@@ -445,6 +496,101 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "keys without EN/TR text: {missing:#?}");
+    }
+
+    /// User-visible text must go through the table. Flags string literals
+    /// that are rsx text nodes (`span { class: "x", "Text" }` or a bare
+    /// `"Text"` line) or `title` / `placeholder` / `aria-label` / `alt`
+    /// attributes. Interpolated strings need their own words to be flagged
+    /// (`"{x} tok"`), pure data (`"{path}"`) is fine.
+    fn untranslated_literals(source: &str) -> Vec<String> {
+        const ALLOWED: &[&str] = &["Locagens"];
+        const ATTRS: &[&str] = &["title", "placeholder", "aria_label", "alt", "\"aria-label\""];
+        let mut found = Vec::new();
+        for line in source.lines() {
+            let line = line.trim();
+            if line.starts_with("//") || line.starts_with("///") {
+                continue;
+            }
+            let mut literals: Vec<(usize, String)> = Vec::new();
+            let mut rest = line;
+            let mut offset = 0;
+            while let Some(start) = rest.find('"') {
+                let after = &rest[start + 1..];
+                let Some(len) = after.find('"') else { break };
+                literals.push((offset + start, after[..len].to_string()));
+                offset += start + len + 2;
+                rest = &line[offset..];
+            }
+            for (pos, literal) in literals {
+                let words = strip_braces(&literal);
+                let has_words = words.chars().any(char::is_alphabetic);
+                let before = line[..pos].trim_end();
+                let attr_value = before.ends_with(':');
+                let flagged = if attr_value {
+                    let name = before.trim_end_matches(':').rsplit(|c: char| !(c.is_alphanumeric() || c == '_' || c == '"' || c == '-')).next().unwrap_or("");
+                    ATTRS.contains(&name) && has_words
+                } else {
+                    let text_node = before.is_empty() || before.ends_with('{') || before.ends_with(',') || before.ends_with('}');
+                    let after_literal = line[pos + literal.len() + 2..].trim_start();
+                    let ends_node = after_literal.is_empty() || after_literal.starts_with('}');
+                    let looks_like_text = literal.trim().chars().next().is_some_and(char::is_uppercase)
+                        || (literal.contains('{') && has_words);
+                    text_node && ends_node && looks_like_text
+                };
+                if flagged && !ALLOWED.contains(&literal.as_str()) {
+                    found.push(format!("{line}"));
+                }
+            }
+        }
+        found
+    }
+
+    fn strip_braces(text: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0;
+        for c in text.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' if depth > 0 => depth -= 1,
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn scanner_flags_literal_text_nodes_and_attributes() {
+        assert_eq!(untranslated_literals("span { class: \"x\", \"Code review\" }").len(), 1);
+        assert_eq!(untranslated_literals("\"No findings.\"").len(), 1);
+        assert_eq!(untranslated_literals("title: \"Copy\",").len(), 1);
+        assert_eq!(untranslated_literals("placeholder: \"Search\",").len(), 1);
+        assert_eq!(untranslated_literals("\"{x} tok\"").len(), 1);
+        assert!(untranslated_literals("span { class: \"badge ok\", \"{store.t(\\\"a.b\\\")}\" }").is_empty());
+        assert!(untranslated_literals("title: \"{path}\",").is_empty());
+        assert!(untranslated_literals("title: store.t(\"a.b\"),").is_empty());
+        assert!(untranslated_literals("div { class: \"Foo bar\" }").is_empty());
+        assert!(untranslated_literals("span { class: \"brand-title\", \"Locagens\" }").is_empty());
+    }
+
+    #[test]
+    fn no_user_visible_literals_bypass_the_table() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs(&src, &mut files);
+        let mut offenders = Vec::new();
+        for file in files {
+            if file.file_name().is_some_and(|name| name == "i18n.rs" || name == "prefs.rs" || name == "theme.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            let production = text.split("#[cfg(test)]").next().unwrap_or("");
+            for hit in untranslated_literals(production) {
+                offenders.push(format!("{}: {hit}", file.file_name().unwrap().to_string_lossy()));
+            }
+        }
+        assert!(offenders.is_empty(), "user-visible strings must use i18n.rs: {offenders:#?}");
     }
 
     fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

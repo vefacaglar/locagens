@@ -164,6 +164,7 @@ fn UsageRow(entry: UsageLogEntry) -> Element {
         .agent_role
         .clone()
         .unwrap_or_else(|| "planner".to_string());
+    let role = store.t(crate::i18n::role_key(&role));
     rsx! {
         tr {
             key: "{entry.id}",

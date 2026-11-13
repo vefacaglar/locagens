@@ -14,6 +14,18 @@ use locagens_core::services::processes::ProcessInfo;
 use serde_json::Value;
 use std::time::Duration;
 
+/// i18n key of a changed file's kind: the one-letter badge or its tooltip.
+fn file_kind_key(kind: &str, badge: bool) -> &'static str {
+    match (kind, badge) {
+        ("created", true) => "git.badge_created",
+        ("created", false) => "git.kind_created",
+        ("deleted", true) => "git.badge_deleted",
+        ("deleted", false) => "git.kind_deleted",
+        (_, true) => "git.badge_modified",
+        (_, false) => "git.kind_modified",
+    }
+}
+
 #[component]
 pub fn RightPanel() -> Element {
     let store: UiStore = use_context();
@@ -231,7 +243,7 @@ fn ContextSection() -> Element {
                     if let Some(percent) = percent {
                         span { class: "mono", "{percent}%" }
                     } else {
-                        span { class: "mono", "{crate::state_ui::fmt_tokens(per_call)} tok" }
+                        span { class: "mono", "{store.tf(\"header.tokens\", &[&crate::state_ui::fmt_tokens(per_call)])}" }
                     }
                 }
                 if let Some(percent) = percent {
@@ -276,7 +288,7 @@ fn PlanTab() -> Element {
     rsx! {
         div {
             class: "panel-section-title",
-            "{plan.title} · v{plan.version}"
+            "{store.tf(\"inspector.plan_version\", &[&plan.title, &plan.version.to_string()])}"
         }
         if let Some(body) = plan.body.clone() {
             div {
@@ -570,15 +582,13 @@ fn GitTab() -> Element {
                                             class: "file-row",
                                             span {
                                                 class: "file-kind {file_kind}",
-                                                title: "{file_kind}",
-                                                match file_kind.as_str() {
-                                                    "created" => "A",
-                                                    "deleted" => "D",
-                                                    _ => "M",
-                                                }
+                                                title: store.t(file_kind_key(&file_kind, false)),
+                                                {store.t(file_kind_key(&file_kind, true))}
                                             }
                                             div {
                                                 class: "file-main",
+                                                role: "button",
+                                                tabindex: "0",
                                                 onclick: move |_| selected_file.set(if selected_now.as_ref() == Some(&file_path) { None } else { Some(file_path.clone()) }),
                                                 div { class: "file-name", title: "{display_path}", "{display_path}" }
                                             }
@@ -683,6 +693,8 @@ fn GitTab() -> Element {
                                         class: "settings-row",
                                         div {
                                             class: "grow clickable",
+                                            role: "button",
+                                            tabindex: "0",
                                             onclick: move |_| {
                                                 let switch_path = switch_path.clone();
                                                 spawn(async move {
@@ -975,6 +987,8 @@ fn TerminalTab() -> Element {
                     div {
                         key: "{id}",
                         class: if is_selected { "settings-row selected" } else { "settings-row" },
+                        role: "button",
+                        tabindex: "0",
                         onclick: move |_| selected.set(if is_selected { None } else { Some(id.clone()) }),
                         div {
                             class: "grow",

@@ -106,6 +106,69 @@ impl RightPanelTab {
     }
 }
 
+/// Where a run event lands: the visible conversation or only the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventScope {
+    /// The event's run is the one shown in the chat view.
+    Foreground,
+    /// Another run's event: it may only update that run's sidebar entry.
+    Background,
+}
+
+/// Scope of an event from `stream_run` while `active` is the open run.
+pub fn event_scope(active: Option<&str>, stream_run: &str) -> EventScope {
+    if active == Some(stream_run) {
+        EventScope::Foreground
+    } else {
+        EventScope::Background
+    }
+}
+
+/// Event types that still matter for a run that is not in view: they only
+/// touch the sidebar list (status dot, title).
+pub fn applies_in_background(kind: &str) -> bool {
+    matches!(kind, "status_changed" | "run_title_changed" | "run_completed" | "run_failed")
+}
+
+/// Latest event-stream generation per run, so re-attaching a run (or opening
+/// it again) retires the previous listener task instead of doubling events.
+#[derive(Default)]
+pub struct StreamRegistry {
+    latest: std::collections::BTreeMap<String, u64>,
+    counter: u64,
+}
+
+impl StreamRegistry {
+    pub const fn new() -> Self {
+        Self { latest: std::collections::BTreeMap::new(), counter: 0 }
+    }
+
+    /// Registers a new stream for `run_id`, superseding any earlier one.
+    pub fn claim(&mut self, run_id: &str) -> u64 {
+        self.counter += 1;
+        self.latest.insert(run_id.to_string(), self.counter);
+        self.counter
+    }
+
+    /// Whether `generation` is still the newest stream of `run_id`.
+    pub fn is_current(&self, run_id: &str, generation: u64) -> bool {
+        self.latest.get(run_id) == Some(&generation)
+    }
+
+    /// Forgets the stream when it ended (only if it is still the newest).
+    pub fn release(&mut self, run_id: &str, generation: u64) {
+        if self.is_current(run_id, generation) {
+            self.latest.remove(run_id);
+        }
+    }
+}
+
+static STREAMS: std::sync::Mutex<StreamRegistry> = std::sync::Mutex::new(StreamRegistry::new());
+
+fn streams() -> std::sync::MutexGuard<'static, StreamRegistry> {
+    STREAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Bundle of every reactive signal, handed to components via context.
 /// `Copy` so event-handler closures can capture it freely.
 #[derive(Clone, Copy)]
@@ -260,25 +323,31 @@ impl UiStore {
         store.turn_diff.set(None);
         store.spawned_agents.set(Vec::new());
         store.patch_progress.set(None);
+        // The previous run's prompts must not linger over this one.
+        store.pending_permission.set(None);
+        store.pending_question.set(None);
         spawn(async move {
             let state = core();
+            // Another selection may land while the loads below are awaited;
+            // the guard after them drops this load if it did.
             // 1. Run + messages + plan + usage + pending requests.
-            if let Ok(run) = api::runs::get_run(&state, &run_id).await {
+            let run = api::runs::get_run(&state, &run_id).await.ok();
+            let messages = api::runs::list_messages(&state, &run_id).await.unwrap_or_default();
+            let plan = api::runs::run_plan(&state, &run_id).await.unwrap_or(None);
+            let usage = api::runs::run_usage(&state, &run_id).await.ok();
+            let pending = api::runs::run_pending(&state, &run_id).await.ok();
+            if event_scope(store.active_run_id.peek().as_deref(), &run_id) == EventScope::Background {
+                return;
+            }
+            if let Some(run) = run {
                 store.active_run.set(Some(run));
             }
-            store.messages.set(
-                api::runs::list_messages(&state, &run_id)
-                    .await
-                    .unwrap_or_default(),
-            );
-            store.plan.set(api::runs::run_plan(&state, &run_id).await.unwrap_or(None));
-            store.run_usage.set(api::runs::run_usage(&state, &run_id).await.ok());
-            if let Ok(pending) = api::runs::run_pending(&state, &run_id).await {
+            store.messages.set(messages);
+            store.plan.set(plan);
+            store.run_usage.set(usage);
+            if let Some(pending) = pending {
                 store.pending_permission.set(pending.permission_request);
                 store.pending_question.set(pending.question_request);
-            } else {
-                store.pending_permission.set(None);
-                store.pending_question.set(None);
             }
             scroll_chat_to_bottom();
 
@@ -301,6 +370,7 @@ impl UiStore {
     /// receiver subscribed BEFORE the drive task began).
     pub fn attach_event_stream(&self, run_id: String, mut rx: EventRx) {
         let store = *self;
+        let generation = streams().claim(&run_id);
         spawn(async move {
             loop {
                 let event = match rx.recv().await {
@@ -308,10 +378,15 @@ impl UiStore {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
+                // A newer stream for the same run took over: retire this one.
+                if !streams().is_current(&run_id, generation) {
+                    return;
+                }
                 if !store.process_event(&run_id, event) {
                     break;
                 }
             }
+            streams().release(&run_id, generation);
         });
     }
 
@@ -319,6 +394,11 @@ impl UiStore {
     fn process_event(&self, run_id: &str, event: Value) -> bool {
         let mut store = *self;
         let kind = event.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+        // Events of a run that is not in view may only touch its sidebar entry.
+        let foreground = event_scope(store.active_run_id.peek().as_deref(), run_id) == EventScope::Foreground;
+        if !foreground && !applies_in_background(&kind) {
+            return true;
+        }
         match kind.as_str() {
             "message_created" | "message_updated" => {
                 if let Some(message) = event
@@ -356,7 +436,7 @@ impl UiStore {
                         run.status = status.clone();
                     }
                 });
-                if status == "generating" {
+                if foreground && status == "generating" {
                     // Permission/question resolved; drop stale cards.
                     store.pending_permission.set(None);
                     store.pending_question.set(None);
@@ -365,14 +445,8 @@ impl UiStore {
             "permission_requested" => {
                 store.pending_permission.set(Some(event.clone()));
             }
-            "permission_resolved" => {
-                store.pending_permission.set(None);
-            }
             "question_requested" => {
                 store.pending_question.set(Some(event.clone()));
-            }
-            "question_answered" => {
-                store.pending_question.set(None);
             }
             "plan_updated" => {
                 if let Some(plan) = event
@@ -442,8 +516,12 @@ impl UiStore {
                 store.patch_progress.set((!complete).then(|| event.clone()));
             }
             "run_completed" | "run_failed" => {
-                store.patch_progress.set(None);
                 let run_id = event.get("runId").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| run_id.to_string());
+                if !foreground {
+                    store.refresh_runs();
+                    return true;
+                }
+                store.patch_progress.set(None);
                 spawn(async move {
                     let state = core();
                     if let Ok(run) = api::runs::get_run(&state, &run_id).await {
@@ -483,6 +561,38 @@ pub fn run_is_active(status: &str) -> bool {
         "created" | "generating" | "awaiting_permission" | "awaiting_input"
     )
 }
+
+/// Keyboard and screen-reader basics, installed once at startup
+/// (`window.lcgnA11y`):
+/// - Enter / Space activate focused `[role=button]` elements (clickable rows
+///   that are not native buttons).
+/// - Escape closes the topmost modal or popover by clicking its backdrop.
+/// - Icon-only buttons that carry a `title` get the same text as `aria-label`.
+pub const A11Y_SCRIPT: &str = r#"(() => {
+  if (window.lcgnA11y) return;
+  window.lcgnA11y = true;
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const all = document.querySelectorAll('.modal-backdrop, .popover-backdrop');
+      if (all.length) { all[all.length - 1].click(); e.preventDefault(); }
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const t = e.target;
+    if (t && t.getAttribute && t.getAttribute('role') === 'button' && t.tagName !== 'BUTTON') {
+      e.preventDefault();
+      t.click();
+    }
+  });
+  const label = (root) => {
+    const list = root.querySelectorAll ? root.querySelectorAll('button[title]:not([aria-label])') : [];
+    list.forEach((b) => b.setAttribute('aria-label', b.getAttribute('title')));
+  };
+  label(document);
+  new MutationObserver((muts) => {
+    for (const m of muts) m.addedNodes.forEach((n) => { if (n.nodeType === 1) { label(n); if (n.matches && n.matches('button[title]:not([aria-label])')) n.setAttribute('aria-label', n.getAttribute('title')); } });
+  }).observe(document.body, { childList: true, subtree: true });
+})();"#;
 
 /// Chat scrolling, installed once at startup (`window.lcgnChat`).
 ///
@@ -631,5 +741,57 @@ pub fn fmt_tokens(tokens: i64) -> String {
         format!("{:.1}k", tokens as f64 / 1_000.0)
     } else {
         tokens.to_string()
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    #[test]
+    fn events_of_the_open_run_are_foreground() {
+        assert_eq!(event_scope(Some("run-a"), "run-a"), EventScope::Foreground);
+    }
+
+    #[test]
+    fn events_of_other_runs_or_no_run_are_background() {
+        assert_eq!(event_scope(Some("run-b"), "run-a"), EventScope::Background);
+        assert_eq!(event_scope(None, "run-a"), EventScope::Background);
+    }
+
+    #[test]
+    fn background_runs_only_update_the_sidebar() {
+        for kind in ["status_changed", "run_title_changed", "run_completed", "run_failed"] {
+            assert!(applies_in_background(kind), "{kind}");
+        }
+        for kind in [
+            "message_created",
+            "message_updated",
+            "permission_requested",
+            "question_requested",
+            "plan_updated",
+            "turn_diff_updated",
+            "agent_spawned",
+            "patch_progress",
+            "context_compacted",
+        ] {
+            assert!(!applies_in_background(kind), "{kind} must not leak into the open run");
+        }
+    }
+
+    #[test]
+    fn newest_stream_of_a_run_supersedes_older_ones() {
+        let mut registry = StreamRegistry::new();
+        let first = registry.claim("run-a");
+        let other = registry.claim("run-b");
+        assert!(registry.is_current("run-a", first));
+        let second = registry.claim("run-a");
+        assert!(!registry.is_current("run-a", first), "old listener must retire");
+        assert!(registry.is_current("run-a", second));
+        assert!(registry.is_current("run-b", other), "other runs are untouched");
+        registry.release("run-a", first);
+        assert!(registry.is_current("run-a", second), "a retired stream cannot release the new one");
+        registry.release("run-a", second);
+        assert!(!registry.is_current("run-a", second));
     }
 }

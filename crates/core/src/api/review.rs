@@ -73,9 +73,15 @@ pub async fn start_review(state: &AppState, payload: &StartReviewPayload) -> Api
         append_system_prompt: Some(engine::append_prompt(&target, &resolved.diff)),
         ..Default::default()
     };
-    let started = runs::create_run(state, &create).await?;
+    let mut started = runs::create_run(state, &create).await?;
     let title = format!("Review: {}", target.hint());
     state.db.patch_run(&started.run.id, |run| run.title = title.clone());
+    started.handle.emit(serde_json::json!({
+        "type": "run_title_changed",
+        "runId": started.run.id,
+        "title": title,
+    }));
+    started.run.title = title;
     Ok(started)
 }
 
