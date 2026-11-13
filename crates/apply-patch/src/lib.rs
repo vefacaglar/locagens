@@ -665,7 +665,7 @@ pub fn apply_parsed(project: &Path, patch: &ParsedPatch) -> Result<(String, Stri
     let mut summary_lines: Vec<String> = Vec::new();
     let mut diff = String::new();
 
-    for (hunk, (target, contents, _is_new)) in patch.hunks.iter().zip(results.into_iter()) {
+    for (hunk, (target, contents, _is_new)) in patch.hunks.iter().zip(results) {
         match hunk {
             Hunk::AddFile { path, .. } => {
                 diff.push_str(&unified_diff("/dev/null", &format!("b/{}", rel_display(path)), "", &contents));
@@ -870,7 +870,7 @@ pub fn preview_patch(project: &Path, patch_text: &str) -> Result<(String, Affect
                 let label = format!("a/{}", rel_display(path));
                 let _ = label;
                 diff.push_str(&unified_diff(
-                    &format!("/dev/null"),
+                    "/dev/null",
                     &format!("b/{}", rel_display(path)),
                     "",
                     contents,

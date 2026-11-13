@@ -122,7 +122,7 @@ mod tests {
         std::fs::write(ws.path().join("added.txt"), "new\n").unwrap();
         std::fs::remove_file(ws.path().join("deleted.txt")).unwrap();
 
-        let diff = tracker.unified_diff(&ws.path());
+        let diff = tracker.unified_diff(ws.path());
         assert!(diff.contains("+++ b/added.txt"));
         assert!(diff.contains("+new"));
         assert!(diff.contains("--- a/modified.txt"));
@@ -134,7 +134,7 @@ mod tests {
         // Unchanged files produce no diff (snapshot without mutation).
         std::fs::write(ws.path().join("untouched.txt"), "same\n").unwrap();
         tracker.snapshot(&ws.path().join("untouched.txt"));
-        assert!(!tracker.unified_diff(&ws.path()).contains("untouched"));
+        assert!(!tracker.unified_diff(ws.path()).contains("untouched"));
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
         std::fs::write(ws.path().join("a.txt"), "v2\n").unwrap();
         tracker.snapshot(&ws.path().join("a.txt")); // no-op
         std::fs::write(ws.path().join("a.txt"), "v3\n").unwrap();
-        let diff = tracker.unified_diff(&ws.path());
+        let diff = tracker.unified_diff(ws.path());
         assert!(diff.contains("-v1"));
         assert!(diff.contains("+v3"));
         assert!(!diff.contains("v2"));

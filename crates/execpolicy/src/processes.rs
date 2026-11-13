@@ -667,6 +667,8 @@ impl ProcessManager {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // macOS declares openpty's winsize as *mut, Linux as *const.
+        #[allow(clippy::unnecessary_mut_passed)]
         let opened = unsafe {
             libc::openpty(
                 &mut master_fd,
@@ -865,7 +867,7 @@ impl ProcessManager {
             .values()
             .filter_map(|managed| {
                 let m = managed.lock().expect("managed process poisoned");
-                if project_path.map_or(true, |p| m.info.project_path == p) {
+                if project_path.is_none_or(|p| m.info.project_path == p) {
                     Some(m.info.clone())
                 } else {
                     None
@@ -931,9 +933,7 @@ impl ProcessManager {
 
     /// Stops (if needed) and restarts the same command in the same project.
     pub async fn restart(self: &Arc<Self>, id: &str) -> Option<ProcessInfo> {
-        let Some(managed) = self.get_arc(id) else {
-            return None;
-        };
+        let managed = self.get_arc(id)?;
         if self.get(id).map(|p| p.status == "running").unwrap_or(false) {
             self.kill(id).await;
         }

@@ -22,8 +22,10 @@ pub enum Decision {
     Forbidden,
 }
 
-impl Decision {
-    pub fn from_str(value: &str) -> Result<Self, String> {
+impl std::str::FromStr for Decision {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
         match value.trim().to_lowercase().as_str() {
             "allow" => Ok(Self::Allow),
             "prompt" => Ok(Self::Prompt),
@@ -785,7 +787,7 @@ fn parse_decision(args: &[(String, StarlarkValue)]) -> Result<Decision, String> 
     for (name, value) in args {
         if name == "decision" {
             if let StarlarkValue::Str(raw) = value {
-                return Decision::from_str(raw);
+                return raw.parse::<Decision>();
             }
         }
     }

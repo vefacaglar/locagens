@@ -150,7 +150,7 @@ impl DomainAllowlist {
     fn names_local_literal(&self, host: &str) -> bool {
         let host = normalize_host(host);
         let literal = host == "localhost" || host.parse::<IpAddr>().is_ok();
-        literal && self.patterns.iter().any(|pattern| *pattern == host)
+        literal && self.patterns.contains(&host)
     }
 }
 

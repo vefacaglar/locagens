@@ -159,7 +159,7 @@ pub async fn list_models_table(pi: &PiProviderManager, search: &str) -> String {
         for (i, value) in cells.iter().enumerate() {
             out.push_str(value);
             let pad = widths[i].saturating_sub(value.chars().count());
-            out.extend(std::iter::repeat(' ').take(pad + 2));
+            out.extend(std::iter::repeat_n(' ', pad + 2));
         }
         while out.ends_with(' ') {
             out.pop();
@@ -169,7 +169,7 @@ pub async fn list_models_table(pi: &PiProviderManager, search: &str) -> String {
     let header_cells: [String; 6] = header.map(str::to_string);
     line(&mut out, header_cells.clone());
     for width in widths {
-        out.extend(std::iter::repeat('-').take(width + 2));
+        out.extend(std::iter::repeat_n('-', width + 2));
     }
     out.push('\n');
     for row in &rows {

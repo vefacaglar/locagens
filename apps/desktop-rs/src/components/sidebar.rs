@@ -97,7 +97,7 @@ pub fn Sidebar() -> Element {
     // Collapsed workspace groups (by project path).
     let collapsed_projects = use_signal(HashSet::<String>::new);
 
-    let page_now = store.page.read().clone();
+    let page_now = *store.page.read();
     let on_chat = page_now == crate::state_ui::AppPage::Chat;
     let forward_target = *forward_page.read();
     let forward_available = on_chat && forward_target.is_some();
@@ -159,7 +159,7 @@ pub fn Sidebar() -> Element {
                         onclick: move |_| {
                             if !on_chat {
                                 let mut store = store;
-                                forward_page.set(Some(store.page.read().clone()));
+                                forward_page.set(Some(*store.page.read()));
                                 store.page.set(crate::state_ui::AppPage::Chat);
                             }
                         },

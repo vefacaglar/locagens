@@ -410,7 +410,7 @@ fn take_sessions(only_name: Option<&str>) -> Vec<(SharedSession, McpServerConfig
     let mut map = registry().lock().expect("mcp session registry poisoned");
     let keys: Vec<String> = map
         .iter()
-        .filter(|(_, (_, config))| only_name.map_or(true, |name| config.name == name))
+        .filter(|(_, (_, config))| only_name.is_none_or(|name| config.name == name))
         .map(|(key, _)| key.clone())
         .collect();
     keys.into_iter().filter_map(|key| map.remove(&key)).collect()

@@ -175,7 +175,7 @@ impl PiProviderManager {
                     .unwrap_or_else(|| "default".to_string())
             });
 
-        let (content, usage) = if is_anthropic(&input.provider_id, &api, &base_url) {
+        let (content, usage) = if is_anthropic(&input.provider_id, &api, base_url) {
                 let response = self
                     .http
                     .post(format!("{base_url}/messages"))
