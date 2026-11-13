@@ -146,6 +146,15 @@ pub fn MessageThread() -> Element {
                     {status_dot("generating")}
                     "{store.t(\"thread.working\")}"
                 }
+                if let Some(progress) = store.patch_progress.read().clone() {
+                    div {
+                        class: "msg-meta patch-progress",
+                        "{store.t(\"thread.writing_patch\")}"
+                        for file in patch_progress_files(&progress) {
+                            span { class: "mono", " · {file}" }
+                        }
+                    }
+                }
             }
             // Sized by `window.lcgnChat` so a just-sent message can sit at the top.
             div { id: "chat-tail-spacer", class: "chat-tail-spacer" }
@@ -501,5 +510,38 @@ pub fn DiffView(diff: String) -> Element {
                 }
             }
         }
+    }
+}
+
+/// `path +added −removed` labels from a `patch_progress` event.
+fn patch_progress_files(event: &serde_json::Value) -> Vec<String> {
+    let Some(files) = event.get("files").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .map(|file| {
+            let path = file.get("path").and_then(serde_json::Value::as_str).unwrap_or("?");
+            let count = |key: &str| file.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+            match file.get("op").and_then(serde_json::Value::as_str) {
+                Some("delete") => format!("{path} (deleted)"),
+                _ => format!("{path} +{} \u{2212}{}", count("added"), count("removed")),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod patch_progress_tests {
+    #[test]
+    fn labels_files_with_line_counts() {
+        let event = serde_json::json!({ "files": [
+            { "path": "src/a.rs", "op": "update", "added": 3, "removed": 1 },
+            { "path": "old.txt", "op": "delete" }
+        ]});
+        assert_eq!(
+            super::patch_progress_files(&event),
+            vec!["src/a.rs +3 \u{2212}1".to_string(), "old.txt (deleted)".to_string()]
+        );
     }
 }

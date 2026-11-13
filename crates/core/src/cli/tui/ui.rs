@@ -164,7 +164,11 @@ fn status_line(app: &App) -> Line<'static> {
         return Line::default();
     }
     let frame = SPINNER_FRAMES[app.spinner % SPINNER_FRAMES.len()];
-    let label = app.running_tool().unwrap_or_else(|| "Working".to_string());
+    let label = app
+        .patch_progress
+        .clone()
+        .or_else(|| app.running_tool())
+        .unwrap_or_else(|| "Working".to_string());
     let mut spans = vec![Span::styled(format!("{frame} "), Style::default().fg(Color::Cyan))];
     spans.extend(shimmer_spans(&label, app.spinner));
     let elapsed = app.elapsed().map(format_elapsed).unwrap_or_default();

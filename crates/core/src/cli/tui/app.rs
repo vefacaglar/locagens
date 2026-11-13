@@ -126,10 +126,23 @@ pub struct App {
     /// event receiver and refreshes usage.
     pub run_finished: bool,
     turn_diff: Option<(String, u64)>,
+    /// Status label while the model streams an `apply_patch` call.
+    pub patch_progress: Option<String>,
     queued_texts: VecDeque<String>,
     popup_dismissed_for: Option<String>,
     last_file_query: Option<String>,
     spinner_ticks: u32,
+}
+
+/// `Writing changes · src/a.rs +3 -1 · b.rs +2 -0` from a `patch_progress` event.
+fn patch_progress_label(event: &Value) -> String {
+    let mut label = "Writing changes".to_string();
+    for file in event.get("files").and_then(Value::as_array).into_iter().flatten() {
+        let path = file.get("path").and_then(Value::as_str).unwrap_or("?");
+        let count = |key: &str| file.get(key).and_then(Value::as_u64).unwrap_or(0);
+        label.push_str(&format!(" · {path} +{} -{}", count("added"), count("removed")));
+    }
+    label
 }
 
 fn agent_tag(message: &Value) -> Option<String> {
@@ -188,6 +201,7 @@ impl App {
             dirty: true,
             run_finished: false,
             turn_diff: None,
+            patch_progress: None,
             queued_texts: VecDeque::new(),
             popup_dismissed_for: None,
             last_file_query: None,
@@ -332,6 +346,7 @@ impl App {
         let elapsed = self.elapsed().map(format_elapsed).unwrap_or_default();
         self.busy = false;
         self.busy_since = None;
+        self.patch_progress = None;
         self.overlay = None;
         self.run_finished = true;
         if outcome != Finish::Completed {
@@ -428,6 +443,10 @@ impl App {
                 let name = event.get("name").and_then(Value::as_str).unwrap_or("agent");
                 let role = event.get("role").and_then(Value::as_str).unwrap_or("explorer");
                 self.push_notice(format!("spawned {role} agent \"{name}\""));
+            }
+            "patch_progress" => {
+                let complete = event.get("complete").and_then(Value::as_bool).unwrap_or(true);
+                self.patch_progress = (!complete).then(|| patch_progress_label(event));
             }
             "run_completed" => self.finish(Finish::Completed),
             "run_failed" => {
@@ -1026,6 +1045,18 @@ mod tests {
             None,
         )
     }
+
+    #[test]
+    fn patch_progress_sets_and_clears_the_status_label() {
+        let mut app = app();
+        app.busy = true;
+        app.on_run_event(&json!({"type": "patch_progress", "complete": false,
+            "files": [{"path": "src/a.rs", "op": "update", "added": 3, "removed": 1}]}));
+        assert_eq!(app.patch_progress.as_deref(), Some("Writing changes · src/a.rs +3 -1"));
+        app.on_run_event(&json!({"type": "patch_progress", "complete": true, "files": []}));
+        assert!(app.patch_progress.is_none());
+    }
+
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

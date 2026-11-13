@@ -140,6 +140,9 @@ pub struct UiStore {
     /// Live `spawn_agent` / `spawn_agents` registrations not yet visible as
     /// messages (Codex-style background agents).
     pub spawned_agents: Signal<Vec<Value>>,
+    /// Latest `patch_progress` event while the model streams an `apply_patch`
+    /// call (files + line counts); cleared when the patch is complete.
+    pub patch_progress: Signal<Option<Value>>,
 }
 
 impl UiStore {
@@ -256,6 +259,7 @@ impl UiStore {
         store.active_run_id.set(Some(run_id.clone()));
         store.turn_diff.set(None);
         store.spawned_agents.set(Vec::new());
+        store.patch_progress.set(None);
         spawn(async move {
             let state = core();
             // 1. Run + messages + plan + usage + pending requests.
@@ -433,7 +437,12 @@ impl UiStore {
                     }
                 }
             }
+            "patch_progress" => {
+                let complete = event.get("complete").and_then(Value::as_bool).unwrap_or(true);
+                store.patch_progress.set((!complete).then(|| event.clone()));
+            }
             "run_completed" | "run_failed" => {
+                store.patch_progress.set(None);
                 let run_id = event.get("runId").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| run_id.to_string());
                 spawn(async move {
                     let state = core();

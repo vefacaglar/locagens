@@ -85,6 +85,7 @@ fn App() -> Element {
     let prompt = use_signal(String::new);
     let turn_diff: Signal<Option<(String, usize)>> = use_signal(|| None);
     let spawned_agents: Signal<Vec<serde_json::Value>> = use_signal(Vec::new);
+    let patch_progress: Signal<Option<serde_json::Value>> = use_signal(|| None);
 
     let store = UiStore {
         appearance,
@@ -112,6 +113,7 @@ fn App() -> Element {
         prompt,
         turn_diff,
         spawned_agents,
+        patch_progress,
     };
     use_context_provider(|| store);
 

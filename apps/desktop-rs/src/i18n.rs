@@ -160,6 +160,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("empty.title_in", "What should we build in {0}?", "{0} içinde ne inşa edelim?"),
     ("empty.subtitle", "Ask the agent to explore, plan, or make changes.", "Ajandan keşfetmesini, plan yapmasını ya da değişiklik yapmasını iste."),
     ("thread.working", "Working…", "Çalışıyor…"),
+    ("thread.writing_patch", "Writing changes", "Değişiklikler yazılıyor"),
     ("thread.thought", "Thought · {0} words", "Düşünce · {0} kelime"),
     ("thread.copy", "Copy message", "Mesajı kopyala"),
     ("tool.done", "done", "bitti"),
