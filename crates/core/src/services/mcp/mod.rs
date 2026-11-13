@@ -174,6 +174,42 @@ fn read_file(path: &PathBuf, scope: &str, project_path: Option<&str>) -> Vec<Mcp
     configs
 }
 
+/// Maps config.toml `[mcp_servers.<name>]` tables onto the user scope.
+/// `env_vars` (names to forward) are resolved from the current environment;
+/// `cwd` and the timeout keys have no equivalent here and are ignored.
+fn config_toml_servers(
+    servers: &BTreeMap<String, locagens_config::config_toml::McpServerConfig>,
+) -> Vec<McpServerConfig> {
+    servers
+        .iter()
+        .map(|(name, entry)| {
+            let mut env = entry.env.clone();
+            for var in &entry.env_vars {
+                if let Ok(value) = std::env::var(var) {
+                    env.entry(var.clone()).or_insert(value);
+                }
+            }
+            let non_empty = |map: &BTreeMap<String, String>| (!map.is_empty()).then(|| map.clone());
+            McpServerConfig {
+                name: name.trim().to_lowercase(),
+                scope: "user".to_string(),
+                transport: if entry.url.is_some() { "streamable-http" } else { "stdio" }.to_string(),
+                command: entry.command.clone(),
+                args: (!entry.args.is_empty()).then(|| entry.args.clone()),
+                env: non_empty(&env),
+                url: entry.url.clone(),
+                enabled: entry.is_enabled(),
+                project_path: None,
+                bearer_token_env_var: entry.bearer_token_env_var.clone(),
+                http_headers: non_empty(&entry.http_headers),
+                env_http_headers: non_empty(&entry.env_http_headers),
+                oauth_client_id: None,
+                scopes: None,
+            }
+        })
+        .collect()
+}
+
 /// Project configs take precedence over user configs of the same name.
 pub fn list_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
     let mut configs: Vec<McpServerConfig> = Vec::new();
@@ -186,6 +222,14 @@ pub fn list_configs(project_path: Option<&str>) -> Vec<McpServerConfig> {
         }
     }
     for cfg in read_file(&user_config_path(), "user", None) {
+        if !seen.contains(&cfg.name) {
+            seen.push(cfg.name.clone());
+            configs.push(cfg);
+        }
+    }
+    // Codex-style `[mcp_servers.<name>]` from config.toml, lowest precedence:
+    // an entry saved from the UI (mcp.json) with the same name overrides it.
+    for cfg in config_toml_servers(&crate::config_runtime::current().mcp_servers) {
         if !seen.contains(&cfg.name) {
             configs.push(cfg);
         }

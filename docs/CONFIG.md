@@ -34,7 +34,7 @@ process-wide access: `locagens_core::config_runtime::current()`.
 | `[sandbox_workspace_write]` | `network_access = true` lets sandboxed `exec_command` use the network. `writable_roots`, `exclude_tmpdir_env_var`, `exclude_slash_tmp` are parsed and shown but not yet enforced |
 | `[shell_environment_policy]` | Environment of spawned commands: `inherit` (`all`/`core`/`none`), `ignore_default_excludes`, `exclude`, `set`, `include_only` (case-insensitive globs). Default excludes drop `*KEY*`, `*SECRET*`, `*TOKEN*` once a policy table exists |
 | `[model_providers.<id>]` | Custom providers (unchanged: read by the provider engine from every chain file) |
-| `[mcp_servers.<name>]` | Parsed into `McpServerConfig` (`command`, `args`, `env`, `url`, `bearer_token_env_var`, `http_headers`, `enabled`, timeouts, tool filters) and exposed via `Config::mcp_servers` / `load_mcp_servers()`; `services/mcp.rs` still reads `mcp_servers.json` |
+| `[mcp_servers.<name>]` | Parsed into `McpServerConfig` (`command`, `args`, `env`, `url`, `bearer_token_env_var`, `http_headers`, `enabled`, timeouts, tool filters) and merged into the MCP server list (user scope, lowest precedence: a same-named entry in `mcp_servers.json` / project `.locagens/mcp.json` wins). `env_vars` are forwarded from the environment; `cwd`, timeouts and tool filters are not applied yet |
 | `profile`, `[profiles.<name>]` | Profile overlay of the model, reasoning, verbosity, context, approval and sandbox keys; select with `--profile <name>` |
 | `project_doc_max_bytes` | AGENTS.md byte budget (default 32768, `0` disables project docs) |
 | `project_doc_fallback_filenames` | Extra doc filenames tried after `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `.agents.md` |

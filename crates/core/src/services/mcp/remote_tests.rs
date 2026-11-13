@@ -401,3 +401,30 @@ fn saving_from_the_form_keeps_stored_auth_settings() {
     assert_eq!(merged.http_headers.unwrap()["X-Team"], "core");
     assert_eq!(merged.scopes.unwrap(), vec!["read".to_string()]);
 }
+
+#[test]
+fn config_toml_servers_map_onto_user_scope() {
+    let toml = r#"
+[mcp_servers.Docs]
+url = "https://example.test/mcp"
+bearer_token_env_var = "DOCS_TOKEN"
+
+[mcp_servers.local]
+command = "node"
+args = ["server.js"]
+env_vars = ["LOCAGENS_TEST_MCP_FORWARDED"]
+enabled = false
+"#;
+    std::env::set_var("LOCAGENS_TEST_MCP_FORWARDED", "yes");
+    let config: locagens_config::config_toml::Config = toml::from_str(toml).unwrap();
+    let mapped = super::config_toml_servers(&config.mcp_servers);
+    let docs = mapped.iter().find(|server| server.name == "docs").unwrap();
+    assert_eq!(docs.transport, "streamable-http");
+    assert_eq!(docs.scope, "user");
+    assert_eq!(docs.bearer_token_env_var.as_deref(), Some("DOCS_TOKEN"));
+    let local = mapped.iter().find(|server| server.name == "local").unwrap();
+    assert_eq!(local.transport, "stdio");
+    assert!(!local.enabled);
+    assert_eq!(local.args.as_deref(), Some(&["server.js".to_string()][..]));
+    assert_eq!(local.env.as_ref().unwrap()["LOCAGENS_TEST_MCP_FORWARDED"], "yes");
+}
