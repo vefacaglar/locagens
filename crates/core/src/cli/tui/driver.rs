@@ -257,6 +257,7 @@ impl Driver {
             system_prompt: self.config.system_prompt.clone(),
             append_system_prompt: self.config.append_system_prompt.clone(),
             no_session: self.config.no_session,
+            auto_title: true,
             ..Default::default()
         };
         match runs_api::create_run(&self.state, &payload).await {
@@ -365,6 +366,20 @@ impl Driver {
         let Some(command) = SlashCommand::parse(line) else { return };
         if command == SlashCommand::Help {
             return self.app.push_notice(App::help_text());
+        }
+        if command == SlashCommand::Model(None) {
+            // Like pi: a searchable picker instead of printing the table.
+            self.load_model_choices().await;
+            if self.app.model_choices.is_empty() {
+                return self.app.push_error("No models available. Sign in with `lcgn auth login <provider>`.");
+            }
+            let current = self.app.model.as_ref().map(|model| model.label());
+            self.app.overlay = Some(super::overlay::Overlay::ModelPicker(super::overlay::ModelPicker::new(
+                self.app.model_choices.clone(),
+                current,
+            )));
+            self.app.dirty = true;
+            return;
         }
         let mut session = CommandSession {
             model: self.app.model.clone(),

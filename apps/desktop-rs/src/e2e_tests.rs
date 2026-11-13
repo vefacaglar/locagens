@@ -69,7 +69,16 @@ fn sse(chunks: &[Value]) -> String {
 }
 
 /// First turn: a `run_command` tool call. After the tool result: the answer.
+/// The first-turn chat-title call (`auto_title`), not an agent turn.
+fn is_title_request(request: &Value) -> bool {
+    request["messages"][0]["content"].as_str() == Some(locagens_core::orchestrator::auto_title::TITLE_PROMPT)
+}
+
 fn mock_reply(request: &Value) -> String {
+    if is_title_request(request) {
+        return sse(&[json!({ "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "Make a folder" },
+                               "finish_reason": "stop" }] })]);
+    }
     let has_tool_result = request["messages"]
         .as_array()
         .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
@@ -101,7 +110,9 @@ async fn start_mock_server() -> (String, Arc<Mutex<Vec<Value>>>) {
             let log = log.clone();
             tokio::spawn(async move {
                 let Some(body) = read_request_body(&mut stream).await else { return };
-                log.lock().unwrap().push(body.clone());
+                if !is_title_request(&body) {
+                    log.lock().unwrap().push(body.clone());
+                }
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{}",
                     mock_reply(&body)
@@ -228,6 +239,7 @@ async fn composer_run_streams_prompts_for_permission_and_finishes() {
     // The core agrees, and the model saw the denial as the tool result.
     let run = locagens_core::api::runs::get_run(&state, &run_id).await.unwrap();
     assert_eq!(run.status, "done");
+    assert_eq!(run.title, "Make a folder", "the model named the chat");
     let requests = requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "one request per model turn");
     let tool_result = requests[1]["messages"]

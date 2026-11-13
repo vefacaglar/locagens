@@ -15,6 +15,7 @@
 //! ```
 
 pub mod agent_roles;
+pub mod auto_title;
 pub mod agents;
 pub mod agents_md;
 pub mod apply_patch;
@@ -242,6 +243,9 @@ pub struct RunHandle {
     /// `(project, snapshot id)` of this turn's pre-turn git snapshot until
     /// its post-turn state is recorded (QA-030).
     turn_snapshot: Mutex<Option<(PathBuf, String)>>,
+    /// Name the chat with a model call on this (first) turn
+    /// ([`CreateRunPayload::auto_title`](crate::api::runs::CreateRunPayload)).
+    pub auto_title: AtomicBool,
 }
 
 

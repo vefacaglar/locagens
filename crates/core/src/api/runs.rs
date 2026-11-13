@@ -38,6 +38,10 @@ pub struct CreateRunPayload {
     /// `session_index.jsonl` / `history.jsonl`.
     #[serde(default)]
     pub no_session: bool,
+    /// Name the chat with a small model call on its first turn (desktop and
+    /// the TUI); otherwise the title stays the task's first line.
+    #[serde(default)]
+    pub auto_title: bool,
 }
 
 /// Input for `continue_run` — same fields, all provider fields
@@ -176,18 +180,6 @@ fn provider_display_name(state: &AppState, provider_id: &str) -> String {
         .get(provider_id)
         .and_then(|config| config.display_name.clone())
         .unwrap_or_else(|| provider_id.to_string())
-}
-
-fn truncate_title(task: &str) -> String {
-    let first_line = task.lines().next().unwrap_or("").trim();
-    let mut title: String = first_line.chars().take(60).collect();
-    if first_line.chars().count() > 60 {
-        title.push('…');
-    }
-    if title.is_empty() {
-        title = "New chat".to_string();
-    }
-    title
 }
 
 /// The run's effective mode: explicit bypass wins over a milder mode. An
@@ -343,7 +335,7 @@ pub async fn create_run(
 
     let run = Run {
         id: run_id.clone(),
-        title: truncate_title(&payload.task),
+        title: crate::orchestrator::auto_title::fallback_title(&payload.task),
         task: payload.task.clone(),
         project_path: project_path.clone(),
         project_name,
@@ -379,6 +371,7 @@ pub async fn create_run(
     state.db.append_message(message.clone());
 
     let handle = state.orchestrator.ensure_handle(&run_id);
+    handle.auto_title.store(payload.auto_title, std::sync::atomic::Ordering::SeqCst);
     // Subscribe before spawning and replay the initial user message so the
     // caller's receiver sees it immediately (the drive task emits nothing
     // for it).
@@ -1096,15 +1089,6 @@ mod tests {
         }
         assert!(permission_decision(&state, "run-x", "Deny").await.is_err());
         let _ = std::fs::remove_dir_all(&data);
-    }
-
-    #[test]
-    fn title_truncation() {
-        assert_eq!(truncate_title("short task"), "short task");
-        let long = "x".repeat(100);
-        let title = truncate_title(&long);
-        assert_eq!(title.chars().count(), 61);
-        assert!(title.ends_with('…'));
     }
 
     fn test_state() -> (Arc<AppState>, std::path::PathBuf) {

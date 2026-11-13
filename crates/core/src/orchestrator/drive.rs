@@ -465,10 +465,23 @@ pub(super) async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
         }
     }
 
+    // First turn: name the chat in parallel with the turn.
+    let title_task = auto_title::start(&state, &handle, &run_full);
     let result = match prompt_block {
         Some(reason) => Err(AgentError::Failed(format!("Blocked by UserPromptSubmit hook: {reason}"))),
         None => agent.run(MAX_ROUNDS).await,
     };
+    if let Some(task) = title_task {
+        if result.is_ok() {
+            // Usually long done; never hold the turn's end for long.
+            let abort = task.abort_handle();
+            if tokio::time::timeout(Duration::from_secs(10), task).await.is_err() {
+                abort.abort();
+            }
+        } else {
+            task.abort();
+        }
+    }
     handle.agents.shutdown();
     // Post-turn tree before the terminal status, so an immediate `/undo`
     // already knows which files this turn changed.

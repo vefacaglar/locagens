@@ -3,7 +3,7 @@
 
 use super::app::{format_elapsed, App};
 use super::diff::diff_lines;
-use super::overlay::{Approval, Overlay, QuestionFlow};
+use super::overlay::{Approval, ModelPicker, Overlay, QuestionFlow};
 use super::popup::{Popup, PopupKind};
 use super::wrap::{truncate_to_width, wrap_text};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -151,6 +151,9 @@ fn status_line(app: &App) -> Line<'static> {
                 "⏸ Waiting for your answer",
                 Style::default().fg(Color::Yellow),
             ));
+        }
+        Some(Overlay::ModelPicker(_)) => {
+            return Line::from(Span::styled("Select a model", Style::default().fg(Color::Cyan)));
         }
         None => {}
     }
@@ -342,6 +345,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     match app.overlay.as_mut() {
         Some(Overlay::Approval(approval)) => draw_approval(f, approval, area),
         Some(Overlay::Question(flow)) => draw_question(f, flow, area),
+        Some(Overlay::ModelPicker(picker)) => draw_model_picker(f, picker, area),
         None => {}
     }
 }
@@ -459,6 +463,69 @@ fn question_lines(flow: &QuestionFlow, width: usize) -> Vec<Line<'static>> {
         Span::raw(format!("{}{caret}", flow.note)),
     ]));
     lines
+}
+
+fn draw_model_picker(f: &mut Frame, picker: &ModelPicker, area: Rect) {
+    let width = area.width.saturating_sub(4).min(80);
+    let height = area.height.saturating_sub(4).clamp(6, 24);
+    let rect = centered(area, width, height);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Select model ");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let [search, list, keys] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Search: ", dim()),
+            Span::raw(picker.query.clone()),
+            Span::styled("▏", Style::default().fg(Color::Cyan)),
+        ])),
+        search,
+    );
+    let visible = picker.visible();
+    let rows = list.height as usize;
+    // Keep the highlighted row in view.
+    let first = picker.selected.saturating_sub(rows.saturating_sub(1));
+    let lines: Vec<Line<'static>> = if visible.is_empty() {
+        vec![Line::from(Span::styled("No matching models", dim()))]
+    } else {
+        visible
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(rows)
+            .map(|(index, item)| {
+                let active = picker.current.as_deref() == Some(item.value.as_str());
+                let marker = if index == picker.selected { "› " } else { "  " };
+                let style = if index == picker.selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let mut spans = vec![Span::styled(format!("{marker}{}", item.value), style)];
+                if active {
+                    spans.push(Span::styled("  (current)", dim()));
+                }
+                if !item.detail.is_empty() {
+                    spans.push(Span::styled(format!("  {}", item.detail), dim()));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    };
+    f.render_widget(Paragraph::new(lines), list);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("{} models · type to search · ↑↓ move · Enter switch · Esc close", visible.len()),
+            dim(),
+        )),
+        keys,
+    );
 }
 
 fn draw_question(f: &mut Frame, flow: &QuestionFlow, area: Rect) {

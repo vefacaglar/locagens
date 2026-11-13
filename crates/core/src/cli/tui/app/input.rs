@@ -125,6 +125,17 @@ impl App {
                 }
                 None => Vec::new(),
             },
+            Some(Overlay::ModelPicker(picker)) => match picker.on_key(key) {
+                Some(crate::cli::tui::overlay::PickerOutcome::Pick(model)) => {
+                    self.overlay = None;
+                    vec![Action::Slash(format!("/model {model}"))]
+                }
+                Some(crate::cli::tui::overlay::PickerOutcome::Close) => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
             None => Vec::new(),
         }
     }

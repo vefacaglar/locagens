@@ -879,6 +879,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
             bypass_permissions: mode == "auto",
             system_prompt: None,
             append_system_prompt: None,
+            auto_title: true,
             ..Default::default()
         };
         match locagens_core::api::runs::create_run(&state, &payload).await {

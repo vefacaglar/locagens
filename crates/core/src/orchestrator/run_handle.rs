@@ -25,6 +25,7 @@ impl RunHandle {
             finished_tx,
             drive_abort: Mutex::new(None),
             turn_snapshot: Mutex::new(None),
+            auto_title: AtomicBool::new(false),
         })
     }
 

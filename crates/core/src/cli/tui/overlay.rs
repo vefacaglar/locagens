@@ -1,4 +1,4 @@
-//! Modal overlays: permission approval and agent questions.
+//! Modal overlays: permission approval, agent questions and the model picker.
 
 use super::diff::preview_diff;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -7,6 +7,110 @@ use serde_json::Value;
 pub enum Overlay {
     Approval(Approval),
     Question(QuestionFlow),
+    ModelPicker(ModelPicker),
+}
+
+// ---------------------------------------------------------------------
+// Model picker (`/model` without an argument, like pi's model selector)
+// ---------------------------------------------------------------------
+
+/// Searchable list of every `provider/model`; Enter switches to the
+/// highlighted one.
+pub struct ModelPicker {
+    pub all: Vec<super::popup::PopupItem>,
+    pub query: String,
+    pub selected: usize,
+    /// `provider/model` in use, marked in the list.
+    pub current: Option<String>,
+}
+
+/// What a key did in the picker.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PickerOutcome {
+    Pick(String),
+    Close,
+}
+
+impl ModelPicker {
+    pub fn new(all: Vec<super::popup::PopupItem>, current: Option<String>) -> Self {
+        let selected = current
+            .as_deref()
+            .and_then(|current| all.iter().position(|item| item.value == current))
+            .unwrap_or(0);
+        Self { all, query: String::new(), selected, current }
+    }
+
+    /// The models matching the search text (all of them when it is empty).
+    pub fn visible(&self) -> Vec<super::popup::PopupItem> {
+        if self.query.trim().is_empty() {
+            return self.all.clone();
+        }
+        super::popup::argument_items(&self.all, &self.query)
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) -> Option<PickerOutcome> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let count = self.visible().len();
+        match key.code {
+            KeyCode::Esc => return Some(PickerOutcome::Close),
+            KeyCode::Char('c') if ctrl => return Some(PickerOutcome::Close),
+            KeyCode::Enter => {
+                return self.visible().get(self.selected).map(|item| PickerOutcome::Pick(item.value.clone()));
+            }
+            KeyCode::Up => self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1)),
+            KeyCode::Char('p') if ctrl => self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1)),
+            KeyCode::Down => self.selected = if self.selected + 1 >= count { 0 } else { self.selected + 1 },
+            KeyCode::Char('n') if ctrl => self.selected = if self.selected + 1 >= count { 0 } else { self.selected + 1 },
+            KeyCode::PageUp => self.selected = self.selected.saturating_sub(10),
+            KeyCode::PageDown => self.selected = (self.selected + 10).min(count.saturating_sub(1)),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = count.saturating_sub(1),
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.selected = 0;
+            }
+            KeyCode::Char(ch) if !ctrl => {
+                self.query.push(ch);
+                self.selected = 0;
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod model_picker_tests {
+    use super::*;
+    use crate::cli::tui::popup::PopupItem;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn item(value: &str) -> PopupItem {
+        PopupItem { value: value.into(), label: value.into(), detail: String::new() }
+    }
+
+    #[test]
+    fn typing_filters_and_enter_picks_the_highlighted_model() {
+        let all = vec![item("xai/grok-4.7"), item("opencode-go/deepseek-v4.1-flash"), item("opencode-go/glm-5.3")];
+        let mut picker = ModelPicker::new(all, Some("opencode-go/glm-5.3".into()));
+        assert_eq!(picker.selected, 2, "starts on the current model");
+        for ch in "deep".chars() {
+            assert_eq!(picker.on_key(press(KeyCode::Char(ch))), None);
+        }
+        assert_eq!(picker.visible().len(), 1);
+        assert_eq!(
+            picker.on_key(press(KeyCode::Enter)),
+            Some(PickerOutcome::Pick("opencode-go/deepseek-v4.1-flash".into()))
+        );
+        picker.on_key(press(KeyCode::Backspace));
+        picker.query.clear();
+        picker.on_key(press(KeyCode::Up));
+        assert_eq!(picker.selected, 2, "wraps to the end");
+        assert_eq!(picker.on_key(press(KeyCode::Esc)), Some(PickerOutcome::Close));
+    }
 }
 
 // ---------------------------------------------------------------------
