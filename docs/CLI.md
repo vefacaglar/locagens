@@ -177,6 +177,23 @@ tokens). Only providers you have configured (credential in `auth.json`, the
 provider's own env var, or an entry in `models.json` / Codex `config.toml`)
 appear in `/model` and `--list-models`.
 
+## MCP
+
+```bash
+lcgn mcp list              # configured servers, status, tool counts
+lcgn mcp login <server>    # OAuth sign-in for a remote (http) MCP server
+lcgn mcp logout <server>   # forget the stored token
+```
+
+`login` discovers the authorization server
+(`/.well-known/oauth-protected-resource` then authorization-server metadata),
+registers a client dynamically, opens the browser for the PKCE authorization
+code flow and receives the redirect on `127.0.0.1`. Tokens are stored in
+`~/.locagens/mcp-oauth.json` (`$LOCAGENS_HOME`) and refreshed automatically.
+For static auth use `bearer_token_env_var`, `http_headers` and
+`env_http_headers` in the server entry (see `docs/CORE_API.md`, "MCP server
+configuration").
+
 ## Flags reference
 
 ```txt

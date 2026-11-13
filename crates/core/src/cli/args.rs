@@ -101,6 +101,21 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage MCP servers (list, OAuth sign-in for remote servers)
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpAction {
+    /// List configured MCP servers with their status
+    List,
+    /// Sign a remote (http) MCP server in via OAuth in the browser
+    Login { server: String },
+    /// Remove the stored OAuth token of a remote MCP server
+    Logout { server: String },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -338,6 +353,20 @@ mod tests {
         ));
         let parsed = cli(&["sessions"]);
         assert!(matches!(parsed.command, Some(Command::Sessions { json: false })));
+    }
+
+    #[test]
+    fn parses_mcp_subcommands() {
+        let parsed = cli(&["mcp", "login", "docs"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Mcp { action: McpAction::Login { ref server } }) if server == "docs"
+        ));
+        assert!(matches!(
+            cli(&["mcp", "logout", "docs"]).command,
+            Some(Command::Mcp { action: McpAction::Logout { .. } })
+        ));
+        assert!(matches!(cli(&["mcp", "list"]).command, Some(Command::Mcp { action: McpAction::List })));
     }
 
     #[test]

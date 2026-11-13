@@ -171,7 +171,45 @@ pub async fn upsert_mcp_server(state, input: McpServerInput) -> ApiResult<McpSer
 pub async fn delete_mcp_server(state, name, project_path) -> ApiResult<bool>
 pub async fn restart_mcp_server(state, name, project_path) -> ApiResult<McpServerInfo>
 pub async fn toggle_mcp_server(state, name, enabled, project_path) -> ApiResult<McpServerInfo>
+pub async fn login_mcp_server(state, name, project_path, on_url: &(dyn Fn(&str) + Sync)) -> ApiResult<McpServerInfo>
+pub async fn logout_mcp_server(state, name, project_path) -> ApiResult<bool>
 ```
+
+`login_mcp_server` runs the MCP OAuth flow for a remote server (discovery,
+dynamic registration, PKCE, 127.0.0.1 loopback callback) and hands the
+authorization URL to `on_url` (open it with
+`services::mcp::oauth::open_browser`). Tokens are stored in
+`~/.locagens/mcp-oauth.json` (mode 0600 on unix). `McpServerInfo` carries
+`needs_login` (server answered 401) and `signed_in` (token stored).
+`services::mcp::shutdown_sessions()` DELETEs open streamable-HTTP sessions;
+call it before the process exits.
+
+#### MCP server configuration
+
+Servers live in `mcp_servers.json` (user) and `<project>/.locagens/mcp.json`
+(project) as `{ "mcpServers": { name: entry } }`. `stdio` entries use
+`command` / `args` / `env`. Remote entries use `url` and `transport`
+(`http`, `streamable-http` or `sse`; all three speak the MCP streamable HTTP
+transport: `initialize` handshake, `Mcp-Session-Id` / `MCP-Protocol-Version`
+headers, JSON or `text/event-stream` replies, re-initialize on a 404 session
+loss, `DELETE` on shutdown; the legacy GET+endpoint SSE transport is not
+implemented, matching Codex). Auth options, named like Codex's
+`[mcp_servers.<name>]` (camelCase aliases accepted):
+
+```json
+{ "mcpServers": { "docs": {
+    "transport": "streamable-http",
+    "url": "https://mcp.example.com/mcp",
+    "bearer_token_env_var": "DOCS_MCP_TOKEN",
+    "http_headers": { "X-Team": "core" },
+    "env_http_headers": { "X-Api-Key": "DOCS_API_KEY" },
+    "oauth_client_id": "optional pre-registered client id",
+    "scopes": ["read"]
+} } }
+```
+
+Without a static `Authorization` header, a stored OAuth token (from
+`lcgn mcp login`) is sent as the bearer and refreshed on expiry or a 401.
 
 ### `api::plugins` — plugin registry (MCP servers, custom tools, hooks)
 
