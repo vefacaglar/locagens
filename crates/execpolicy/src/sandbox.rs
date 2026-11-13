@@ -50,8 +50,8 @@ pub struct SandboxSpec {
     /// `[sandbox_workspace_write] writable_roots`). Missing ones are skipped.
     pub writable_roots: Vec<PathBuf>,
     /// Credential files / directories kept from the command (QA-020, see
-    /// [`crate::secret_paths`]): unreadable and unwritable on macOS/Linux,
-    /// unwritable on Windows. Usually [`crate::secret_paths::credential_paths`].
+    /// [`crate::secret_paths`]): unreadable and unwritable on every
+    /// backend. Usually [`crate::secret_paths::credential_paths`].
     pub secret_paths: Vec<PathBuf>,
 }
 

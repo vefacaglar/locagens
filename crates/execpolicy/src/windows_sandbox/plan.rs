@@ -8,10 +8,11 @@
 //! `GIT_CONFIG_FILE` / `LOCAGENS_CONFIG_DIR` rules.
 //!
 //! Credential locations ([`crate::secret_paths`]) that a writable root
-//! covers get a deny-write ACE too (QA-020). Nothing else is needed for
-//! the rest: the write-restricted token can only write where the
-//! capability SID is granted. Reads of credentials cannot be denied with
-//! this token (its restricting SIDs are not consulted for reads).
+//! covers get a deny-write ACE too (QA-020). Every credential location
+//! gets a Medium no-read-up integrity label: the command runs at Low
+//! integrity, so it can neither read nor change them. The writable roots
+//! are labeled Low (the command's own level) and the protected paths
+//! Medium again; see `process::apply_plan`.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,10 @@ pub struct WindowsSandboxPlan {
     /// Credential files / directories inside a writable root: they get a
     /// deny-write ACE for the capability SID as well.
     pub secret_deny_write_paths: Vec<PathBuf>,
+    /// Every existing credential location (canonical) that does not contain
+    /// a writable root: labeled Medium + no-read-up, so the Low-integrity
+    /// command can neither read, write nor delete it.
+    pub secret_read_paths: Vec<PathBuf>,
     /// Directories created before the command starts (the temp dir, and
     /// `.locagens` so a sandboxed command cannot create it first).
     pub create_dirs: Vec<PathBuf>,
@@ -76,6 +81,7 @@ pub fn build_plan(
             writable_roots: Vec::new(),
             deny_write_paths: Vec::new(),
             secret_deny_write_paths: Vec::new(),
+            secret_read_paths: unreadable_secrets(secret_paths, std::slice::from_ref(&root)),
             create_dirs: Vec::new(),
             temp_dir: None,
         });
@@ -83,7 +89,9 @@ pub fn build_plan(
 
     let key = workspace_key(&root);
     let capability_sid = capability_sid_for(&format!("workspace:{key}"));
-    let temp_dir = temp_base
+    // `%TEMP%` may be an 8.3 short path (`C:\Users\RUNNER~1\…`); the long
+    // form keeps planned and revoked paths comparable with canonical ones.
+    let temp_dir = normalize_path(temp_base)
         .join("locagens-sandbox")
         .join(format!("tmp-{:016x}", fnv1a64(key.as_bytes(), FNV_OFFSET)));
     // Shared with the file tools (`protected_paths`): pre-created entries
@@ -110,6 +118,7 @@ pub fn build_plan(
         )
         .collect();
     let secret_deny_write_paths = secrets_under(&writable_roots, secret_paths);
+    let secret_read_paths = unreadable_secrets(secret_paths, &writable_roots);
 
     Ok(WindowsSandboxPlan {
         token_mode: TokenMode::WorkspaceWrite,
@@ -117,6 +126,7 @@ pub fn build_plan(
         writable_roots,
         deny_write_paths,
         secret_deny_write_paths,
+        secret_read_paths,
         create_dirs,
         temp_dir: Some(temp_dir),
     })
@@ -126,16 +136,31 @@ pub fn build_plan(
 /// `writable_roots` without containing one: those the capability SID could
 /// otherwise write through an inherited grant.
 fn secrets_under(writable_roots: &[PathBuf], secret_paths: &[PathBuf]) -> Vec<PathBuf> {
-    let kept: Vec<PathBuf> = crate::secret_paths::maskable(secret_paths, writable_roots)
-        .iter()
-        .map(|secret| strip_verbatim_prefix(secret))
-        .collect();
-    kept.into_iter()
+    unreadable_secrets(secret_paths, writable_roots)
+        .into_iter()
         .filter(|secret| {
             let key = workspace_key(secret);
             writable_roots.iter().any(|root| key.starts_with(&format!("{}\\", workspace_key(root))))
         })
         .collect()
+}
+
+/// The existing credential locations (canonical) that do not contain one
+/// of `keep` (labeling those would lock the command out of its own roots).
+fn unreadable_secrets(secret_paths: &[PathBuf], keep: &[PathBuf]) -> Vec<PathBuf> {
+    crate::secret_paths::maskable(secret_paths, keep)
+        .iter()
+        .map(|secret| strip_verbatim_prefix(secret))
+        .collect()
+}
+
+/// The canonical long form of an existing `path` (8.3 short names and
+/// links resolved) without the verbatim prefix; `path` itself when it
+/// cannot be resolved.
+pub fn normalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .map(|canonical| strip_verbatim_prefix(&canonical))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// `\\?\C:\x` → `C:\x` (canonicalize adds the verbatim prefix on Windows,
@@ -209,7 +234,7 @@ mod tests {
         assert_eq!(plan.token_mode, TokenMode::WorkspaceWrite);
         assert_eq!(plan.writable_roots[0], root);
         let temp_dir = plan.temp_dir.clone().unwrap();
-        assert!(temp_dir.starts_with(temp_base.join("locagens-sandbox")));
+        assert!(temp_dir.starts_with(normalize_path(&temp_base).join("locagens-sandbox")));
         assert_eq!(plan.writable_roots, vec![root.clone(), temp_dir.clone()]);
         assert_eq!(
             plan.deny_write_paths,
@@ -266,6 +291,7 @@ mod tests {
         assert!(plan.create_dirs.is_empty());
         assert_eq!(plan.temp_dir, None);
         assert!(plan.secret_deny_write_paths.is_empty());
+        assert!(plan.secret_read_paths.is_empty());
         assert_eq!(plan.capability_sid, capability_sid_for("read-only"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -309,6 +335,13 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let plan = build_plan(SandboxMode::WorkspaceWrite, &nested, &std::env::temp_dir(), std::slice::from_ref(&home), &secrets).unwrap();
         assert_eq!(plan.secret_deny_write_paths, vec![home.join(".locagens").join("auth.json")]);
+        assert_eq!(
+            plan.secret_read_paths,
+            vec![home.join(".locagens").join("auth.json"), other_home.join(".aws")],
+            "every credential not containing a writable root is read-protected"
+        );
+        let plan = build_plan(SandboxMode::ReadOnly, &root, &std::env::temp_dir(), &[], &secrets).unwrap();
+        assert_eq!(plan.secret_read_paths.len(), 3, "read-only commands cannot read them either");
         for dir in [root, home, other_home] {
             let _ = std::fs::remove_dir_all(dir);
         }

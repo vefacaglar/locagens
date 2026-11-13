@@ -7,6 +7,14 @@
 //! must additionally be granted to one of those restricting SIDs — so the
 //! command can only write where the sandbox granted its capability SID
 //! (plus the rare objects writable by Everyone / the logon session).
+//!
+//! The restricting SIDs are only consulted for the rights `GENERIC_WRITE`
+//! maps to; `DELETE` and `FILE_DELETE_CHILD` are not among them. The token
+//! is therefore also lowered to Low integrity: mandatory integrity control
+//! refuses those rights (and every other write) on anything labeled above
+//! Low, which is every unlabeled file. The writable roots are labeled Low
+//! (`acl::set_label`); credentials get a Medium no-read-up label, which
+//! also hides them from reads.
 
 use std::ffi::c_void;
 use std::io;
@@ -18,17 +26,22 @@ use windows_sys::Win32::Security::Authorization::{
     TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, CreateRestrictedToken, CreateWellKnownSid, GetTokenInformation,
-    LookupPrivilegeValueW, SetTokenInformation, TokenDefaultDacl, TokenGroups, WinWorldSid, ACL,
-    DISABLE_MAX_PRIVILEGE, LUA_TOKEN, NO_INHERITANCE, PSID, SE_PRIVILEGE_ENABLED,
-    SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_PRIVILEGES,
-    TOKEN_QUERY, WRITE_RESTRICTED,
+    AdjustTokenPrivileges, CreateRestrictedToken, CreateWellKnownSid, GetLengthSid,
+    GetTokenInformation, LookupPrivilegeValueW, SetTokenInformation, TokenDefaultDacl, TokenGroups,
+    TokenIntegrityLevel, WinWorldSid, ACL, DISABLE_MAX_PRIVILEGE, LUA_TOKEN, NO_INHERITANCE, PSID,
+    SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
+    TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
+    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, WRITE_RESTRICTED,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// `SE_GROUP_LOGON_ID` — marks the logon-session SID in `TokenGroups`.
 const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+/// `SE_GROUP_INTEGRITY` — marks the integrity SID of a token label.
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+/// Mandatory integrity level SIDs (`S-1-16-<rid>`).
+pub(crate) const LOW_INTEGRITY_SID: &str = "S-1-16-4096";
+pub(crate) const MEDIUM_INTEGRITY_SID: &str = "S-1-16-8192";
 
 pub(crate) fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -118,7 +131,7 @@ fn logon_sid(token: &OwnedHandle) -> io::Result<SidBytes> {
 }
 
 fn copy_sid(sid: PSID) -> SidBytes {
-    let length = unsafe { windows_sys::Win32::Security::GetLengthSid(sid) } as usize;
+    let length = unsafe { GetLengthSid(sid) } as usize;
     let mut bytes = vec![0u8; length];
     unsafe { std::ptr::copy_nonoverlapping(sid as *const u8, bytes.as_mut_ptr(), length) };
     SidBytes(bytes)
@@ -167,7 +180,34 @@ pub(crate) fn create_restricted_token(capability_sid: &LocalSid) -> io::Result<O
     let token = unsafe { OwnedHandle::from_raw_handle(restricted as _) };
     set_default_dacl(&token, logon.as_ptr())?;
     enable_privilege(&token, "SeChangeNotifyPrivilege")?;
+    set_low_integrity(&token)?;
     Ok(token)
+}
+
+/// Lowers the token to Low integrity. Mandatory integrity control then
+/// refuses every write-type right (data, attributes, `DELETE`,
+/// `WRITE_DAC`, `WRITE_OWNER`) on objects labeled above Low — every
+/// unlabeled file counts as Medium — before the DACL is even consulted.
+/// That covers what `WRITE_RESTRICTED` leaves open: deleting, renaming and
+/// moving files the user may delete.
+fn set_low_integrity(token: &OwnedHandle) -> io::Result<()> {
+    let low = LocalSid::parse(LOW_INTEGRITY_SID)?;
+    let label = TOKEN_MANDATORY_LABEL {
+        Label: SID_AND_ATTRIBUTES { Sid: low.as_ptr(), Attributes: SE_GROUP_INTEGRITY },
+    };
+    let size = std::mem::size_of::<TOKEN_MANDATORY_LABEL>() + unsafe { GetLengthSid(low.as_ptr()) } as usize;
+    let ok = unsafe {
+        SetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenIntegrityLevel,
+            &label as *const _ as *const c_void,
+            size as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error("SetTokenInformation(TokenIntegrityLevel)"));
+    }
+    Ok(())
 }
 
 /// Objects the sandboxed process creates (its own process/thread handles,
