@@ -143,11 +143,33 @@ impl DomainAllowlist {
         self.patterns.iter().any(|pattern| pattern_matches(pattern, &host))
     }
 
-    /// Whether `host` is listed as an exact (non-wildcard) entry.
-    fn names_exactly(&self, host: &str) -> bool {
+    /// Whether `host` is `localhost` or an IP literal AND listed as an exact
+    /// entry. Only such entries may reach local/private addresses: an
+    /// approved ordinary hostname that resolves to `127.0.0.1` or
+    /// `169.254.169.254` (DNS rebinding, a hostile record) stays refused.
+    fn names_local_literal(&self, host: &str) -> bool {
         let host = normalize_host(host);
-        self.patterns.iter().any(|pattern| *pattern == host)
+        let literal = host == "localhost" || host.parse::<IpAddr>().is_ok();
+        literal && self.patterns.iter().any(|pattern| *pattern == host)
     }
+}
+
+/// Whether a request host is a plain hostname (`[A-Za-z0-9.-]`, no empty
+/// labels, no wildcard) or an IP literal. Checked before the host can reach
+/// the approval prompt or be stored as an allowlist entry.
+pub fn is_valid_request_host(host: &str) -> bool {
+    let host = normalize_host(host);
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 /// Lowercases a pattern and strips a scheme, path, port and trailing dot so
@@ -403,10 +425,13 @@ async fn handle_connection(mut client: TcpStream, state: Arc<ProxyState>) -> std
         Err(reason) => return respond(&mut client, "400 Bad Request", &reason).await,
     };
     let target = request.target();
+    if !is_valid_request_host(&target.host) {
+        return respond(&mut client, "400 Bad Request", &format!("invalid host {:?}", target.host)).await;
+    }
     if !state.authorize(&target).await {
         return respond(&mut client, "403 Forbidden", &blocked_message(&target.host)).await;
     }
-    let explicit_local = state.allowlist.lock().expect("allowlist poisoned").names_exactly(&target.host);
+    let explicit_local = state.allowlist.lock().expect("allowlist poisoned").names_local_literal(&target.host);
     let mut upstream = match connect_upstream(&target, explicit_local).await {
         Ok(stream) => stream,
         Err(reason) => return respond(&mut client, "502 Bad Gateway", &reason).await,
@@ -769,6 +794,48 @@ mod tests {
         .await;
         assert!(response.starts_with("HTTP/1.1 502"), "{response}");
         assert!(!response.contains("secret"));
+    }
+
+    /// QA-014: only `localhost` / IP literals may bypass the private-IP
+    /// filter; an approved ordinary hostname (which could resolve to
+    /// 127.0.0.1 or 169.254.169.254) may not.
+    #[test]
+    fn only_localhost_and_ip_literals_bypass_the_private_ip_filter() {
+        let list = DomainAllowlist::new(["evil.example", "localhost", "127.0.0.1", "::1", "**.corp.test"]);
+        assert!(!list.names_local_literal("evil.example"));
+        assert!(!list.names_local_literal("a.corp.test"));
+        assert!(list.names_local_literal("localhost"));
+        assert!(list.names_local_literal("LOCALHOST."));
+        assert!(list.names_local_literal("127.0.0.1"));
+        assert!(list.names_local_literal("[::1]"));
+        assert!(!list.names_local_literal("10.0.0.1"));
+    }
+
+    #[test]
+    fn request_hosts_are_validated_before_prompting() {
+        for ok in ["example.com", "a-b.example.com", "127.0.0.1", "::1", "xn--bcher-kva.example"] {
+            assert!(is_valid_request_host(ok), "{ok}");
+        }
+        for bad in ["", "*.com", "**.example.com", "a..b", ".example.com", "exa mple.com", "ex_ample.com", "a/b"] {
+            assert!(!is_valid_request_host(bad), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_request_hosts_never_reach_the_decider() {
+        let asked = Arc::new(Mutex::new(0usize));
+        let asked_in_decider = Arc::clone(&asked);
+        let decider: NetworkDecider = Arc::new(move |_request: NetworkRequest| {
+            let asked = Arc::clone(&asked_in_decider);
+            Box::pin(async move {
+                *asked.lock().unwrap() += 1;
+                true
+            })
+        });
+        let proxy = NetworkProxy::start(NetworkPolicy { allowlist: DomainAllowlist::default(), decider: Some(decider) }).unwrap();
+        let response = send_raw(proxy.addr(), "CONNECT *.com:443 HTTP/1.1\r\n\r\n".into()).await;
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert_eq!(*asked.lock().unwrap(), 0);
     }
 
     #[tokio::test]

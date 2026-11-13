@@ -1184,13 +1184,12 @@ impl AgentLoop {
             shell,
             login,
             env: Some(tools::exec_session_env()),
-            sandbox: Some(locagens_execpolicy::sandbox::SandboxSpec {
-                mode: locagens_protocol::from_run_mode(&self.mode).1,
-                project_path: self.project_path.clone(),
-                allow_network: self.mode == "auto" || crate::config_runtime::sandbox_network_access(),
-                network: Some(network),
-                writable_roots: crate::config_runtime::sandbox_writable_roots(),
-            }),
+            sandbox: Some(tools::command_sandbox_spec(
+                &self.mode,
+                &self.project_path,
+                network,
+                &network_access::requested_domains(args),
+            )),
         };
         let info = self
             .state
