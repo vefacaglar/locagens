@@ -1113,12 +1113,16 @@ mod tests {
     #[test]
     fn path_traversal_is_rejected() {
         let ws = temp_ws("traversal");
-        for patch in [
+        let mut patches = vec![
             "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n",
             "*** Begin Patch\n*** Update File: ../../etc/passwd\n@@\n+x\n*** End Patch\n",
-            "*** Begin Patch\n*** Delete File: C:/Windows/win.ini\n*** End Patch\n",
-            "*** Begin Patch\n*** Update File: a.txt\n*** Move to: ../sneak.txt\n@@\n+x\n*** End Patch\n",
-        ] {
+            // Windows drive-letter targets only read as traversal on Windows;
+            // elsewhere `C:/...` is a plain relative folder name.
+        ];
+        #[cfg(windows)]
+        patches.push("*** Begin Patch\n*** Delete File: C:/Windows/win.ini\n*** End Patch\n");
+        patches.push("*** Begin Patch\n*** Update File: a.txt\n*** Move to: ../sneak.txt\n@@\n+x\n*** End Patch\n");
+        for patch in patches {
             let error = apply_patch_in_workspace(&ws, patch).unwrap_err();
             assert!(error.contains("rejected"), "expected rejection for {patch}: {error}");
         }
