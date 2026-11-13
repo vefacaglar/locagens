@@ -60,6 +60,10 @@ pub struct Cli {
     /// Chat only (mode "chat")
     #[arg(long)]
     pub no_tools: bool,
+    /// Use the plain line-based REPL instead of the full-screen TUI
+    /// (also: LCGN_NO_TUI=1)
+    #[arg(long)]
+    pub no_tui: bool,
     /// Replace the built-in system prompt
     #[arg(long, value_name = "TEXT")]
     pub system_prompt: Option<String>,
@@ -159,10 +163,28 @@ impl Cli {
         }
     }
 
+    /// Whether the interactive session should use the full-screen TUI.
+    pub fn use_tui(&self) -> bool {
+        let env_off = std::env::var("LCGN_NO_TUI")
+            .map(|value| env_flag_enabled(&value))
+            .unwrap_or(false);
+        !self.no_tui && !env_off && stdout_is_tty()
+    }
+
     /// JSON output mode.
     pub fn json_mode(&self) -> bool {
         self.mode.as_deref() == Some("json")
     }
+}
+
+/// Is stdout an interactive terminal?
+pub fn stdout_is_tty() -> bool {
+    std::io::stdout().is_terminal()
+}
+
+/// `1`, `true`, `yes` and `on` (any case) enable a boolean env flag.
+pub fn env_flag_enabled(value: &str) -> bool {
+    matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 /// Is stdin an interactive terminal?
@@ -257,6 +279,14 @@ mod tests {
         // chat/plan win over --approve.
         let chat_auto = cli(&["-a", "--no-tools"]);
         assert_eq!(chat_auto.effective_mode(), "chat");
+    }
+
+    #[test]
+    fn parses_no_tui_flag_and_env_values() {
+        assert!(cli(&["--no-tui"]).no_tui);
+        assert!(!cli(&[]).no_tui);
+        assert!(env_flag_enabled("1") && env_flag_enabled("TRUE") && env_flag_enabled(" on "));
+        assert!(!env_flag_enabled("0") && !env_flag_enabled(""));
     }
 
     #[test]

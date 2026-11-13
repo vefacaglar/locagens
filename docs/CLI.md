@@ -39,13 +39,49 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
   standing grant exists in `permissions.json`. Use `-a/--approve` for full
   access, or drop `-p` to approve interactively.
 
-## Interactive REPL
+## Interactive terminal UI
 
 ```powershell
 lcgn --model opencode-go/glm-5.3-flash
 ```
 
-Runs a line-editor REPL with streaming output. Slash commands:
+With a terminal on stdin and stdout, `lcgn` opens a Codex-style full-screen
+UI (alternate screen): header with project path and run title, a scrollable
+transcript (markdown, syntax-highlighted code, tool cells, diffs), a status
+line while a run is active, a multi-line composer and a footer with
+provider/model, thinking level, mode, session id, token usage and context
+left. Use `--no-tui` (or `LCGN_NO_TUI=1`) for the plain line REPL below.
+`-p` and `--mode json` never start the UI.
+
+Keys:
+
+```txt
+Enter                      send (while a run is active: queue the message)
+Shift+Enter, Ctrl+J,       newline (also: end a line with \ then Enter)
+  Alt+Enter
+Up / Down                  move the cursor; on the first/last row recall history
+Ctrl+A / Ctrl+E            line start / end (Home / End also work)
+Ctrl+W, Ctrl+Backspace     delete previous word; Alt+D deletes the next word
+Ctrl+U / Ctrl+K            delete to line start / end
+Ctrl+Left / Ctrl+Right     move by word
+/                          command popup (Up/Down, Tab or Enter to complete)
+@                          file popup (fuzzy project files, inserts @path)
+PageUp / PageDown, wheel   scroll the transcript; End follows the output again
+Ctrl+O                     show / hide reasoning
+Shift+Tab                  toggle Plan / Build mode
+Esc                        close popup, otherwise interrupt the active run
+Ctrl+C                     clear the composer; else interrupt the run; else
+                           press twice within 2s to quit
+Ctrl+D                     quit (empty composer)
+```
+
+Permission requests open a modal: `o`/`y` allow once, `r` this run, `p`
+project, `a` always, `d`/`n`/Esc deny, Up/Down scroll the diff. Questions
+from the agent open a list: Up/Down, Space (multi-select), Enter to confirm,
+Tab for a free-text note, Esc to skip. `@path` mentions of existing project
+files are attached to the prompt like in the REPL.
+
+Slash commands (TUI and REPL):
 
 ```txt
 /model [provider/id]   show or switch models
@@ -53,11 +89,18 @@ Runs a line-editor REPL with streaming output. Slash commands:
 /plan                  plan mode (read-only tools)
 /build                 build mode (edits applied directly)
 /new                   start a fresh session on the next message
+/fork                  fork the current session
+/undo                  undo the last turn (git snapshot restore)
+/diff                  working-tree diff
+/mcp, /skills          list MCP servers / skills
 /sessions              list sessions for this directory
 /usage                 usage/cost of the current session
 /help, /exit
 ```
 
+## Plain REPL (`--no-tui`)
+
+A line-editor REPL with streaming output and the same slash commands.
 `Ctrl+C` cancels the running run (or exits at an idle prompt).
 
 ## Sessions
@@ -125,6 +168,7 @@ lcgn [options] [@files...] [messages...]
   --session <id>               Open a session by (partial) id
   --no-session                 Ephemeral: do not persist the run
   --no-tools                   Chat only
+  --no-tui                     Plain line REPL instead of the full-screen UI (or LCGN_NO_TUI=1)
   --system-prompt <text>       Replace the built-in system prompt
   --append-system-prompt <t>   Append text to the system prompt
   --cwd <dir>                  Project directory (default: cwd)

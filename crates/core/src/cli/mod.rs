@@ -7,6 +7,7 @@ pub mod models;
 pub mod render;
 pub mod repl;
 pub mod runner;
+pub mod tui;
 
 use args::{Cli, Command};
 use clap::Parser as _;
@@ -104,29 +105,30 @@ async fn run(cli: Cli) -> i32 {
         append_system_prompt: cli.append_system_prompt.clone(),
     };
 
-    // Interactive REPL when there is a TTY and no -p / --mode json.
+    // Interactive TUI (or the plain REPL with --no-tui) when there is a TTY
+    // and no -p / --mode json.
     let interactive = !cli.print && !json_mode && args::stdin_is_tty();
     if interactive {
         let initial_session = match resolve_initial_session(&cli, &state, &project).await {
             Ok(session) => session,
             Err(code) => return code,
         };
-        return repl::repl(
-            state,
-            repl::ReplConfig {
-                project,
-                model,
-                thinking: cli.thinking_level(),
-                mode: cli.effective_mode(),
-                bypass: cli.approve,
-                show_thinking: cli.show_thinking(),
-                no_session: cli.no_session,
-                system_prompt: cli.system_prompt.clone(),
-                append_system_prompt: cli.append_system_prompt.clone(),
-                initial_session,
-            },
-        )
-        .await;
+        let config = repl::ReplConfig {
+            project,
+            model,
+            thinking: cli.thinking_level(),
+            mode: cli.effective_mode(),
+            bypass: cli.approve,
+            show_thinking: cli.show_thinking(),
+            no_session: cli.no_session,
+            system_prompt: cli.system_prompt.clone(),
+            append_system_prompt: cli.append_system_prompt.clone(),
+            initial_session,
+        };
+        if cli.use_tui() {
+            return tui::run(state, config).await;
+        }
+        return repl::repl(state, config).await;
     }
 
     // One-shot run (with -p, --mode json, or piped/non-tty stdin).

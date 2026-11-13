@@ -195,7 +195,7 @@ pub async fn run_turn(
 }
 
 /// Registers the project folder in `projects.json` when unknown.
-fn ensure_project(state: &AppState, path: &Path) {
+pub(crate) fn ensure_project(state: &AppState, path: &Path) {
     let project_path = path.display().to_string();
     if state.db.get_project(&project_path).is_none() {
         let name = path
