@@ -14,12 +14,18 @@
 //! terminal: status_changed + run_completed / run_failed
 //! ```
 
+pub mod agent_roles;
+pub mod agents;
 pub mod agents_md;
 pub mod apply_patch;
 pub mod command_safety;
 pub mod compact;
+pub mod context_remaining;
 pub mod env_context;
+pub mod host_executable;
 pub mod llm;
+pub mod patch_progress;
+pub mod tool_search;
 pub mod tools;
 pub mod turn_diff_tracker;
 
@@ -76,14 +82,14 @@ fn tool_names_for_mode(mode: &str) -> Vec<&'static str> {
         "read_file", "list_directory", "search_files", "view_image",
         "set_chat_title", "remember", "load_skill", "compact_context",
         "ask_user_question", "request_user_input",
-        "list_mcp_resources", "read_mcp_resource",
+        "list_mcp_resources", "read_mcp_resource", "get_context_remaining", "host_executable",
     ];
     match mode {
         "chat" => chat_tools.to_vec(),
         "plan" => {
             let mut names: Vec<&str> = chat_tools.to_vec();
             names.extend_from_slice(&[
-                "update_plan", "fetch_url", "spawn_agent", "send_input", "wait_agent",
+                "update_plan", "fetch_url", "spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent",
                 "close_agent", "list_agents", "spawn_agents",
             ]);
             names
@@ -93,8 +99,8 @@ fn tool_names_for_mode(mode: &str) -> Vec<&'static str> {
             names.extend_from_slice(&[
                 "set_chat_title", "update_plan", "remember", "load_skill", "ask_user_question",
                 "apply_patch", "exec_command", "write_stdin", "view_image", "request_user_input",
-                "compact_context", "spawn_agent", "send_input", "wait_agent", "close_agent",
-                "list_agents", "list_mcp_resources", "read_mcp_resource",
+                "compact_context", "spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "close_agent",
+                "list_agents", "list_mcp_resources", "read_mcp_resource", "get_context_remaining", "host_executable",
             ]);
             names.push("spawn_agents");
             names
@@ -146,8 +152,11 @@ pub struct RunHandle {
     pub permission: tokio::sync::Mutex<PermissionSlot>,
     pub question: tokio::sync::Mutex<QuestionSlot>,
     pub allow_run: AtomicBool,
-    /// Interactive sub-agents spawned by `spawn_agent`.
-    pub agents: tokio::sync::Mutex<HashMap<String, SubAgent>>,
+    /// Serializes interactive permission prompts: concurrent sub-agents share
+    /// the single pending-permission slot, so they queue here.
+    permission_gate: tokio::sync::Mutex<()>,
+    /// Named sub-agents spawned by `spawn_agent` plus the parent mailbox.
+    pub agents: agents::AgentHub,
 }
 
 impl RunHandle {
@@ -163,7 +172,8 @@ impl RunHandle {
             permission: tokio::sync::Mutex::new(PermissionSlot::default()),
             question: tokio::sync::Mutex::new(QuestionSlot::default()),
             allow_run: AtomicBool::new(false),
-            agents: tokio::sync::Mutex::new(HashMap::new()),
+            permission_gate: tokio::sync::Mutex::new(()),
+            agents: agents::AgentHub::default(),
         })
     }
 
@@ -223,24 +233,6 @@ impl RunHandle {
     }
 }
 
-/// A Codex-style interactive sub-agent spawned via `spawn_agent`.
-pub struct SubAgent {
-    pub id: String,
-    pub name: String,
-    /// `explorer` (read-only) or `worker`.
-    pub role: String,
-    /// `running` | `completed` | `failed` | `closed`.
-    pub status: String,
-    pub output: Option<String>,
-    pub error: Option<String>,
-    /// Aborts the background task on `close_agent`.
-    pub abort: Option<tokio::task::AbortHandle>,
-    /// Delivers `send_input` messages while the agent is running.
-    pub input_tx: Option<mpsc::UnboundedSender<String>>,
-    /// Resolves with the agent's final output on `wait_agent`.
-    pub done: Option<oneshot::Receiver<Result<String, String>>>,
-}
-
 /// Registry of live run handles.
 pub struct Orchestrator {
     runs: Mutex<HashMap<String, Arc<RunHandle>>>,
@@ -295,6 +287,7 @@ impl Orchestrator {
 // Errors
 // ----------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum AgentError {
     Cancelled,
     Failed(String),
@@ -564,7 +557,7 @@ fn sub_agent_system_prompt(role: &str, title: &str, task: &str, project_path: &s
         "You are a {role} sub-agent (\"{title}\") spawned inside the Locagens orchestrator.\n\
 Workspace root: {project_path}\n\n{capability}\n\n\
 Your assigned task:\n{task}\n\n\
-Work independently and completely; do not ask the user questions. When done, reply with a concise final summary of what you did and any important outcomes — it is returned to the coordinating agent as your task result.\n"
+Work independently and completely; do not ask the user questions. When done, reply with a concise final summary of what you did and any important outcomes — it is returned to the coordinating agent as your task result. You may later receive follow-up tasks or messages; treat them as continuing this same job.\n"
     )
 }
 
@@ -583,7 +576,7 @@ struct AgentLoop {
     provider_display_name: String,
     model: String,
     reasoning_effort: Option<String>,
-    agent_role: Option<&'static str>,
+    agent_role: Option<String>,
     agent_name: Option<String>,
     history: Vec<llm::LlmMessage>,
     tools: Vec<Value>,
@@ -592,17 +585,44 @@ struct AgentLoop {
     depth_left: u32,
     /// Aggregate workspace diff across this turn.
     turn_diff: Arc<TurnDiffTracker>,
-    /// Interactive sub-agent inbox (`spawn_agent` + `send_input`).
-    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
+    /// Inbox of a persistent sub-agent (`send_message` / `followup_task`).
+    agent_inbox: Option<mpsc::UnboundedReceiver<agents::AgentCommand>>,
+    extras: LoopExtras,
+}
+
+/// Optional per-loop state kept out of the main constructor noise.
+#[derive(Default)]
+struct LoopExtras {
+    /// MCP tool specs held back behind `tool_search` (see `tool_search.rs`).
+    deferred_tools: Vec<Value>,
+    /// Raised by `interrupt_agent` to end this agent's current turn only.
+    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl AgentLoop {
+    fn interrupted(&self) -> bool {
+        self.extras.interrupt.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// True when the whole run was cancelled or this agent was interrupted.
+    fn stop_requested(&self) -> bool {
+        self.handle.is_cancelled() || self.interrupted()
+    }
+
     fn check_cancel(&self) -> Result<(), AgentError> {
-        if self.handle.is_cancelled() {
+        if self.stop_requested() {
             Err(AgentError::Cancelled)
         } else {
             Ok(())
         }
+    }
+
+    /// `get_context_remaining`: window from the provider catalog, usage from
+    /// the auto-compactor's own estimate.
+    fn context_remaining(&self) -> String {
+        let window = self.state.pi.model_info(&self.provider_id, &self.model).and_then(|info| info.context_window);
+        let budget = context_remaining::ContextBudget::measure(&self.history, window);
+        serde_json::to_string_pretty(&budget.to_json()).unwrap_or_default()
     }
 
     fn new_message(&self, role: &str, content: &str) -> RunMessage {
@@ -610,7 +630,7 @@ impl AgentLoop {
             id: format!("msg-{}", uuid::Uuid::new_v4()),
             run_id: self.run_id.clone(),
             role: role.to_string(),
-            agent_role: self.agent_role.map(str::to_string),
+            agent_role: self.agent_role.clone(),
             agent_name: self.agent_name.clone(),
             provider_id: if role == "assistant" { Some(self.provider_id.clone()) } else { None },
             provider_display_name: if role == "assistant" { Some(self.provider_display_name.clone()) } else { None },
@@ -663,7 +683,11 @@ impl AgentLoop {
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             let mut last_persist = Instant::now() - Duration::from_secs(1);
 
-            let stream = llm::stream_chat(
+            // Live `apply_patch` progress while the call's arguments stream.
+            let mut patch_streams: HashMap<usize, patch_progress::PatchArgsStream> = HashMap::new();
+            let mut last_patch_emit = Instant::now() - Duration::from_secs(1);
+
+            let stream = llm::stream_chat_observed(
                 &endpoint_http(&self.state),
                 &endpoint,
                 &self.system,
@@ -690,13 +714,26 @@ impl AgentLoop {
                         last_persist = Instant::now();
                     }
                 },
-                &|| self.handle.is_cancelled(),
+                &mut |progress: &llm::ToolArgsProgress| {
+                    let patch = patch_streams.entry(progress.index).or_default();
+                    let changed = patch.update(&progress.arguments);
+                    if changed && (patch.ended() || last_patch_emit.elapsed() >= STREAM_EMIT_INTERVAL) {
+                        last_patch_emit = Instant::now();
+                        self.handle.emit(patch.event(
+                            &self.run_id,
+                            &message_id,
+                            &progress.call_id,
+                            self.agent_name.as_deref(),
+                        ));
+                    }
+                },
+                &|| self.stop_requested(),
             )
             .await;
 
             let outcome = match stream {
                 Ok(outcome) => outcome,
-                Err(err) if err.to_string() == "cancelled" || self.handle.is_cancelled() => {
+                Err(err) if err.to_string() == "cancelled" || self.stop_requested() => {
                     return Err(AgentError::Cancelled)
                 }
                 Err(err) => return Err(AgentError::Failed(err.to_string())),
@@ -729,7 +766,7 @@ impl AgentLoop {
                 self.state.db.append_usage(UsageLogEntry {
                     id: 0,
                     run_id: self.run_id.clone(),
-                    agent_role: Some(self.agent_role.unwrap_or("planner").to_string()),
+                    agent_role: Some(self.agent_role.as_deref().unwrap_or("planner").to_string()),
                     provider_id: self.provider_id.clone(),
                     model: self.model.clone(),
                     input_tokens: usage.input_tokens,
@@ -812,8 +849,8 @@ impl AgentLoop {
             // Interactive sub-agents also fold their own `send_input` queue.
             let mut agent_queued: Vec<String> = Vec::new();
             if let Some(agent_inbox) = self.agent_inbox.as_mut() {
-                while let Ok(item) = agent_inbox.try_recv() {
-                    agent_queued.push(item);
+                while let Ok(command) = agent_inbox.try_recv() {
+                    agent_queued.push(command.into_text());
                 }
             }
             for queued_content in queued.into_iter().chain(agent_queued) {
@@ -946,11 +983,12 @@ impl AgentLoop {
             }
             "compact_context" => self.compact_context_tool().await,
             "spawn_agents" if self.depth_left > 0 => self.spawn_agents(args).await,
-            "spawn_agent" if self.depth_left > 0 => self.spawn_agent_tool(args).await,
-            "send_input" if self.depth_left > 0 => self.send_input_tool(args).await,
-            "wait_agent" if self.depth_left > 0 => self.wait_agent_tool(args).await,
-            "close_agent" if self.depth_left > 0 => self.close_agent_tool(args).await,
-            "list_agents" if self.depth_left > 0 => self.list_agents_tool().await,
+            name if agents::is_agent_tool(name) && self.depth_left > 0 => self.dispatch_agent_tool(name, args).await,
+            tool_search::TOOL_SEARCH_NAME => {
+                tool_search::apply_search(&mut self.tools, &self.extras.deferred_tools, args).map_err(AgentError::Failed)
+            }
+            "get_context_remaining" => Ok(self.context_remaining()),
+            "host_executable" => host_executable::execute(args).map_err(AgentError::Failed),
             "view_image" => tools::execute(&self.project_path, "view_image", args)
                 .await
                 .map_err(AgentError::Failed),
@@ -1310,262 +1348,6 @@ impl AgentLoop {
         Ok(())
     }
 
-    // -- Codex interactive sub-agents --------------------------------------
-
-    async fn spawn_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
-        let task = str_arg(args, "task").unwrap_or_default().trim().to_string();
-        if task.is_empty() {
-            return Err(AgentError::Failed("spawn_agent: task is empty.".into()));
-        }
-        let (role, readonly) = sub_agent_role(args, &self.mode);
-        let fallback_name = task.chars().take(40).collect::<String>().trim().to_string();
-        let name = str_arg(args, "name")
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .unwrap_or(fallback_name.as_str())
-            .to_string();
-        let id = format!("agent-{}", uuid::Uuid::new_v4().simple());
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
-        let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
-
-        {
-            let mut agents = self.handle.agents.lock().await;
-            agents.insert(
-                id.clone(),
-                SubAgent {
-                    id: id.clone(),
-                    name: name.clone(),
-                    role: role.to_string(),
-                    status: "running".to_string(),
-                    output: None,
-                    error: None,
-                    abort: None,
-                    input_tx: Some(input_tx.clone()),
-                    done: Some(done_rx),
-                },
-            );
-        }
-
-        let spec = SubAgentSpec {
-            state: self.state.clone(),
-            handle: self.handle.clone(),
-            run_id: self.run_id.clone(),
-            project_path: self.project_path.clone(),
-            mode: self.mode.clone(),
-            provider_id: self.provider_id.clone(),
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
-            role,
-            title: name.clone(),
-            task: task.clone(),
-            readonly,
-            depth_left: 0,
-        };
-        let tracker = self.turn_diff.clone();
-        let agents_registry = self.handle.clone();
-        let agent_id = id.clone();
-        let abort = tokio::spawn(async move {
-            let result = run_sub_agent_owned(spec, Some(input_rx), tracker).await;
-            if let Ok(mut agents) = agents_registry.agents.try_lock() {
-                if let Some(entry) = agents.get_mut(&agent_id) {
-                    entry.input_tx = None;
-                    match &result {
-                        Ok(outcome) => {
-                            entry.status = "completed".to_string();
-                            entry.output = Some(outcome.clone());
-                        }
-                        Err(error) => {
-                            entry.status = "failed".to_string();
-                            entry.error = Some(error.clone());
-                        }
-                    }
-                }
-            }
-            let _ = done_tx.send(result);
-        })
-        .abort_handle();
-        if let Ok(mut agents) = self.handle.agents.try_lock() {
-            if let Some(entry) = agents.get_mut(&id) {
-                entry.abort = Some(abort);
-            }
-        }
-        self.handle.emit(json!({
-            "type": "agent_spawned",
-            "agentId": id,
-            "name": name,
-            "role": role,
-        }));
-        Ok(format!(
-            "Spawned {role} sub-agent \"{name}\" as {id}. Use wait_agent to await its output, send_input to continue it, close_agent to terminate it, or list_agents to see all agents."
-        ))
-    }
-
-    async fn send_input_tool(&self, args: &Value) -> Result<String, AgentError> {
-        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
-        let input = str_arg(args, "input").unwrap_or_default().trim().to_string();
-        if input.is_empty() {
-            return Err(AgentError::Failed("send_input: input is empty.".into()));
-        }
-        let mut agents = self.handle.agents.lock().await;
-        let Some(entry) = agents.get_mut(&agent_id) else {
-            return Err(AgentError::Failed(format!("send_input: unknown agent {agent_id}.")));
-        };
-        let input_clone = input.clone();
-        if entry.status == "running" {
-            if let Some(input_tx) = &entry.input_tx {
-                if input_tx.send(input_clone).is_ok() {
-                    return Ok(format!("Delivered input to running agent {agent_id}; it will fold it in before its next round."));
-                }
-            }
-        }
-
-        // Completed/failed/closed → start a continuation agent with the
-        // previous output plus the new instruction.
-        let previous = entry.output.clone().unwrap_or_default();
-        let name = entry.name.clone();
-        // Read-only modes force explorers, even when continuing a worker.
-        let role_static: &'static str = if self.mode == "plan" || self.mode == "chat" {
-            "explorer"
-        } else if entry.role == "worker" {
-            "worker"
-        } else {
-            "explorer"
-        };
-        let readonly = role_static == "explorer";
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<String>();
-        let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
-        entry.status = "running".to_string();
-        entry.output = None;
-        entry.error = None;
-        entry.input_tx = Some(input_tx.clone());
-        entry.done = Some(done_rx);
-        drop(agents);
-
-        let spec = SubAgentSpec {
-            state: self.state.clone(),
-            handle: self.handle.clone(),
-            run_id: self.run_id.clone(),
-            project_path: self.project_path.clone(),
-            mode: self.mode.clone(),
-            provider_id: self.provider_id.clone(),
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
-            role: role_static,
-            title: name.clone(),
-            task: format!(
-                "Previous result of this agent:\n{previous}\n\nFollow-up instruction:\n{input}"
-            ),
-            readonly,
-            depth_left: 0,
-        };
-        let tracker = self.turn_diff.clone();
-        let agents_registry = self.handle.clone();
-        let agent_id_clone = agent_id.clone();
-        let abort = tokio::spawn(async move {
-            let result = run_sub_agent_owned(spec, Some(input_rx), tracker).await;
-            if let Ok(mut agents) = agents_registry.agents.try_lock() {
-                if let Some(entry) = agents.get_mut(&agent_id_clone) {
-                    entry.input_tx = None;
-                    match &result {
-                        Ok(outcome) => {
-                            entry.status = "completed".to_string();
-                            entry.output = Some(outcome.clone());
-                        }
-                        Err(error) => {
-                            entry.status = "failed".to_string();
-                            entry.error = Some(error.clone());
-                        }
-                    }
-                }
-            }
-            let _ = done_tx.send(result);
-        })
-        .abort_handle();
-        if let Ok(mut agents) = self.handle.agents.try_lock() {
-            if let Some(entry) = agents.get_mut(&agent_id) {
-                entry.abort = Some(abort);
-            }
-        }
-        Ok(format!("Continued agent {agent_id} with the new instruction."))
-    }
-
-    async fn wait_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
-        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
-        let done = {
-            let mut agents = self.handle.agents.lock().await;
-            let Some(entry) = agents.get_mut(&agent_id) else {
-                return Err(AgentError::Failed(format!("wait_agent: unknown agent {agent_id}.")));
-            };
-            entry.done.take()
-        };
-        if let Some(done) = done {
-            let result = tokio::select! {
-                result = done => result.unwrap_or_else(|_| Err("agent task was dropped.".to_string())),
-                _ = self.handle.cancelled() => return Err(AgentError::Cancelled),
-            };
-            if let Ok(mut agents) = self.handle.agents.try_lock() {
-                if let Some(entry) = agents.get_mut(&agent_id) {
-                    entry.input_tx = None;
-                    match &result {
-                        Ok(outcome) => {
-                            entry.status = "completed".to_string();
-                            entry.output = Some(outcome.clone());
-                        }
-                        Err(error) => {
-                            entry.status = "failed".to_string();
-                            entry.error = Some(error.clone());
-                        }
-                    }
-                }
-            }
-        }
-        let agents = self.handle.agents.lock().await;
-        let Some(entry) = agents.get(&agent_id) else {
-            return Err(AgentError::Failed(format!("wait_agent: unknown agent {agent_id}.")));
-        };
-        let status = entry.status.clone();
-        let output = entry
-            .output
-            .clone()
-            .or_else(|| entry.error.clone())
-            .unwrap_or_else(|| "(no output yet)".to_string());
-        Ok(format!("Agent {agent_id} (\"{}\", {}) status: {status}\n\n{output}", entry.name, entry.role))
-    }
-
-    async fn close_agent_tool(&self, args: &Value) -> Result<String, AgentError> {
-        let agent_id = str_arg(args, "agent_id").unwrap_or_default().to_string();
-        let mut agents = self.handle.agents.lock().await;
-        let Some(entry) = agents.get_mut(&agent_id) else {
-            return Err(AgentError::Failed(format!("close_agent: unknown agent {agent_id}.")));
-        };
-        if let Some(abort) = entry.abort.take() {
-            abort.abort();
-        }
-        entry.status = "closed".to_string();
-        entry.input_tx = None;
-        entry.done = None;
-        Ok(format!("Agent {agent_id} closed."))
-    }
-
-    async fn list_agents_tool(&self) -> Result<String, AgentError> {
-        let agents = self.handle.agents.lock().await;
-        if agents.is_empty() {
-            return Ok("No sub-agents have been spawned in this run.".to_string());
-        }
-        let mut lines = Vec::new();
-        for entry in agents.values() {
-            lines.push(format!(
-                "- {} \"{}\" ({}): {}{}",
-                entry.id,
-                entry.name,
-                entry.role,
-                entry.status,
-                entry.output.as_deref().map(|_| " (output available — use wait_agent)" ).unwrap_or("")
-            ));
-        }
-        Ok(format!("Sub-agents in this run:\n{}", lines.join("\n")))
-    }
-
     async fn update_plan(&self, args: &Value) -> Result<String, AgentError> {
         // Accepts BOTH schemas:
         // - Codex:   { explanation?, plan: [{ step, status }] }
@@ -1660,7 +1442,7 @@ impl AgentLoop {
 
     async fn run_sub_agent(
         &self,
-        role: &'static str,
+        role: &str,
         title: &str,
         provider_id: &str,
         model: &str,
@@ -1677,13 +1459,14 @@ impl AgentLoop {
             provider_id: if provider_id.trim().is_empty() { self.provider_id.clone() } else { provider_id.trim().to_string() },
             model: if model.trim().is_empty() { self.model.clone() } else { model.trim().to_string() },
             reasoning_effort: reasoning.map(str::to_string).filter(|r| !r.is_empty()),
-            role,
+            role: role.to_string(),
+            instructions: None,
             title: title.to_string(),
             task: task.to_string(),
             readonly,
             depth_left: 0,
         };
-        run_sub_agent_owned(spec, None, self.turn_diff.clone())
+        run_sub_agent_owned(spec, self.turn_diff.clone())
             .await
             .map_err(|err| {
                 if err == "cancelled" || self.handle.is_cancelled() {
@@ -1790,6 +1573,12 @@ impl AgentLoop {
             }
         });
         let preview = tools::build_preview(&self.project_path, name, args);
+        // Concurrent sub-agents share one pending-permission slot: queue up
+        // so each request is shown (and answered) on its own.
+        let gate = tokio::select! {
+            gate = self.handle.permission_gate.lock() => gate,
+            _ = self.handle.cancelled() => return Err(AgentError::Cancelled),
+        };
         self.state.db.patch_run(&self.run_id, |run| run.status = "awaiting_permission".into());
         self.handle.emit(json!({ "type": "status_changed", "status": "awaiting_permission" }));
         self.handle.emit(json!({
@@ -1797,6 +1586,8 @@ impl AgentLoop {
             "runId": self.run_id,
             "toolCall": tool_call,
             "preview": preview,
+            "agentRole": self.agent_role,
+            "agentName": self.agent_name,
         }));
 
         let (sender, receiver) = oneshot::channel::<String>();
@@ -1814,6 +1605,7 @@ impl AgentLoop {
             slot.pending = None;
             slot.sender = None;
         }
+        drop(gate);
         if decision.is_none() {
             return Err(AgentError::Cancelled);
         }
@@ -1995,16 +1787,6 @@ fn normalize_request_user_input(args: &Value) -> Value {
     json!({ "questions": normalized })
 }
 
-/// Resolves the (role, readonly) pair of a sub-agent from tool args: workers
-/// get full tools, everything else is a read-only explorer — and `plan` /
-/// `chat` mode always forces the explorer role, even when a worker was
-/// requested.
-fn sub_agent_role(args: &Value, mode: &str) -> (&'static str, bool) {
-    let role = str_arg(args, "role").unwrap_or("explorer");
-    let role = sub_agent_role_static(role, mode);
-    (role, role == "explorer")
-}
-
 fn sub_agent_role_static(role: &str, mode: &str) -> &'static str {
     if mode == "plan" || mode == "chat" {
         return "explorer";
@@ -2080,33 +1862,55 @@ struct SubAgentSpec {
     provider_id: String,
     model: String,
     reasoning_effort: Option<String>,
-    role: &'static str,
+    /// Role name (`explorer`, `worker` or a custom `agents/*.toml` role);
+    /// becomes `agentRole` on the agent's messages.
+    role: String,
+    /// Extra role instructions appended to the sub-agent system prompt.
+    instructions: Option<String>,
     title: String,
     task: String,
     readonly: bool,
     depth_left: u32,
 }
 
-/// Runs a sub-agent to completion. Boxed to break the recursion cycle
-/// (sub-agent → run → dispatch → spawn → sub-agent).
+/// Runs a one-shot sub-agent to completion (`spawn_agents`). Boxed to break
+/// the recursion cycle (sub-agent → run → dispatch → spawn → sub-agent).
 fn run_sub_agent_owned(
     spec: SubAgentSpec,
-    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
     turn_diff: Arc<TurnDiffTracker>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> {
-    Box::pin(run_sub_agent_inner(spec, agent_inbox, turn_diff))
+    Box::pin(run_sub_agent_inner(spec, turn_diff))
 }
 
-async fn run_sub_agent_inner(
+async fn run_sub_agent_inner(spec: SubAgentSpec, turn_diff: Arc<TurnDiffTracker>) -> Result<String, String> {
+    let mut sub = build_sub_loop(spec, None, turn_diff, None).await;
+    Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS))
+        .await
+        .map_err(|err| match err {
+            AgentError::Cancelled => "cancelled".to_string(),
+            AgentError::Failed(err) => err,
+        })
+}
+
+/// Builds the loop of one sub-agent (history seeded with its task). The
+/// persistent agents in `agents.rs` keep it alive across turns.
+async fn build_sub_loop(
     spec: SubAgentSpec,
-    agent_inbox: Option<mpsc::UnboundedReceiver<String>>,
+    agent_inbox: Option<mpsc::UnboundedReceiver<agents::AgentCommand>>,
     turn_diff: Arc<TurnDiffTracker>,
-) -> Result<String, String> {
+    interrupt: Option<Arc<AtomicBool>>,
+) -> AgentLoop {
     let providers = spec.state.pi.list_providers().await;
     let project_display = spec.project_path.display().to_string();
     let title = spec.title.clone();
     let task = spec.task.clone();
-    let mut sub = AgentLoop {
+    let mut system = sub_agent_system_prompt(&spec.role, &title, &task, &project_display, spec.readonly);
+    if let Some(instructions) = spec.instructions.as_deref() {
+        system.push_str("\nRole instructions:\n");
+        system.push_str(instructions);
+        system.push('\n');
+    }
+    AgentLoop {
         state: spec.state,
         handle: spec.handle,
         run_id: spec.run_id,
@@ -2124,23 +1928,12 @@ async fn run_sub_agent_inner(
             ..Default::default()
         }],
         tools: if spec.readonly { tools::readonly_tool_defs(false) } else { worker_tool_defs() },
-        system: sub_agent_system_prompt(
-            spec.role,
-            &title,
-            &task,
-            &project_display,
-            spec.readonly,
-        ),
+        system,
         depth_left: spec.depth_left,
         turn_diff,
         agent_inbox,
-    };
-    Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS))
-        .await
-        .map_err(|err| match err {
-            AgentError::Cancelled => "cancelled".to_string(),
-            AgentError::Failed(err) => err,
-        })
+        extras: LoopExtras { interrupt, ..Default::default() },
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -2178,6 +1971,9 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     if run_full.mode != "chat" && run_full.mode != "plan" && !run_full.project_path.is_empty() {
         tools.extend(crate::services::mcp::discover_tool_defs(Some(&run_full.project_path)).await);
     }
+    // Large MCP tool sets are loaded on demand through `tool_search`.
+    let (mut tools, deferred_tools) = tool_search::split_deferred(tools);
+    agents::apply_project_roles(&mut tools, Path::new(&run_full.project_path));
 
     // SessionStart lifecycle hook: additional context is appended to the
     // system prompt after the agent is constructed.
@@ -2230,6 +2026,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         state: state.clone(),
         turn_diff: Arc::new(TurnDiffTracker::new()),
         agent_inbox: None,
+        extras: LoopExtras { deferred_tools, interrupt: None },
     };
     if let Some(context) = session_start_context {
         agent.system.push_str("\n\n");
@@ -2291,6 +2088,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
     }
 
     let result = agent.run(MAX_ROUNDS).await;
+    handle.agents.shutdown();
 
     // Land the terminal state unless the route already recorded it (cancel).
     let current = state.db.get_run_full(&run_id);
@@ -2461,12 +2259,6 @@ mod tests {
 
     #[test]
     fn sub_agent_roles_force_explorer_in_readonly_modes() {
-        let worker_args = json!({ "role": "worker" });
-        assert_eq!(sub_agent_role(&worker_args, "accept_edits"), ("worker", false));
-        assert_eq!(sub_agent_role(&worker_args, "auto"), ("worker", false));
-        assert_eq!(sub_agent_role(&worker_args, "plan"), ("explorer", true));
-        assert_eq!(sub_agent_role(&worker_args, "chat"), ("explorer", true));
-        assert_eq!(sub_agent_role(&json!({}), "auto"), ("explorer", true));
         assert_eq!(sub_agent_role_static("worker", "plan"), "explorer");
         assert_eq!(sub_agent_role_static("nonsense", "auto"), "explorer");
     }

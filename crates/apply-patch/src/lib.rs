@@ -25,6 +25,8 @@
 //! (symlink-safe workspace containment), so a patch can never escape the
 //! project folder.
 
+pub mod streaming;
+
 use serde_json::{json, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};

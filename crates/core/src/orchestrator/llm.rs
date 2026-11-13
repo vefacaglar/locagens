@@ -166,6 +166,8 @@ pub struct StreamAcc {
     pub deltas: Vec<(String, String)>,
     tool_acc: std::collections::BTreeMap<usize, ToolAcc>,
     next_tool_index: usize,
+    /// Argument length already reported per tool slot (`take_tool_progress`).
+    reported_tool_args: std::collections::BTreeMap<usize, usize>,
     pub usage: Usage,
     pub finished: bool,
 }
@@ -175,6 +177,17 @@ struct ToolAcc {
     id: String,
     name: String,
     args: String,
+}
+
+/// Arguments accumulated so far for one streaming tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolArgsProgress {
+    /// Stable per-response slot of the call (matches the provider index).
+    pub index: usize,
+    pub call_id: String,
+    pub name: String,
+    /// Raw (partial) JSON arguments received so far.
+    pub arguments: String,
 }
 
 impl StreamAcc {
@@ -420,6 +433,26 @@ impl StreamAcc {
         }
     }
 
+    /// Tool calls whose arguments grew since the last call, restricted to
+    /// names `wants` accepts (so large unrelated arguments are never cloned).
+    pub fn take_tool_progress(&mut self, wants: &dyn Fn(&str) -> bool) -> Vec<ToolArgsProgress> {
+        let mut out = Vec::new();
+        for (index, acc) in &self.tool_acc {
+            let reported = self.reported_tool_args.get(index).copied();
+            if acc.name.is_empty() || !wants(&acc.name) || reported == Some(acc.args.len()) {
+                continue;
+            }
+            self.reported_tool_args.insert(*index, acc.args.len());
+            out.push(ToolArgsProgress {
+                index: *index,
+                call_id: acc.id.clone(),
+                name: acc.name.clone(),
+                arguments: acc.args.clone(),
+            });
+        }
+        out
+    }
+
     /// Normalizes accumulated tool calls into the OpenAI shape used in
     /// `RunMessage.rawResponse`.
     pub fn tool_calls(&self) -> Vec<Value> {
@@ -576,6 +609,23 @@ pub async fn stream_chat(
     on_delta: &mut (dyn FnMut(&str, &str) + Send),
     should_stop: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<StreamOutcome> {
+    stream_chat_observed(http, endpoint, system, messages, tools, on_delta, &mut |_| {}, should_stop).await
+}
+
+/// [`stream_chat`] that also reports tool-call argument progress: after each
+/// stream event, `on_tool_args` receives the arguments accumulated so far for
+/// every `apply_patch` call that grew (see [`StreamAcc::take_tool_progress`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_chat_observed(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    system: &str,
+    messages: &[LlmMessage],
+    tools: &[Value],
+    on_delta: &mut (dyn FnMut(&str, &str) + Send),
+    on_tool_args:&mut (dyn FnMut(&ToolArgsProgress) + Send),
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<StreamOutcome> {
     let base_url = endpoint.base_url.trim_end_matches('/').to_string();
     if base_url.is_empty() {
         anyhow::bail!("No baseUrl configured for provider endpoint");
@@ -583,7 +633,7 @@ pub async fn stream_chat(
 
     // Codex Responses WireAPI has its own request/streaming path.
     if endpoint.is_openai_responses() {
-        return stream_openai_responses(http, endpoint, system, messages, tools, on_delta, should_stop)
+        return stream_openai_responses(http, endpoint, system, messages, tools, on_delta, on_tool_args, should_stop)
             .await;
     }
 
@@ -619,12 +669,12 @@ pub async fn stream_chat(
                 let retry_body = retry.text().await.unwrap_or_default();
                 anyhow::bail!("Provider returned {retry_status}: {}", summarize_error(&retry_body));
             }
-            return consume_response(retry, endpoint, on_delta, should_stop).await;
+            return consume_response(retry, endpoint, on_delta, on_tool_args, should_stop).await;
         }
         anyhow::bail!("Provider returned {status}: {}", summarize_error(&body));
     }
 
-    consume_response(response, endpoint, on_delta, should_stop).await
+    consume_response(response, endpoint, on_delta, on_tool_args, should_stop).await
 }
 
 /// Drains a successful completion response into a `StreamOutcome` — either
@@ -634,6 +684,7 @@ async fn consume_response(
     response: reqwest::Response,
     endpoint: &Endpoint,
     on_delta: &mut (dyn FnMut(&str, &str) + Send),
+    on_tool_args: &mut (dyn FnMut(&ToolArgsProgress) + Send),
     should_stop: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<StreamOutcome> {
     let is_anthropic = endpoint.is_anthropic();
@@ -736,6 +787,9 @@ async fn consume_response(
                 for (content_delta, reasoning_delta) in acc.deltas.drain(..) {
                     on_delta(&content_delta, &reasoning_delta);
                 }
+                for progress in acc.take_tool_progress(&|name| name == "apply_patch") {
+                    on_tool_args(&progress);
+                }
                 continue;
             }
             let data = match line.strip_prefix("data:") {
@@ -765,6 +819,9 @@ async fn consume_response(
             }
             for (content_delta, reasoning_delta) in acc.deltas.drain(..) {
                 on_delta(&content_delta, &reasoning_delta);
+            }
+            for progress in acc.take_tool_progress(&|name| name == "apply_patch") {
+                on_tool_args(&progress);
             }
             // NOTE: do not return on `acc.finished` — OpenAI-compatible
             // providers send a final usage-only chunk after the chunk that
@@ -978,6 +1035,7 @@ pub async fn stream_openai_responses(
     messages: &[LlmMessage],
     tools: &[Value],
     on_delta: &mut (dyn FnMut(&str, &str) + Send),
+    on_tool_args: &mut (dyn FnMut(&ToolArgsProgress) + Send),
     should_stop: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<StreamOutcome> {
     let base_url = endpoint.base_url.trim_end_matches('/').to_string();
@@ -1000,7 +1058,7 @@ pub async fn stream_openai_responses(
         anyhow::bail!("Provider returned {status}: {}", summarize_error(&body));
     }
 
-    consume_response(response, endpoint, on_delta, should_stop).await
+    consume_response(response, endpoint, on_delta, on_tool_args, should_stop).await
 }
 
 fn openai_body(endpoint: &Endpoint, system: &str, messages: &[LlmMessage], tools: &[Value]) -> Value {
@@ -1246,6 +1304,55 @@ fn summarize_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_progress_reports_growing_arguments_of_wanted_tools_only() {
+        let wants = |name: &str| name == "apply_patch";
+        let mut acc = StreamAcc::default();
+        acc.feed_openai(&json!({ "choices": [{ "delta": { "tool_calls": [
+            { "index": 0, "id": "c1", "function": { "name": "apply_patch", "arguments": "{\"input\":\"*** Be" } },
+            { "index": 1, "id": "c2", "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" } }
+        ] } }] }));
+        let first = acc.take_tool_progress(&wants);
+        assert_eq!(first.len(), 1, "read_file is filtered out");
+        assert_eq!((first[0].index, first[0].call_id.as_str()), (0, "c1"));
+        assert_eq!(first[0].arguments, "{\"input\":\"*** Be");
+
+        // No growth, nothing reported.
+        assert!(acc.take_tool_progress(&wants).is_empty());
+
+        acc.feed_openai(&json!({ "choices": [{ "delta": { "tool_calls": [
+            { "index": 0, "function": { "arguments": "gin Patch\\n" } }
+        ] } }] }));
+        let second = acc.take_tool_progress(&wants);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].arguments.ends_with("gin Patch\\n"));
+    }
+
+    #[test]
+    fn tool_progress_works_for_responses_and_anthropic_streams() {
+        let wants = |name: &str| name == "apply_patch";
+        let mut responses = StreamAcc::default();
+        responses.feed_responses(&json!({
+            "type": "response.output_item.added", "output_index": 0,
+            "item": { "type": "function_call", "call_id": "r1", "name": "apply_patch", "arguments": "" }
+        }));
+        responses.feed_responses(&json!({ "type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"in" }));
+        let progress = responses.take_tool_progress(&wants);
+        assert_eq!(progress.last().map(|p| p.arguments.as_str()), Some("{\"in"));
+
+        let mut anthropic = StreamAcc::default();
+        anthropic.feed_anthropic(&json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": { "type": "tool_use", "id": "t1", "name": "apply_patch", "input": {} }
+        }));
+        anthropic.feed_anthropic(&json!({
+            "type": "content_block_delta", "index": 0,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"input\":\"x" }
+        }));
+        let progress = anthropic.take_tool_progress(&wants);
+        assert_eq!(progress.last().map(|p| p.arguments.as_str()), Some("{\"input\":\"x"));
+    }
 
     #[test]
     fn openai_stream_accumulates_content_reasoning_and_tool_calls() {

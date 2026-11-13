@@ -86,6 +86,22 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   failed cancelled`.
 - Context is auto-compacted above ~90k estimated input tokens (last 8
   messages kept).
+- Agents (Codex multi-agent v2, `orchestrator/agents.rs` + `agent_roles.rs`):
+  `spawn_agent {task_name, message, agent_type}` starts a persistent named
+  agent; `send_message` queues text (no turn), `followup_task` starts/queues a
+  turn, `wait_agent {timeout_ms}` returns mailbox updates (turn outcomes with
+  output), `interrupt_agent`, `close_agent`, `list_agents`. Max 4 live agents
+  (completed ones hold a slot until closed). Roles: built-in `explorer`
+  (read-only, default) and `worker`, plus `agents/*.toml` in
+  `<project>/.locagens/` and the agent dirs; plan/chat force read-only.
+  Children share the parent's `RunHandle`: parent cancel cancels them, their
+  permission prompts queue through the parent's permission flow, and their
+  messages carry `agentRole`/`agentName`. Children get no agent tools (depth
+  1). `spawn_agents` stays as the one-shot parallel batch.
+- Other tools: `tool_search` (more than 8 MCP tools are deferred; matches are
+  added to the next request), `get_context_remaining`, `host_executable`
+  (PATH/PATHEXT lookup). `apply_patch` args are parsed while streaming and
+  reported as `patch_progress` events.
 
 ## Persistence
 

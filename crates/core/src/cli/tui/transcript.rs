@@ -308,9 +308,11 @@ pub fn describe_tool(name: &str, arguments: &str) -> (String, String) {
             format!("{} -> {}", first(&["from", "path"]), first(&["to"])),
         ),
         "fetch_url" => ("Fetched".into(), first(&["url"])),
-        "spawn_agents" | "spawn_agent" => ("Spawned agents".into(), String::new()),
-        "wait_agent" | "send_input" | "close_agent" | "list_agents" => {
-            (name.replace('_', " "), first(&["agent_id", "id"]))
+        "spawn_agents" => ("Spawned agents".into(), String::new()),
+        "spawn_agent" => ("Spawned agent".into(), first(&["task_name", "name"])),
+        "wait_agent" | "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent"
+        | "list_agents" => {
+            (name.replace('_', " "), first(&["target", "agent_id", "id"]))
         }
         "load_skill" => ("Loaded skill".into(), first(&["name"])),
         "ask_user_question" | "request_user_input" => ("Asked".into(), String::new()),

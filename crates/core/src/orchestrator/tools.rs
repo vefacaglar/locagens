@@ -68,6 +68,12 @@ fn path_prop(description: &str) -> Value {
 /// The full toolset. Subsets are produced by filtering names via
 /// `filter_tool_defs`.
 pub fn all_tool_defs() -> Vec<Value> {
+    let mut defs = base_tool_defs();
+    defs.extend(module_tool_defs());
+    defs
+}
+
+fn base_tool_defs() -> Vec<Value> {
     vec![
         def("read_file", "Read a text file from the workspace. Returns numbered lines. Use start_line/end_line for large files.",
             json!({
@@ -163,23 +169,6 @@ pub fn all_tool_defs() -> Vec<Value> {
             }), &["questions"]),
         def("compact_context", "Manually compact the conversation: summarize older messages into a context-summary block and drop them from the working history (also triggered automatically near the token threshold).",
             json!({}), &[]),
-        def("spawn_agent", "Spawn a single interactive sub-agent (explorer = read-only research, worker = full workspace tools) that runs in the background; use wait_agent / send_input to interact with it.",
-            json!({
-                "name": json!({ "type": "string", "description": "Short agent name." }),
-                "role": json!({ "type": "string", "enum": ["explorer", "worker"], "description": "Default: explorer." }),
-                "task": json!({ "type": "string", "description": "Self-contained task description." })
-            }), &["task"]),
-        def("send_input", "Continue a spawned sub-agent: deliver `input` to it (as a queued user message if still running, or as a follow-up turn if it finished).",
-            json!({
-                "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }),
-                "input": json!({ "type": "string", "description": "Additional instruction or data for the agent." })
-            }), &["agent_id", "input"]),
-        def("wait_agent", "Wait for a spawned sub-agent to finish and return its final output.",
-            json!({ "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }) }), &["agent_id"]),
-        def("close_agent", "Terminate a spawned sub-agent immediately (its partial output is kept).",
-            json!({ "agent_id": json!({ "type": "string", "description": "Id returned by spawn_agent." }) }), &["agent_id"]),
-        def("list_agents", "List all sub-agents spawned during this run with their ids, roles and statuses.",
-            json!({}), &[]),
         def("set_chat_title", "Set the chat title shown in the sidebar (max ~60 characters). Call this once when the topic of the conversation is clear.",
             json!({ "title": json!({ "type": "string" }) }), &["title"]),
         def("update_plan", "Create or update the visible plan for this run. Tasks appear as a checklist in the plan panel.",
@@ -258,6 +247,14 @@ pub fn all_tool_defs() -> Vec<Value> {
                 "uri": json!({ "type": "string", "description": "Resource URI as returned by list_mcp_resources." })
             }), &["server", "uri"]),
     ]
+}
+
+/// Tools implemented in their own modules (agents, context, host lookup).
+fn module_tool_defs() -> Vec<Value> {
+    let mut defs = super::agents::tool_defs(&super::agent_roles::builtin_roles());
+    defs.push(super::context_remaining::tool_def());
+    defs.push(super::host_executable::tool_def());
+    defs
 }
 
 /// Filters the full toolset down to the named tools (order preserved from
@@ -1266,7 +1263,7 @@ mod tests {
             "read_file", "write_file", "edit_file", "delete_file", "list_directory", "create_directory",
             "move_file", "search_files", "run_command", "fetch_url", "apply_patch", "exec_command",
             "write_stdin", "view_image", "request_user_input", "compact_context", "spawn_agent",
-            "send_input", "wait_agent", "close_agent", "list_agents", "set_chat_title", "update_plan",
+            "send_message", "followup_task", "wait_agent", "interrupt_agent", "close_agent", "list_agents", "get_context_remaining", "host_executable", "set_chat_title", "update_plan",
             "remember", "load_skill", "ask_user_question", "spawn_agents",
             "list_mcp_resources", "read_mcp_resource",
         ]).len());
