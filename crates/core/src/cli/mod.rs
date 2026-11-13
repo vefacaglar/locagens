@@ -33,7 +33,44 @@ pub fn main_entry() -> i32 {
     runtime.block_on(run(cli))
 }
 
-async fn run(cli: Cli) -> i32 {
+/// Loads config.toml (+ `--profile`), installs it process-wide and fills
+/// unset flags from it. Errors name the offending file.
+fn load_effective_config(cli: &mut Cli) -> Result<locagens_config::config_toml::Config, String> {
+    use locagens_config::config_toml::Config;
+    let config = Config::load()
+        .and_then(|config| config.with_profile(cli.profile.as_deref()))
+        .map_err(|err| err.to_string())?;
+    crate::config_runtime::install(config.clone());
+    cli.apply_config_defaults(&config);
+    Ok(config)
+}
+
+/// `lcgn config [show]`: the effective config with secrets masked.
+fn config_command(config: &locagens_config::config_toml::Config) -> i32 {
+    let files: Vec<String> = locagens_config::config_toml::Config::config_files()
+        .iter()
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .collect();
+    println!("# Effective config (profile: {})", config.profile.as_deref().unwrap_or("none"));
+    if files.is_empty() {
+        println!("# No config.toml found; showing built-in defaults.");
+    }
+    for file in &files {
+        println!("# source: {file}");
+    }
+    println!("{}", config.to_masked_toml());
+    0
+}
+
+async fn run(mut cli: Cli) -> i32 {
+    let config = match load_effective_config(&mut cli) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("lcgn: {message}");
+            return 2;
+        }
+    };
     let core = match crate::build_core() {
         Ok(core) => core,
         Err(err) => {
@@ -49,6 +86,7 @@ async fn run(cli: Cli) -> i32 {
     if let Some(command) = cli.command.clone() {
         return match command {
             Command::Auth { action } => auth::auth_command(&state, action).await,
+            Command::Config { .. } => config_command(&config),
             Command::Sessions { json } => {
                 let project = match cli.project_dir() {
                     Ok(project) => project,

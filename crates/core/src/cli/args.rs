@@ -81,8 +81,19 @@ pub struct Cli {
         value_name = "SEARCH"
     )]
     pub list_models: Option<String>,
+    /// Config profile from config.toml `[profiles.<name>]`
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
     /// Messages: `@path` attaches a file, the rest forms the prompt
     pub messages: Vec<String>,
+    /// Defaults taken from config.toml (flags win); filled by
+    /// [`Cli::apply_config_defaults`].
+    #[arg(skip)]
+    pub default_mode: Option<String>,
+    #[arg(skip)]
+    pub default_thinking: Option<String>,
+    #[arg(skip)]
+    pub hide_reasoning: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -95,12 +106,23 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<AuthAction>,
     },
+    /// Show the effective config.toml (secrets masked)
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// List sessions for the current directory
     Sessions {
         /// Print one JSON object per session
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigAction {
+    /// Print the effective configuration (default)
+    Show,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -131,13 +153,32 @@ impl Cli {
     pub fn thinking_level(&self) -> Option<String> {
         self.thinking
             .as_deref()
+            .or(self.default_thinking.as_deref())
             .filter(|level| !level.is_empty() && *level != "off")
             .map(str::to_string)
     }
 
     /// Whether reasoning output should be rendered (dim on stderr).
     pub fn show_thinking(&self) -> bool {
-        self.thinking.as_deref() != Some("off")
+        match self.thinking.as_deref() {
+            Some("off") => false,
+            Some(_) => true,
+            None => !self.hide_reasoning && self.default_thinking.as_deref() != Some("off"),
+        }
+    }
+
+    /// Fills unset flags from config.toml: flags override config, config
+    /// overrides the built-in defaults.
+    pub fn apply_config_defaults(&mut self, config: &locagens_config::config_toml::Config) {
+        if self.model.is_none() {
+            self.model = config.model.clone();
+            if self.provider.is_none() {
+                self.provider = config.model_provider.clone();
+            }
+        }
+        self.default_thinking = config.reasoning_effort();
+        self.default_mode = config.default_run_mode();
+        self.hide_reasoning = !config.show_reasoning();
     }
 
     /// The effective Locagens run mode implied by the flags.
@@ -151,7 +192,7 @@ impl Cli {
         if self.approve {
             return "auto".to_string();
         }
-        "accept_edits".to_string()
+        self.default_mode.clone().unwrap_or_else(|| "accept_edits".to_string())
     }
 
     /// The project directory: `--cwd` when given, else the current directory.
@@ -279,6 +320,45 @@ mod tests {
         // chat/plan win over --approve.
         let chat_auto = cli(&["-a", "--no-tools"]);
         assert_eq!(chat_auto.effective_mode(), "chat");
+    }
+
+    #[test]
+    fn config_defaults_fill_unset_flags_only() {
+        use locagens_config::config_toml::Config;
+        let config = Config::from_toml_str(
+            "model = \"m1\"
+model_provider = \"p1\"
+model_reasoning_effort = \"high\"
+approval_policy = \"never\"
+hide_agent_reasoning = true
+",
+        )
+        .unwrap();
+        let mut bare = cli(&["-p", "hi"]);
+        bare.apply_config_defaults(&config);
+        assert_eq!(bare.model.as_deref(), Some("m1"));
+        assert_eq!(bare.provider.as_deref(), Some("p1"));
+        assert_eq!(bare.thinking_level().as_deref(), Some("high"));
+        assert_eq!(bare.effective_mode(), "auto");
+        assert!(!bare.show_thinking());
+
+        let mut flagged = cli(&["--model", "x/y", "--thinking", "low", "--plan"]);
+        flagged.apply_config_defaults(&config);
+        assert_eq!(flagged.model.as_deref(), Some("x/y"));
+        assert_eq!(flagged.provider, None);
+        assert_eq!(flagged.thinking_level().as_deref(), Some("low"));
+        assert_eq!(flagged.effective_mode(), "plan");
+        assert!(flagged.show_thinking());
+    }
+
+    #[test]
+    fn parses_profile_flag_and_config_subcommand() {
+        assert_eq!(cli(&["-p", "--profile", "fast", "hi"]).profile.as_deref(), Some("fast"));
+        assert!(matches!(
+            cli(&["config", "show"]).command,
+            Some(Command::Config { action: Some(ConfigAction::Show) })
+        ));
+        assert!(matches!(cli(&["config"]).command, Some(Command::Config { action: None })));
     }
 
     #[test]

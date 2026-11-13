@@ -66,7 +66,20 @@ pub fn estimate_history_tokens(history: &[LlmMessage]) -> usize {
 
 /// Whether the history should be compacted right now.
 pub fn should_auto_compact(history: &[LlmMessage]) -> bool {
-    estimate_history_tokens(history) > AUTO_COMPACT_TOKEN_THRESHOLD
+    should_auto_compact_at(history, auto_compact_threshold())
+}
+
+/// Threshold from `config.toml` (`model_auto_compact_token_limit` /
+/// `model_context_window`), else the built-in default.
+pub fn auto_compact_threshold() -> usize {
+    crate::config_runtime::current()
+        .auto_compact_limit()
+        .unwrap_or(AUTO_COMPACT_TOKEN_THRESHOLD)
+}
+
+/// Whether `history` exceeds an explicit threshold.
+pub fn should_auto_compact_at(history: &[LlmMessage], threshold: usize) -> bool {
+    estimate_history_tokens(history) > threshold
 }
 
 /// Splits `history` into `(older, keep)` where `keep` is the intact tail.
@@ -193,6 +206,9 @@ mod tests {
         // 8 messages of 50k chars ≈ 100k tokens → compact.
         assert!(should_auto_compact(&history(&[50_000; 8])));
         assert!(!should_auto_compact(&history(&[1_000; 8])));
+        // A lower configured threshold compacts earlier.
+        assert!(should_auto_compact_at(&history(&[1_000; 8]), 1_000));
+        assert!(!should_auto_compact_at(&history(&[1_000; 8]), 50_000));
     }
 
     #[test]

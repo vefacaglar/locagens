@@ -198,8 +198,16 @@ lcgn [options] [@files...] [messages...]
   --append-system-prompt <t>   Append text to the system prompt
   --cwd <dir>                  Project directory (default: cwd)
   --list-models [search]       Table of authenticated models
+  --profile <name>             Config profile from config.toml [profiles.<name>]
+  config [show]                Print the effective config.toml (secrets masked)
   -v, --version, -h, --help
 ```
+
+## Configuration and hooks
+
+`config.toml` (Codex-compatible subset) is documented in
+[CONFIG.md](CONFIG.md); lifecycle hooks (`hooks.json`) in [HOOKS.md](HOOKS.md).
+Flags override config, config overrides the built-in defaults.
 
 ## Concurrency with the desktop app
 

@@ -1086,6 +1086,10 @@ fn append_session_index(root: &Path, run: &Run) {
 
 /// `history.jsonl`: append-only `{session_id, ts, text}`, one per user prompt.
 fn append_history(root: &Path, session_id: &str, text: &str, ts: u64) {
+    // `history.persistence = "none"` in config.toml turns the file off.
+    if !crate::config_runtime::current().history_persistence_enabled() {
+        return;
+    }
     let mut line = json!({ "session_id": session_id, "ts": ts, "text": text }).to_string();
     line.push('\n');
     append_text(&root.join(HISTORY_FILE), &line);

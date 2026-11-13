@@ -328,12 +328,13 @@ impl ProcessManager {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(false);
-        if options.env_clean {
-            // Exec sessions start from a stripped environment: secrets never
-            // reach child processes.
+        // Exec sessions start from a stripped environment (secrets never
+        // reach child processes); `[shell_environment_policy]` refines it.
+        let (clear_env, child_vars) = crate::env_policy::child_env(options.env_clean, options.env.as_ref());
+        if clear_env {
             cmd.env_clear();
         }
-        for (key, value) in options.env.clone().unwrap_or_default() {
+        for (key, value) in child_vars {
             cmd.env(key, value);
         }
 
@@ -437,10 +438,11 @@ impl ProcessManager {
 
         let mut cmd = std::process::Command::new(&program);
         cmd.args(&prog_args).current_dir(&project_path);
-        if options.env_clean {
+        let (clear_env, child_vars) = crate::env_policy::child_env(options.env_clean, options.env.as_ref());
+        if clear_env {
             cmd.env_clear();
         }
-        for (key, value) in options.env.clone().unwrap_or_default() {
+        for (key, value) in child_vars {
             cmd.env(key, value);
         }
         unsafe {

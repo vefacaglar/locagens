@@ -4,6 +4,7 @@
 //! provider / auth / model engine ([`providers`]) and OAuth login ([`oauth`]) shared by the backend,
 //! the desktop app and future consumers.
 
+pub mod config_toml;
 pub mod oauth;
 pub mod paths;
 pub mod providers;

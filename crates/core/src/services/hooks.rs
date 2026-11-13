@@ -3,10 +3,11 @@
 //! `hooks` field of enabled plugin manifests.
 //!
 //! Contract highlights (matching Codex's implementation):
-//! - Event keys accept aliases: `SessionStart` / `onSessionStart` /
-//!   `session_start`, `PreToolUse` / `preToolUse` / `pre_tool_use`,
-//!   `PostToolUse` / `postToolUse` / `post_tool_use`, `Stop` / `stop` /
-//!   `onStop`.
+//! - Events: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`,
+//!   `PostToolUse`, `PermissionRequest`, `Notification`, `Stop`,
+//!   `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`. Keys
+//!   accept aliases (`SessionStart` / `onSessionStart` / `session_start` /
+//!   `sessionStart`).
 //! - Event values accept a single command string, an array of command
 //!   strings, or `MatcherGroup` arrays
 //!   (`[{ "matcher": "Bash|run_command", "hooks": [{ "type": "command",
@@ -16,13 +17,17 @@
 //! - Commands run via `sh -c` (`cmd /C` on Windows) in the project folder
 //!   with the event payload JSON on stdin, bounded by `timeout` (default
 //!   10s).
-//! - Exit code `2` on `PreToolUse`/`PostToolUse`/`Stop` blocks with the
-//!   trimmed `stderr` (or `stdout`) as the reason.
+//! - Exit code `2` on the blockable events (`PreToolUse`, `PostToolUse`,
+//!   `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SubagentStop`,
+//!   `PreCompact`) blocks with the trimmed `stderr` (or `stdout`) as the
+//!   reason; on the others it is only logged.
 //! - Exit code `0` parses stdout as JSON: `decision: "block"`,
 //!   `continue: false` or `hookSpecificOutput.permissionDecision: "deny"`
 //!   blocks; `hookSpecificOutput.additionalContext` / `systemMessage` become
 //!   additional context; `hookSpecificOutput.updatedInput` replaces the tool
-//!   input. Plain-text `SessionStart` stdout is added to context verbatim.
+//!   input; `hookSpecificOutput.decision.behavior` (`allow` / `deny`)
+//!   answers a `PermissionRequest`. Plain-text `SessionStart` and
+//!   `UserPromptSubmit` stdout is added to context verbatim.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,6 +43,8 @@ pub struct HookOutcome {
     pub reason: Option<String>,
     pub additional_context: Vec<String>,
     pub updated_input: Option<Value>,
+    /// `PermissionRequest` answer: `Some(true)` allow, `Some(false)` deny.
+    pub permission_allow: Option<bool>,
 }
 
 impl HookOutcome {
@@ -60,15 +67,45 @@ struct HookCommand {
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 10;
 
-/// Canonicalizes supported event-key aliases.
+/// Canonicalizes supported event-key aliases (case, `_` and a leading `on`
+/// are ignored: `PreToolUse` = `pre_tool_use` = `onPreToolUse`).
 fn canonical_event(key: &str) -> Option<&'static str> {
-    match key {
-        "SessionStart" | "onSessionStart" | "session_start" => Some("session_start"),
-        "PreToolUse" | "preToolUse" | "pre_tool_use" => Some("pre_tool_use"),
-        "PostToolUse" | "postToolUse" | "post_tool_use" => Some("post_tool_use"),
-        "Stop" | "stop" | "onStop" => Some("stop"),
-        _ => None,
-    }
+    let flat: String = key.chars().filter(|c| *c != '_').collect::<String>().to_lowercase();
+    let flat = flat.strip_prefix("on").unwrap_or(&flat);
+    Some(match flat {
+        "sessionstart" => "session_start",
+        "sessionend" => "session_end",
+        "userpromptsubmit" => "user_prompt_submit",
+        "pretooluse" => "pre_tool_use",
+        "posttooluse" => "post_tool_use",
+        "permissionrequest" => "permission_request",
+        "notification" => "notification",
+        "stop" => "stop",
+        "subagentstart" => "subagent_start",
+        "subagentstop" => "subagent_stop",
+        "precompact" => "pre_compact",
+        "postcompact" => "post_compact",
+        _ => return None,
+    })
+}
+
+/// Events whose exit code 2 / `decision: "block"` has an effect.
+fn blockable(event: &str) -> bool {
+    matches!(
+        event,
+        "pre_tool_use"
+            | "post_tool_use"
+            | "user_prompt_submit"
+            | "permission_request"
+            | "stop"
+            | "subagent_stop"
+            | "pre_compact"
+    )
+}
+
+/// Events whose plain-text stdout (exit 0) becomes model context.
+fn plain_stdout_is_context(event: &str) -> bool {
+    matches!(event, "session_start" | "user_prompt_submit")
 }
 
 fn is_internal_marker(value: &str) -> bool {
@@ -207,17 +244,31 @@ fn load_hooks(project_path: Option<&Path>) -> HashMap<String, Vec<HookCommand>> 
     map
 }
 
-/// Matches a MatcherGroup `matcher` against `payload["tool_name"]`: regex
-/// when valid, exact-substring fallback otherwise. `None` / `""` / `"*"`
-/// match everything.
-fn matcher_matches(matcher: Option<&str>, payload: &Value) -> bool {
+/// The payload field a MatcherGroup `matcher` is tested against.
+fn matcher_subject<'a>(event: &str, payload: &'a Value) -> &'a str {
+    let field = match event {
+        "pre_tool_use" | "post_tool_use" | "permission_request" => "tool_name",
+        "session_start" => "source",
+        "session_end" => "reason",
+        "notification" => "notification_type",
+        "pre_compact" | "post_compact" => "trigger",
+        "subagent_start" | "subagent_stop" => "agent_type",
+        _ => return "",
+    };
+    payload.get(field).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Matches a MatcherGroup `matcher` against the event's subject (tool name,
+/// session source, ...): regex when valid, substring fallback otherwise.
+/// `None` / `""` / `"*"` match everything.
+fn matcher_matches(matcher: Option<&str>, event: &str, payload: &Value) -> bool {
     let Some(matcher) = matcher.map(str::trim).filter(|m| !m.is_empty() && *m != "*") else {
         return true;
     };
-    let tool_name = payload.get("tool_name").and_then(Value::as_str).unwrap_or_default();
+    let subject = matcher_subject(event, payload);
     match regex::Regex::new(matcher) {
-        Ok(re) => re.is_match(tool_name),
-        Err(_) => tool_name.contains(matcher),
+        Ok(re) => re.is_match(subject),
+        Err(_) => subject.contains(matcher),
     }
 }
 
@@ -231,7 +282,7 @@ pub async fn run_hook_event(event_name: &str, project_path: &Path, payload: &Val
     let registered = hooks.get(event).cloned().unwrap_or_default();
     let mut outcome = HookOutcome::default();
     for hook in registered {
-        if !matcher_matches(hook.matcher.as_deref(), payload) {
+        if !matcher_matches(hook.matcher.as_deref(), event, payload) {
             continue;
         }
         if let Err(err) = run_hook_command(&hook, payload, event, project_path, &mut outcome).await {
@@ -239,6 +290,28 @@ pub async fn run_hook_event(event_name: &str, project_path: &Path, payload: &Val
         }
     }
     outcome
+}
+
+/// Builds the common payload (`session_id`, `cwd`, `hook_event_name`) plus
+/// `extra` fields and runs the event. The one-line entry point used by the
+/// orchestrator.
+pub async fn fire(event_name: &str, project_path: &Path, session_id: &str, extra: Value) -> HookOutcome {
+    run_hook_event(event_name, project_path, &event_payload(event_name, project_path, session_id, extra)).await
+}
+
+/// Common payload fields merged with `extra`.
+pub fn event_payload(event_name: &str, project_path: &Path, session_id: &str, extra: Value) -> Value {
+    let mut payload = serde_json::json!({
+        "session_id": session_id,
+        "cwd": project_path.display().to_string(),
+        "hook_event_name": event_name,
+    });
+    if let (Some(obj), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+    payload
 }
 
 async fn run_hook_command(
@@ -251,9 +324,14 @@ async fn run_hook_command(
     let input = serde_json::to_vec(payload).map_err(|err| err.to_string())?;
 
     let mut cmd = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
-    if cfg!(windows) {
-        cmd.args(["/C", &hook.command]);
-    } else {
+    #[cfg(windows)]
+    {
+        // `cmd` does not understand Rust's backslash-quote escaping, so the
+        // command line is passed verbatim; `/S` strips exactly the outer quotes.
+        cmd.raw_arg(format!("/S /C \"{}\"", hook.command));
+    }
+    #[cfg(not(windows))]
+    {
         cmd.args(["-c", &hook.command]);
     }
     cmd.current_dir(project_path)
@@ -283,8 +361,8 @@ async fn run_hook_command(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     match output.status.code() {
-        // Exit code 2 blocks PreToolUse / PostToolUse / Stop hooks.
-        Some(2) if matches!(event, "pre_tool_use" | "post_tool_use" | "stop") => {
+        // Exit code 2 blocks the blockable events (stderr = reason).
+        Some(2) if blockable(event) => {
             outcome.blocked = true;
             let reason = non_empty_trim(&stderr).or_else(|| non_empty_trim(&stdout));
             if let Some(reason) = reason {
@@ -322,7 +400,7 @@ fn apply_success_output(stdout: &str, event: &str, outcome: &mut HookOutcome) {
     }
     let parsed = serde_json::from_str::<Value>(trimmed).ok();
     let Some(value) = parsed else {
-        if event == "session_start" {
+        if plain_stdout_is_context(event) {
             outcome.additional_context.push(trimmed.to_string());
         }
         return;
@@ -335,7 +413,23 @@ fn apply_success_output(stdout: &str, event: &str, outcome: &mut HookOutcome) {
         .and_then(|h| h.get("permissionDecision"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if decision == "block" || !cont || permission_decision == "deny" {
+    // PermissionRequest answer: `decision.behavior` = allow | deny.
+    if event == "permission_request" {
+        let answer = hso.and_then(|h| h.get("decision"));
+        match answer.and_then(|d| d.get("behavior")).and_then(Value::as_str).unwrap_or_default() {
+            "allow" => outcome.permission_allow = Some(true),
+            "deny" => {
+                outcome.permission_allow = Some(false);
+                outcome.blocked = true;
+                outcome.reason = answer
+                    .and_then(|d| d.get("message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    if blockable(event) && (decision == "block" || !cont || permission_decision == "deny") {
         outcome.blocked = true;
         let reason = value
             .get("reason")
@@ -389,33 +483,66 @@ mod tests {
         dir
     }
 
+    /// Portable "print this JSON" command (`cmd` keeps single quotes literally).
+    fn echo_json(json: &str) -> String {
+        if cfg!(windows) {
+            format!("echo {json}")
+        } else {
+            format!("echo '{json}'")
+        }
+    }
+
+    /// Portable "write `message` to stderr and exit 2".
+    fn deny_with(message: &str) -> String {
+        if cfg!(windows) {
+            format!("echo {message} 1>&2 & exit 2")
+        } else {
+            format!("printf '{message}' >&2; exit 2")
+        }
+    }
+
+    /// Portable "copy stdin to a file".
+    fn capture_stdin(file: &str) -> String {
+        if cfg!(windows) {
+            format!("more > {file}")
+        } else {
+            format!("cat > {file}")
+        }
+    }
+
+    fn write_hooks(project: &Path, hooks: Value) {
+        std::fs::write(
+            project.join(".locagens").join("hooks.json"),
+            serde_json::to_string(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn group(matcher: &str, command: &str) -> Value {
+        json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }])
+    }
+
     #[tokio::test]
     async fn hooks_pre_tool_use_blocks_on_exit_2_and_parses_json_decision() {
         let project = temp_project("pre-tool");
         let hooks = json!({
-            "hooks": {
-                "SessionStart": "echo hello-session-start",
-                "PreToolUse": [
-                    { "matcher": "write_file",
-                      "hooks": [{ "type": "command",
-                                  "command": "echo '{\"hookSpecificOutput\":{\"updatedInput\":{\"path\":\"rewritten.txt\",\"content\":\"hooked\"},\"additionalContext\":\"pre hook ran\"}}'",
-                                  "timeout": 10 }] },
-                    { "matcher": "run_command",
-                      "hooks": [{ "type": "command",
-                                  "command": "echo '{\"decision\":\"block\",\"reason\":\"no shell for you\"}'",
-                                  "timeout": 10 }] },
-                    { "matcher": "Bash|exec_command",
-                      "hooks": [{ "type": "command",
-                                  "command": "printf 'denied by policy' >&2; exit 2",
-                                  "timeout": 10 }] }
-                ]
-            }
+            "SessionStart": "echo hello-session-start",
+            "PreToolUse": [
+                { "matcher": "write_file",
+                  "hooks": [{ "type": "command",
+                              "command": echo_json(r#"{"hookSpecificOutput":{"updatedInput":{"path":"rewritten.txt","content":"hooked"},"additionalContext":"pre hook ran"}}"#),
+                              "timeout": 10 }] },
+                { "matcher": "run_command",
+                  "hooks": [{ "type": "command",
+                              "command": echo_json(r#"{"decision":"block","reason":"no shell for you"}"#),
+                              "timeout": 10 }] },
+                { "matcher": "Bash|exec_command",
+                  "hooks": [{ "type": "command",
+                              "command": deny_with("denied by policy"),
+                              "timeout": 10 }] }
+            ]
         });
-        std::fs::write(
-            project.join(".locagens").join("hooks.json"),
-            serde_json::to_string(&hooks).unwrap(),
-        )
-        .unwrap();
+        write_hooks(&project, hooks);
 
         // SessionStart: plain non-JSON stdout becomes additional context.
         let outcome = run_hook_event(
@@ -556,5 +683,167 @@ mod tests {
         assert!(outcome.additional_context.is_empty());
 
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn event_aliases_cover_every_event() {
+        for (alias, canonical) in [
+            ("SessionStart", "session_start"),
+            ("onSessionEnd", "session_end"),
+            ("userPromptSubmit", "user_prompt_submit"),
+            ("pre_tool_use", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("PermissionRequest", "permission_request"),
+            ("Notification", "notification"),
+            ("onStop", "stop"),
+            ("SubagentStart", "subagent_start"),
+            ("subagent_stop", "subagent_stop"),
+            ("PreCompact", "pre_compact"),
+            ("PostCompact", "post_compact"),
+        ] {
+            assert_eq!(canonical_event(alias), Some(canonical), "{alias}");
+        }
+        assert_eq!(canonical_event("Bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_gets_prompt_adds_context_and_blocks() {
+        let project = temp_project("prompt");
+        write_hooks(
+            &project,
+            json!({ "UserPromptSubmit": [
+                { "hooks": [{ "type": "command", "command": capture_stdin("prompt-payload.json") }] },
+                { "hooks": [{ "type": "command", "command": echo_json(r#"{"hookSpecificOutput":{"additionalContext":"extra-context"}}"#) }] }
+            ] }),
+        );
+        let outcome = fire(
+            "UserPromptSubmit",
+            &project,
+            "run-1",
+            json!({ "prompt": "fix the bug", "model": "m", "permission_mode": "auto" }),
+        )
+        .await;
+        assert!(!outcome.blocked);
+        assert_eq!(outcome.context_joined().as_deref(), Some("extra-context"));
+        let raw = std::fs::read_to_string(project.join("prompt-payload.json")).unwrap();
+        let payload: Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(payload["hook_event_name"], "UserPromptSubmit");
+        assert_eq!(payload["session_id"], "run-1");
+        assert_eq!(payload["prompt"], "fix the bug");
+        assert_eq!(payload["cwd"], project.display().to_string());
+
+        // Plain stdout is context, exit 2 blocks with the stderr reason.
+        write_hooks(&project, json!({ "UserPromptSubmit": ["echo plain-note"] }));
+        let outcome = fire("UserPromptSubmit", &project, "run-1", json!({ "prompt": "x" })).await;
+        assert_eq!(outcome.context_joined().as_deref(), Some("plain-note"));
+        write_hooks(&project, json!({ "UserPromptSubmit": [deny_with("prompt rejected")] }));
+        let outcome = fire("UserPromptSubmit", &project, "run-1", json!({ "prompt": "x" })).await;
+        assert!(outcome.blocked);
+        assert_eq!(outcome.reason.as_deref(), Some("prompt rejected"));
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn session_end_and_notification_fire_but_never_block() {
+        let project = temp_project("lifecycle");
+        write_hooks(
+            &project,
+            json!({
+                "SessionEnd": [deny_with("ignored")],
+                "Notification": group("permission_prompt", &capture_stdin("notify-payload.json")),
+            }),
+        );
+        let outcome = fire("SessionEnd", &project, "run-2", json!({ "reason": "done" })).await;
+        assert!(!outcome.blocked, "SessionEnd exit 2 is only logged");
+
+        // The notification_type matcher selects the permission prompt only.
+        fire("Notification", &project, "run-2", json!({ "notification_type": "elicitation_dialog", "message": "q?" })).await;
+        assert!(!project.join("notify-payload.json").exists());
+        fire(
+            "Notification",
+            &project,
+            "run-2",
+            json!({ "notification_type": "permission_prompt", "message": "Allow run_command?" }),
+        )
+        .await;
+        let raw = std::fs::read_to_string(project.join("notify-payload.json")).unwrap();
+        let payload: Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(payload["hook_event_name"], "Notification");
+        assert_eq!(payload["message"], "Allow run_command?");
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn stop_and_subagent_stop_block_with_reason() {
+        let project = temp_project("stop");
+        write_hooks(
+            &project,
+            json!({
+                "Stop": echo_json(r#"{"decision":"block","reason":"keep going: tests not run"}"#),
+                "SubagentStop": [deny_with("worker incomplete")],
+                "SubagentStart": group("explorer", "echo started-explorer"),
+            }),
+        );
+        let outcome = fire("Stop", &project, "r", json!({ "stop_hook_active": false, "last_assistant_message": "done" })).await;
+        assert!(outcome.blocked);
+        assert_eq!(outcome.reason.as_deref(), Some("keep going: tests not run"));
+        let outcome = fire("SubagentStop", &project, "r", json!({ "agent_type": "worker" })).await;
+        assert!(outcome.blocked);
+        assert_eq!(outcome.reason.as_deref(), Some("worker incomplete"));
+
+        // SubagentStart matches on agent_type; its output is not context.
+        let outcome = fire("SubagentStart", &project, "r", json!({ "agent_type": "worker" })).await;
+        assert!(outcome.additional_context.is_empty());
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn compact_hooks_block_pre_only() {
+        let project = temp_project("compact");
+        write_hooks(
+            &project,
+            json!({
+                "PreCompact": group("auto", &deny_with("do not compact")),
+                "PostCompact": [deny_with("ignored")],
+            }),
+        );
+        let outcome = fire("PreCompact", &project, "r", json!({ "trigger": "auto" })).await;
+        assert!(outcome.blocked);
+        assert_eq!(outcome.reason.as_deref(), Some("do not compact"));
+        let outcome = fire("PreCompact", &project, "r", json!({ "trigger": "manual" })).await;
+        assert!(!outcome.blocked, "matcher auto does not apply to manual");
+        let outcome = fire("PostCompact", &project, "r", json!({ "trigger": "auto" })).await;
+        assert!(!outcome.blocked);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[tokio::test]
+    async fn permission_request_hook_can_allow_or_deny() {
+        let project = temp_project("perm");
+        write_hooks(
+            &project,
+            json!({ "PermissionRequest": [
+                group("run_command", &echo_json(r#"{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}"#))[0].clone(),
+                group("fetch_url", &echo_json(r#"{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no network"}}}"#))[0].clone(),
+            ] }),
+        );
+        let allow = fire("PermissionRequest", &project, "r", json!({ "tool_name": "run_command", "tool_input": {} })).await;
+        assert_eq!(allow.permission_allow, Some(true));
+        assert!(!allow.blocked);
+        let deny = fire("PermissionRequest", &project, "r", json!({ "tool_name": "fetch_url", "tool_input": {} })).await;
+        assert_eq!(deny.permission_allow, Some(false));
+        assert!(deny.blocked);
+        assert_eq!(deny.reason.as_deref(), Some("no network"));
+        let none = fire("PermissionRequest", &project, "r", json!({ "tool_name": "write_file", "tool_input": {} })).await;
+        assert_eq!(none.permission_allow, None);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn event_payload_merges_common_fields() {
+        let payload = event_payload("Stop", Path::new("/p"), "sid", json!({ "x": 1 }));
+        assert_eq!(payload["session_id"], "sid");
+        assert_eq!(payload["hook_event_name"], "Stop");
+        assert_eq!(payload["x"], 1);
     }
 }

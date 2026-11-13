@@ -174,7 +174,13 @@ fn truncate_title(task: &str) -> String {
 
 /// The run's effective mode: explicit bypass wins over a milder mode.
 fn effective_mode(mode: Option<&str>, bypass: bool) -> String {
-    let mode = mode.filter(|mode| !mode.trim().is_empty()).unwrap_or("accept_edits");
+    // Unset mode falls back to config.toml (`approval_policy` / `sandbox_mode`),
+    // then to Build (`accept_edits`).
+    let configured = crate::config_runtime::current().default_run_mode();
+    let mode = mode
+        .filter(|mode| !mode.trim().is_empty())
+        .or(configured.as_deref())
+        .unwrap_or("accept_edits");
     if bypass && !matches!(mode, "chat" | "plan") {
         "auto".to_string()
     } else {
@@ -307,7 +313,11 @@ pub async fn create_run(
         provider_id: payload.provider_id.clone(),
         provider_display_name: provider_display_name(state, &payload.provider_id),
         model: payload.model.clone(),
-        reasoning_effort: payload.reasoning_effort.clone().filter(|e| !e.is_empty()),
+        reasoning_effort: payload
+            .reasoning_effort
+            .clone()
+            .filter(|e| !e.is_empty())
+            .or_else(|| crate::config_runtime::current().reasoning_effort().filter(|e| e != "off")),
         mode: mode.clone(),
         system_prompt: payload.system_prompt.clone().filter(|p| !p.is_empty()),
         append_system_prompt: payload.append_system_prompt.clone().filter(|p| !p.is_empty()),
