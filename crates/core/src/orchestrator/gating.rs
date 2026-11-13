@@ -42,13 +42,13 @@ impl AgentLoop {
 
     pub(super) fn standing_grant(&self, name: &str, args: &Value) -> bool {
         let project_path = self.project_path.display().to_string();
-        let command = extract_command_str(args);
+        let key = grant_key(name, args);
         let domains = sorted_domains(args);
         self.state
             .db
             .list_permissions()
             .iter()
-            .any(|rule| standing_grant_matches(rule, name, command, &domains, &project_path))
+            .any(|rule| standing_grant_matches(rule, name, &key, &domains, &project_path))
     }
 
     pub(super) async fn gated_execute(&self, call_id: &str, name: &str, args: &Value) -> Result<String, AgentError> {
@@ -126,13 +126,34 @@ impl AgentLoop {
                     decision.standing_scope().unwrap_or("project"),
                     &self.project_path.display().to_string(),
                     name,
-                    extract_command_str(args),
+                    &grant_key(name, args),
                     sorted_domains(args),
                     decision.as_str(),
                 );
                 self.execute_with_turn_diff(name, args).await
             }
             PermissionDecision::AllowOnce => self.execute_with_turn_diff(name, args).await,
+        }
+    }
+
+    /// Asks before a `remember` call stores a memory when the mode requires
+    /// it (see `tools::remember_needs_permission`). `Ok(Some(response))` is
+    /// the tool result of a denial; any allow answer runs this one call.
+    pub(super) async fn gate_remember(
+        &self,
+        call_id: &str,
+        scope: &str,
+        category: &str,
+        content: &str,
+    ) -> Result<Option<String>, AgentError> {
+        if !tools::remember_needs_permission(&self.mode, scope) {
+            return Ok(None);
+        }
+        let args = json!({ "scope": scope, "category": category, "content": content });
+        match self.ask_tool_permission(call_id, "remember", &args, None).await? {
+            Ok(decision) if decision.allows() => Ok(None),
+            Ok(_) => Ok(Some("The user denied permission to store this memory.".to_string())),
+            Err(reason) => Ok(Some(format!("Denied by PermissionRequest hook: {reason}"))),
         }
     }
 
@@ -332,19 +353,40 @@ pub(super) fn standing_grant_matches(
     if !scope_ok {
         return false;
     }
-    if tool == "run_command" || tool == "exec_command" {
-        // An empty rule command used to be saved for exec_command (its args
-        // use `cmd`); never let it act as a wildcard.
+    if grant_is_keyed(tool) {
+        // An empty rule key used to be saved for exec_command (its args
+        // use `cmd`) and fetch_url; never let it act as a wildcard.
         if rule.command.is_empty() || command.is_empty() || rule.command != command {
             return false;
         }
-        if !rule.network_domains.is_empty() {
-            let mut rule_domains = rule.network_domains.clone();
-            rule_domains.sort();
-            if rule_domains != domains {
-                return false;
-            }
+        // The saved host list must equal the call's: a grant saved without
+        // domains does not cover a later call that adds hosts (FR-032).
+        let mut rule_domains = rule.network_domains.clone();
+        rule_domains.sort();
+        if rule_domains != domains {
+            return false;
         }
     }
     true
+}
+
+/// Tools whose standing grant is bound to a key (command or host) and a
+/// domain list instead of covering the whole tool.
+fn grant_is_keyed(tool: &str) -> bool {
+    matches!(tool, "run_command" | "exec_command" | "fetch_url")
+}
+
+/// What a standing grant of this call is bound to: the command string, or
+/// for `fetch_url` the URL's host (so "Allow always" covers one site, not
+/// every URL). Empty for tools whose grant covers the whole tool.
+pub(super) fn grant_key(tool: &str, args: &Value) -> String {
+    match tool {
+        "fetch_url" => args
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|parsed| parsed.host_str().map(str::to_lowercase))
+            .unwrap_or_default(),
+        _ => extract_command_str(args).to_string(),
+    }
 }

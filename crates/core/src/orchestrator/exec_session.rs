@@ -114,8 +114,8 @@ impl AgentLoop {
         let max_chars = args
             .get("max_output_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(20_000)
-            .clamp(1_000, 200_000) as usize * 4;
+            .unwrap_or(tools::MAX_OUTPUT_CHARS as u64 / 4)
+            .clamp(1_000, tools::MAX_OUTPUT_CHARS as u64 / 4) as usize * 4;
 
         let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
         let shell = str_arg(args, "shell")
@@ -226,8 +226,8 @@ impl AgentLoop {
         let max_chars = args
             .get("max_output_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(20_000)
-            .clamp(1_000, 200_000) as usize * 4;
+            .unwrap_or(tools::MAX_OUTPUT_CHARS as u64 / 4)
+            .clamp(1_000, tools::MAX_OUTPUT_CHARS as u64 / 4) as usize * 4;
         if self.state.processes.is_running(&session_id).is_none() {
             return Err(AgentError::Failed(format!("write_stdin: unknown session {session_id}.")));
         }

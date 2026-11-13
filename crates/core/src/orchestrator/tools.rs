@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 
 /// Maximum bytes returned by any single tool response (keeps LLM context and
 /// the UI bounded).
-const MAX_OUTPUT_CHARS: usize = 24_000;
-/// Maximum bytes read from a single file.
-const MAX_FILE_READ_CHARS: usize = 120_000;
+pub(super) const MAX_OUTPUT_CHARS: usize = 24_000;
+/// Largest file `read_file` / `edit_file` will load (bytes).
+const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+/// Largest file `search_files` scans (bytes).
+const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Directory names skipped by `search_files`.
 const SEARCH_SKIP_DIRS: [&str; 8] =
     [".git", "node_modules", "target", "dist", ".next", "build", "vendor", ".venv"];
@@ -37,8 +39,21 @@ pub fn needs_permission(mode: &str, tool: &str) -> bool {
     }
     let command = matches!(tool, "run_command" | "exec_command" | "write_stdin");
     let mutation = MUTATION_TOOLS.contains(&tool);
-    let mcp = tool.starts_with("mcp__") && mode != "accept_edits";
+    // MCP servers are not sandboxed: their tools prompt in Build mode too.
+    let mcp = tool.starts_with("mcp__");
     tool == "fetch_url" || command || (mutation && mode != "accept_edits") || mcp
+}
+
+/// Whether a `remember` call needs a prompt: global memory is injected into
+/// every later run in every project, so it prompts outside Full Access;
+/// project memory prompts in the modes that also prompt for file writes
+/// (anything but Build and Full Access).
+pub fn remember_needs_permission(mode: &str, scope: &str) -> bool {
+    match mode {
+        "auto" => false,
+        "accept_edits" => scope == "global",
+        _ => true,
+    }
 }
 
 /// Whether a tool is flat-out forbidden in read-only (`plan` / `chat`) mode:
@@ -82,22 +97,25 @@ pub fn all_tool_defs() -> Vec<Value> {
 
 fn base_tool_defs() -> Vec<Value> {
     vec![
-        def("read_file", "Read a text file from the workspace. Returns numbered lines. Use start_line/end_line for large files.",
+        def("read_file", "Read a text file from the workspace. Returns numbered lines (at most ~24k characters per call) and the file's total line count. For a large file read it in pieces with offset/limit.",
             json!({
                 "path": path_prop("Relative path inside the workspace."),
-                "start_line": json!({ "type": "integer", "description": "1-based first line to return." }),
-                "end_line": json!({ "type": "integer", "description": "1-based last line to return (inclusive)." })
+                "offset": json!({ "type": "integer", "description": "1-based line to start at (default 1)." }),
+                "limit": json!({ "type": "integer", "description": "Maximum number of lines to return." }),
+                "start_line": json!({ "type": "integer", "description": "Alias for offset." }),
+                "end_line": json!({ "type": "integer", "description": "1-based last line to return (inclusive); alternative to limit." })
             }), &["path"]),
         def("write_file", "Create a file (or overwrite an existing one) with the given content inside the workspace. Parent directories are created automatically.",
             json!({
                 "path": path_prop("Relative path inside the workspace."),
                 "content": json!({ "type": "string", "description": "Full file content to write." })
             }), &["path", "content"]),
-        def("edit_file", "Replace the first occurrence of old_text with new_text in a workspace file. old_text must match exactly and be unique.",
+        def("edit_file", "Replace old_text with new_text in a workspace file. old_text must match exactly and be unique, otherwise the edit is refused; set replace_all to replace every occurrence.",
             json!({
                 "path": path_prop("Relative path inside the workspace."),
                 "old_text": json!({ "type": "string", "description": "Exact existing text to replace." }),
-                "new_text": json!({ "type": "string", "description": "Replacement text." })
+                "new_text": json!({ "type": "string", "description": "Replacement text." }),
+                "replace_all": json!({ "type": "boolean", "description": "Replace every occurrence of old_text (default false: old_text must be unique)." })
             }), &["path", "old_text", "new_text"]),
         def("delete_file", "Delete a file from the workspace.",
             json!({ "path": path_prop("Relative path inside the workspace.") }), &["path"]),
@@ -133,7 +151,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "cmd": json!({ "type": "string", "description": "The command to execute." }),
                 "workdir": json!({ "type": "string", "description": "Optional working directory inside the workspace." }),
                 "yield_time_ms": json!({ "type": "integer", "description": "Wait up to this long for completion (default 10000, clamped 500..60000)." }),
-                "max_output_tokens": json!({ "type": "integer", "description": "Rough bound on returned output (default 20000 tokens ~ 80k chars)." }),
+                "max_output_tokens": json!({ "type": "integer", "description": "Rough bound on returned output (default and maximum 6000 tokens ~ 24k chars)." }),
                 "shell": json!({ "type": "string", "description": "Optional shell program for the session (e.g. `bash`, `zsh`); defaults to the platform shell." }),
                 "login": json!({ "type": "boolean", "description": "Run the shell as a login shell (-lc) so profile/rc files load." }),
                 "tty": json!({ "type": "boolean", "description": "Allocate a pseudo-terminal for the session (enables TTY-aware programs like progress bars and editors)." }),
@@ -369,7 +387,13 @@ pub async fn execute_with_mode(
         "list_directory" => list_directory(project_path, args),
         "create_directory" => create_directory(project_path, args),
         "move_file" => move_file(project_path, args),
-        "search_files" => search_files(project_path, args),
+        "search_files" => {
+            // A directory walk blocks; keep it off the async runtime thread.
+            let (project, args) = (project_path.to_path_buf(), args.clone());
+            tokio::task::spawn_blocking(move || search_files(&project, &args))
+                .await
+                .map_err(|err| format!("search_files: {err}"))?
+        }
         "run_command" => run_command(project_path, mode, args).await,
         "fetch_url" => fetch_url(args).await,
         "view_image" => view_image(project_path, args),
@@ -490,42 +514,78 @@ fn image_dimensions(path: &Path, extension: &str) -> Option<(u64, u64)> {
     }
 }
 
+/// A required string argument; a missing one is an error instead of an
+/// empty default (a lost `content` must not truncate a file, FR-025).
+fn required_str<'a>(args: &'a Value, key: &str, tool: &str) -> Result<&'a str, String> {
+    str_arg(args, key).ok_or_else(|| format!("{tool}: missing required argument '{key}'."))
+}
+
+/// Reads a workspace file as text. Invalid UTF-8 is replaced lossily; the
+/// flag says whether that happened.
+fn read_text_lossy(path: &Path, tool: &str) -> Result<(String, bool), String> {
+    let size = std::fs::metadata(path)
+        .map_err(|err| format!("{tool}: cannot read {}: {err}", path.display()))?
+        .len();
+    if size > MAX_FILE_BYTES {
+        return Err(format!("{tool}: {} is {size} bytes, over the {MAX_FILE_BYTES}-byte limit.", path.display()));
+    }
+    let bytes = std::fs::read(path).map_err(|err| format!("{tool}: cannot read {}: {err}", path.display()))?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => (text, false),
+        Err(err) => (String::from_utf8_lossy(err.as_bytes()).into_owned(), true),
+    })
+}
+
 fn read_file(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("read_file: {err}"))?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| format!("read_file: cannot read {}: {err}", path.display()))?;
-    let truncated = if content.len() > MAX_FILE_READ_CHARS {
-        let mut cut = locagens_protocol::text::prefix_at_char_boundary(&content, MAX_FILE_READ_CHARS).to_string();
-        cut.push_str("\n... (file truncated)");
-        cut
-    } else {
-        content
+    let (content, lossy) = read_text_lossy(&path, "read_file")?;
+    let line_arg = |key: &str| args.get(key).and_then(Value::as_u64).map(|v| v as usize);
+    let start = line_arg("offset").or_else(|| line_arg("start_line")).unwrap_or(1).max(1);
+    let end = match (line_arg("limit"), line_arg("end_line")) {
+        (Some(limit), _) => start.saturating_add(limit).saturating_sub(1),
+        (None, Some(end)) => end,
+        (None, None) => usize::MAX,
     };
-    let start = args.get("start_line").and_then(Value::as_u64).map(|v| v.max(1) as usize);
-    let end = args.get("end_line").and_then(Value::as_u64).map(|v| v as usize);
+    let total = content.lines().count();
+    if start > total && total > 0 {
+        return Err(format!("read_file: offset {start} is past the end of the file ({total} lines)."));
+    }
     let mut out = String::new();
-    for (index, line) in truncated.lines().enumerate() {
+    let mut last_shown = start - 1;
+    for (index, line) in content.lines().enumerate() {
         let line_no = index + 1;
-        if let Some(start) = start {
-            if line_no < start {
-                continue;
-            }
+        if line_no < start {
+            continue;
         }
-        if let Some(end) = end {
-            if line_no > end {
-                break;
-            }
+        if line_no > end {
+            break;
+        }
+        let line = locagens_protocol::text::prefix_at_char_boundary(line, MAX_OUTPUT_CHARS / 2);
+        if !out.is_empty() && out.len() + line.len() + 8 > MAX_OUTPUT_CHARS {
+            break;
         }
         out.push_str(&format!("{line_no:6}  {line}\n"));
+        last_shown = line_no;
     }
-    Ok(truncate_output(out))
+    if last_shown < total && last_shown < end {
+        out.push_str(&format!(
+            "... (showing lines {start}-{last_shown} of {total}; call read_file again with offset={} to continue)\n",
+            last_shown + 1
+        ));
+    } else if end == usize::MAX {
+        out.push_str(&format!("(end of file, {total} lines)\n"));
+    }
+    if lossy {
+        out.push_str("(note: the file is not valid UTF-8; invalid bytes are shown as U+FFFD and edit_file cannot edit it)\n");
+    }
+    Ok(out)
 }
 
 fn write_file(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("write_file: {err}"))?;
-    let content = args.get("content").and_then(Value::as_str).unwrap_or("");
+    let content = required_str(args, "content", "write_file")?;
     workspace_fs::write(project, &path, content.as_bytes()).map_err(|err| format!("write_file: {err}"))?;
     Ok(format!("Wrote {} ({} bytes).", path.display(), content.len()))
 }
@@ -534,20 +594,34 @@ fn edit_file(project: &Path, args: &Value) -> Result<String, String> {
     let path = safe_path(project, str_arg(args, "path").unwrap_or_default())
         .map_err(|err| format!("edit_file: {err}"))?;
     let old_text = str_arg(args, "old_text").unwrap_or_default();
-    let new_text = str_arg(args, "new_text").unwrap_or("");
+    let new_text = required_str(args, "new_text", "edit_file")?;
+    let replace_all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
     if old_text.is_empty() {
         return Err("edit_file: old_text is empty.".to_string());
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|err| format!("edit_file: cannot read {}: {err}", path.display()))?;
-    match content.find(old_text) {
-        Some(_) => {
-            let updated = content.replacen(old_text, new_text, 1);
-            workspace_fs::write(project, &path, updated.as_bytes()).map_err(|err| format!("edit_file: {err}"))?;
-            Ok(format!("Edited {}.", path.display()))
-        }
-        None => Err("edit_file: old_text was not found in the file.".to_string()),
+    let (content, lossy) = read_text_lossy(&path, "edit_file")?;
+    if lossy {
+        return Err(format!(
+            "edit_file: {} is not valid UTF-8, so it cannot be edited safely; use a shell command to change it.",
+            path.display()
+        ));
     }
+    let matches = content.matches(old_text).count();
+    if matches == 0 {
+        return Err("edit_file: old_text was not found in the file.".to_string());
+    }
+    if matches > 1 && !replace_all {
+        return Err(format!(
+            "edit_file: old_text matches {matches} places; add surrounding context to make it unique or set replace_all."
+        ));
+    }
+    let updated = content.replace(old_text, new_text);
+    workspace_fs::write(project, &path, updated.as_bytes()).map_err(|err| format!("edit_file: {err}"))?;
+    Ok(if matches > 1 {
+        format!("Edited {} ({matches} replacements).", path.display())
+    } else {
+        format!("Edited {}.", path.display())
+    })
 }
 
 fn delete_file(project: &Path, args: &Value) -> Result<String, String> {
@@ -628,7 +702,7 @@ fn search_files(project: &Path, args: &Value) -> Result<String, String> {
                 return true;
             }
             let name = entry.file_name().to_string_lossy();
-            !name.starts_with('.') && !SEARCH_SKIP_DIRS.contains(&name.as_ref())
+            !SEARCH_SKIP_DIRS.contains(&name.as_ref())
         });
 
     for entry in walker.filter_map(|entry| entry.ok()) {
@@ -637,6 +711,9 @@ fn search_files(project: &Path, args: &Value) -> Result<String, String> {
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
         if !file_pattern_matches(&file_name, pattern) {
+            continue;
+        }
+        if entry.metadata().map(|meta| meta.len() > MAX_SEARCH_FILE_BYTES).unwrap_or(true) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(entry.path()) else {
@@ -682,7 +759,7 @@ fn file_pattern_matches(file_name: &str, pattern: &str) -> bool {
         return true;
     }
     if let Some(extension) = pattern.strip_prefix("*.") {
-        return file_name.ends_with(extension);
+        return file_name.ends_with(&format!(".{extension}"));
     }
     if let Some(prefix) = pattern.strip_suffix('*') {
         return file_name.starts_with(prefix);
@@ -950,12 +1027,30 @@ async fn fetch_url_guarded(args: &Value, blocked: &BlockedAddress) -> Result<Str
 // Permission previews
 // ----------------------------------------------------------------------
 
+/// Characters of file content a permission preview shows.
+const PREVIEW_CHARS: usize = 4_000;
+/// Characters of a patch or diff a permission preview shows.
+const PREVIEW_PATCH_CHARS: usize = 12_000;
+
+/// The first `max` characters of `text`; a longer text ends in a visible
+/// "(N more characters)" marker so the user knows the tail is unseen.
+fn clip_with_marker(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_string();
+    }
+    let mut clipped: String = text.chars().take(max).collect();
+    clipped.push_str(&format!("
+… ({} more characters)", total - max));
+    clipped
+}
+
 /// Builds the `PermissionPreview` payload for a tool call, or `None` when the
 /// tool has no meaningful preview (never-gated read tools).
 pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> {
     let relative = str_arg(args, "path").or_else(|| str_arg(args, "from")).unwrap_or("");
     let absolute = safe_path(project, relative).ok();
-    let json_string = |value: Option<String>| value.map(|content| content.chars().take(4000).collect::<String>());
+    let json_string = |value: Option<String>| value.map(|content| clip_with_marker(&content, PREVIEW_CHARS));
 
     let preview = match name {
         "write_file" => {
@@ -974,7 +1069,8 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
             let new = old.clone().and_then(|content| {
                 let old_text = str_arg(args, "old_text")?;
                 let new_text = str_arg(args, "new_text").unwrap_or("");
-                Some(content.replacen(old_text, new_text, 1))
+                let replace_all = args.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+                Some(if replace_all { content.replace(old_text, new_text) } else { content.replacen(old_text, new_text, 1) })
             });
             json!({
                 "tool": name,
@@ -1055,8 +1151,8 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
                 "absolutePath": project.display().to_string(),
                 "oldContent": Value::Null,
                 "newContent": Value::Null,
-                "patch": patch_text.chars().take(12_000).collect::<String>(),
-                "diff": diff.chars().take(12_000).collect::<String>(),
+                "patch": clip_with_marker(patch_text, PREVIEW_PATCH_CHARS),
+                "diff": clip_with_marker(&diff, PREVIEW_PATCH_CHARS),
                 "files": files,
             })
         }
@@ -1114,10 +1210,10 @@ mod tests {
         assert!(cut.starts_with(&"a".repeat(MAX_OUTPUT_CHARS - 1)));
 
         let ws = temp_ws("big-utf8");
-        let body = format!("{}ğüş\n", "b".repeat(MAX_FILE_READ_CHARS - 1));
+        let body = format!("{}\n", "ğ".repeat(MAX_OUTPUT_CHARS));
         std::fs::write(ws.join("big.txt"), &body).unwrap();
         let read = read_file(&ws, &serde_json::json!({ "path": "big.txt" })).unwrap();
-        assert!(read.contains("truncated)"));
+        assert!(read.starts_with("     1  ğ"));
         let _ = std::fs::remove_dir_all(ws);
     }
 
@@ -1357,7 +1453,7 @@ mod tests {
         assert!(!needs_permission("chat", "read_file"));
         assert!(needs_permission("ask_permissions", "mcp__github__list_issues"));
         assert!(!needs_permission("auto", "mcp__github__list_issues"));
-        assert!(!needs_permission("accept_edits", "mcp__github__list_issues"));
+        assert!(needs_permission("accept_edits", "mcp__github__list_issues"));
         // fetch_url prompts in Plan and Chat too (QA-005); commands there
         // are forbidden before gating (is_forbidden_in_readonly_mode).
         assert!(needs_permission("plan", "fetch_url"));
@@ -1522,5 +1618,88 @@ mod tests {
             "remember", "load_skill", "ask_user_question", "spawn_agents",
             "list_mcp_resources", "read_mcp_resource",
         ]).len());
+    }
+
+    #[test]
+    fn read_file_reaches_late_lines_with_offset_and_limit() {
+        let ws = temp_ws("read-offset");
+        let body: String = (1..=20_000).map(|n| format!("line number {n}\n")).collect();
+        std::fs::write(ws.join("big.txt"), &body).unwrap();
+        let first = read_file(&ws, &json!({ "path": "big.txt" })).unwrap();
+        assert!(first.len() < MAX_OUTPUT_CHARS + 300);
+        assert!(first.contains("of 20000"), "{first}");
+        let next = first.trim_end().rsplit("offset=").next().unwrap().split(' ').next().unwrap().to_string();
+        let page = read_file(&ws, &json!({ "path": "big.txt", "offset": next.parse::<u64>().unwrap() })).unwrap();
+        assert!(page.contains(&format!("line number {next}\n")));
+        let tail = read_file(&ws, &json!({ "path": "big.txt", "offset": 19_999, "limit": 2 })).unwrap();
+        assert!(tail.contains("line number 20000") && !tail.contains("showing lines"), "{tail}");
+        assert!(read_file(&ws, &json!({ "path": "big.txt", "offset": 30_000 })).is_err());
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn edit_file_refuses_ambiguous_matches_unless_replace_all() {
+        let ws = temp_ws("edit-unique");
+        std::fs::write(ws.join("a.txt"), "x = 1\ny = x\nx = 2\n").unwrap();
+        let args = json!({ "path": "a.txt", "old_text": "x", "new_text": "z" });
+        let err = edit_file(&ws, &args).unwrap_err();
+        assert!(err.contains("matches 3 places"), "{err}");
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "x = 1\ny = x\nx = 2\n");
+        let all = json!({ "path": "a.txt", "old_text": "x", "new_text": "z", "replace_all": true });
+        assert!(edit_file(&ws, &all).unwrap().contains("3 replacements"));
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "z = 1\ny = z\nz = 2\n");
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn write_and_edit_reject_missing_required_arguments() {
+        let ws = temp_ws("required-args");
+        std::fs::write(ws.join("keep.txt"), "data").unwrap();
+        assert!(write_file(&ws, &json!({ "path": "keep.txt" })).unwrap_err().contains("'content'"));
+        assert!(edit_file(&ws, &json!({ "path": "keep.txt", "old_text": "data" })).unwrap_err().contains("'new_text'"));
+        assert_eq!(std::fs::read_to_string(ws.join("keep.txt")).unwrap(), "data");
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn non_utf8_files_read_lossily_and_refuse_edits() {
+        let ws = temp_ws("non-utf8");
+        std::fs::write(ws.join("latin.txt"), b"caf\xe9 au lait\n").unwrap();
+        let read = read_file(&ws, &json!({ "path": "latin.txt" })).unwrap();
+        assert!(read.contains("caf") && read.contains("not valid UTF-8"), "{read}");
+        let err = edit_file(&ws, &json!({ "path": "latin.txt", "old_text": "au", "new_text": "du" })).unwrap_err();
+        assert!(err.contains("not valid UTF-8"), "{err}");
+        assert_eq!(std::fs::read(ws.join("latin.txt")).unwrap(), b"caf\xe9 au lait\n");
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn search_pattern_needs_the_dot_and_hidden_dirs_are_searched() {
+        assert!(file_pattern_matches("main.rs", "*.rs"));
+        assert!(!file_pattern_matches("users", "*.rs"));
+        assert!(!file_pattern_matches("foo.tsrs", "*.rs"));
+        let ws = temp_ws("search-hidden");
+        std::fs::create_dir_all(ws.join(".github")).unwrap();
+        std::fs::write(ws.join(".github").join("ci.yml"), "needle here\n").unwrap();
+        assert!(search_files(&ws, &json!({ "query": "needle" })).unwrap().contains("ci.yml"));
+        let _ = std::fs::remove_dir_all(ws);
+    }
+
+    #[test]
+    fn previews_mark_clipped_content() {
+        let text = "a".repeat(PREVIEW_CHARS + 25);
+        assert!(clip_with_marker(&text, PREVIEW_CHARS).ends_with("(25 more characters)"));
+        assert_eq!(clip_with_marker("short", PREVIEW_CHARS), "short");
+    }
+
+    #[test]
+    fn remember_prompts_follow_the_mode() {
+        assert!(!remember_needs_permission("auto", "global"));
+        assert!(remember_needs_permission("accept_edits", "global"));
+        assert!(!remember_needs_permission("accept_edits", "project"));
+        for mode in ["chat", "plan", "ask_permissions"] {
+            assert!(remember_needs_permission(mode, "global"), "{mode}");
+            assert!(remember_needs_permission(mode, "project"), "{mode}");
+        }
     }
 }
