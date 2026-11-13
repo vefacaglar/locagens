@@ -5,6 +5,11 @@
 //! existing ACEs are preserved (`SetEntriesInAclW` merges into the current
 //! DACL). Each edit is skipped when an equivalent ACE already exists, so
 //! repeated runs do not rewrite (and re-propagate) the DACL.
+//!
+//! Mandatory integrity labels (the SACL's label ACE, written with
+//! `LABEL_SECURITY_INFORMATION`, no privilege needed) are edited the same
+//! way: set only when different, removed only when they are the label the
+//! sandbox wrote.
 
 use std::ffi::c_void;
 use std::io;
@@ -17,9 +22,10 @@ use windows_sys::Win32::Security::Authorization::{
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    AddAce, EqualSid, GetAce, InitializeAcl, ACCESS_ALLOWED_ACE, ACE_FLAGS, ACE_HEADER, ACL,
-    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, NO_INHERITANCE,
-    OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+    AddAce, AddMandatoryAce, EqualSid, GetAce, GetLengthSid, InitializeAcl, ACCESS_ALLOWED_ACE,
+    ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+    INHERITED_ACE, LABEL_SECURITY_INFORMATION, NO_INHERITANCE, OBJECT_INHERIT_ACE,
+    OBJECT_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SYSTEM_MANDATORY_LABEL_ACE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
@@ -30,6 +36,12 @@ use super::token::to_wide;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+
+/// Mandatory label policies (`SYSTEM_MANDATORY_LABEL_NO_WRITE_UP` /
+/// `_NO_READ_UP`): what a process below the label's level may not do.
+pub(crate) const NO_WRITE_UP: u32 = 0x1;
+pub(crate) const NO_READ_UP: u32 = 0x2;
 
 /// Allow mask for writable roots (Codex `WRITE_ALLOW_MASK`).
 pub(crate) const WRITE_ALLOW_MASK: u32 =
@@ -44,26 +56,34 @@ pub(crate) const WRITE_DENY_MASK: u32 = FILE_GENERIC_WRITE
     | DELETE
     | FILE_DELETE_CHILD;
 
-/// A DACL fetched with `GetNamedSecurityInfoW`; owns its security descriptor.
-struct Dacl {
+/// A DACL, or the mandatory-label part of a SACL, fetched with
+/// `GetNamedSecurityInfoW`; owns its security descriptor.
+struct SecurityAcl {
     acl: *mut ACL,
     descriptor: PSECURITY_DESCRIPTOR,
 }
 
-impl Dacl {
-    fn read(path: &Path) -> io::Result<Self> {
+impl SecurityAcl {
+    /// `info` is `DACL_SECURITY_INFORMATION` or `LABEL_SECURITY_INFORMATION`
+    /// (the latter needs only `READ_CONTROL`, unlike a full SACL read).
+    fn read(path: &Path, info: OBJECT_SECURITY_INFORMATION) -> io::Result<Self> {
         let wide = to_wide(&path.to_string_lossy());
         let mut acl: *mut ACL = std::ptr::null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let (dacl_out, sacl_out): (*mut *mut ACL, *mut *mut ACL) = if info == LABEL_SECURITY_INFORMATION {
+            (std::ptr::null_mut(), &mut acl)
+        } else {
+            (&mut acl, std::ptr::null_mut())
+        };
         let code = unsafe {
             GetNamedSecurityInfoW(
                 wide.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                info,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut acl,
-                std::ptr::null_mut(),
+                dacl_out,
+                sacl_out,
                 &mut descriptor,
             )
         };
@@ -71,6 +91,27 @@ impl Dacl {
             return Err(acl_error(path, "read ACL", code));
         }
         Ok(Self { acl, descriptor })
+    }
+
+    /// The explicit (not inherited) mandatory label ACE: `(level SID, policy, flags)`.
+    fn explicit_label(&self) -> Option<(PSID, u32, u8)> {
+        if self.acl.is_null() {
+            return None;
+        }
+        let count = unsafe { (*self.acl).AceCount } as u32;
+        (0..count).find_map(|index| {
+            let mut ace: *mut c_void = std::ptr::null_mut();
+            if unsafe { GetAce(self.acl, index, &mut ace) } == 0 {
+                return None;
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+                return None;
+            }
+            let ace = ace as *const SYSTEM_MANDATORY_LABEL_ACE;
+            let sid = unsafe { std::ptr::addr_of!((*ace).SidStart) } as PSID;
+            Some((sid, unsafe { (*ace).Mask }, header.AceFlags))
+        })
     }
 
     /// Whether an ACE of `ace_type` for `sid` covers every bit of `mask`.
@@ -97,7 +138,7 @@ impl Dacl {
     }
 }
 
-impl Drop for Dacl {
+impl Drop for SecurityAcl {
     fn drop(&mut self) {
         if !self.descriptor.is_null() {
             unsafe { LocalFree(self.descriptor as HLOCAL) };
@@ -119,7 +160,7 @@ fn inheritance_for(path: &Path) -> ACE_FLAGS {
 }
 
 /// Merges one explicit entry for `sid` into the DACL of `path`.
-fn apply_entry(path: &Path, dacl: &Dacl, sid: PSID, mask: u32, mode: ACCESS_MODE) -> io::Result<()> {
+fn apply_entry(path: &Path, dacl: &SecurityAcl, sid: PSID, mask: u32, mode: ACCESS_MODE) -> io::Result<()> {
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: mask,
         grfAccessMode: mode,
@@ -147,7 +188,7 @@ fn apply_entry(path: &Path, dacl: &Dacl, sid: PSID, mask: u32, mode: ACCESS_MODE
 /// Grants `sid` read/write/execute/delete on `path` (inheritable for
 /// directories). Returns whether the DACL changed.
 pub(crate) fn grant_write(path: &Path, sid: PSID) -> io::Result<bool> {
-    let dacl = Dacl::read(path)?;
+    let dacl = SecurityAcl::read(path, DACL_SECURITY_INFORMATION)?;
     if dacl.has_ace(ACCESS_ALLOWED_ACE_TYPE, sid, WRITE_ALLOW_MASK) {
         return Ok(false);
     }
@@ -158,7 +199,7 @@ pub(crate) fn grant_write(path: &Path, sid: PSID) -> io::Result<bool> {
 /// Denies `sid` every write/delete right on `path`. Deny ACEs are ordered
 /// before allow ACEs, so they win over the inherited workspace grant.
 pub(crate) fn deny_write(path: &Path, sid: PSID) -> io::Result<bool> {
-    let dacl = Dacl::read(path)?;
+    let dacl = SecurityAcl::read(path, DACL_SECURITY_INFORMATION)?;
     if dacl.has_ace(ACCESS_DENIED_ACE_TYPE, sid, WRITE_DENY_MASK) {
         return Ok(false);
     }
@@ -173,7 +214,7 @@ pub(crate) fn deny_write(path: &Path, sid: PSID) -> io::Result<bool> {
 /// `SetNamedSecurityInfoW` (and vanish from children once the parent's
 /// inheritable ACE is gone).
 pub(crate) fn revoke(path: &Path, sid: PSID) -> io::Result<bool> {
-    let dacl = Dacl::read(path)?;
+    let dacl = SecurityAcl::read(path, DACL_SECURITY_INFORMATION)?;
     if dacl.acl.is_null() {
         return Ok(false);
     }
@@ -231,16 +272,98 @@ fn write_dacl(path: &Path, acl: *const ACL) -> io::Result<()> {
     Ok(())
 }
 
+/// Sets the explicit mandatory label of `path` to `level` with `policy`
+/// (`NO_WRITE_UP` / `NO_READ_UP`), inheritable for directories. Writing a
+/// label at or below the caller's own integrity needs only `WRITE_OWNER`
+/// (no privilege). Like DACL edits it propagates to existing children's
+/// inherited labels. Returns whether the label changed.
+pub(crate) fn set_label(path: &Path, level: PSID, policy: u32) -> io::Result<bool> {
+    let flags = inheritance_for(path) as u8;
+    let current = SecurityAcl::read(path, LABEL_SECURITY_INFORMATION)?;
+    if let Some((sid, mask, ace_flags)) = current.explicit_label() {
+        let inherit_bits = (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) as u8;
+        if mask == policy && ace_flags & inherit_bits == flags && unsafe { EqualSid(sid, level) } != 0 {
+            return Ok(false);
+        }
+    }
+    let size = std::mem::size_of::<ACL>()
+        + std::mem::size_of::<SYSTEM_MANDATORY_LABEL_ACE>()
+        + unsafe { GetLengthSid(level) } as usize;
+    let mut buffer = vec![0u32; size.div_ceil(4)];
+    let sacl = buffer.as_mut_ptr() as *mut ACL;
+    if unsafe { InitializeAcl(sacl, (buffer.len() * 4) as u32, ACL_REVISION) } == 0
+        || unsafe { AddMandatoryAce(sacl, ACL_REVISION, ACE_FLAGS::from(flags), policy, level) } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    write_label(path, sacl)?;
+    Ok(true)
+}
+
+/// Removes the explicit label of `path` when it is exactly `level` with
+/// `policy` (one [`set_label`] wrote); any other label is left alone.
+/// Children then inherit from the parent again.
+pub(crate) fn remove_label(path: &Path, level: PSID, policy: u32) -> io::Result<bool> {
+    let current = SecurityAcl::read(path, LABEL_SECURITY_INFORMATION)?;
+    let ours = current
+        .explicit_label()
+        .is_some_and(|(sid, mask, _)| mask == policy && unsafe { EqualSid(sid, level) } != 0);
+    if !ours {
+        return Ok(false);
+    }
+    let mut buffer = vec![0u32; std::mem::size_of::<ACL>().div_ceil(4)];
+    let empty = buffer.as_mut_ptr() as *mut ACL;
+    if unsafe { InitializeAcl(empty, (buffer.len() * 4) as u32, ACL_REVISION) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    write_label(path, empty)?;
+    Ok(true)
+}
+
+fn write_label(path: &Path, sacl: *const ACL) -> io::Result<()> {
+    let wide = to_wide(&path.to_string_lossy());
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            sacl,
+        )
+    };
+    if code != 0 {
+        return Err(acl_error(path, "write integrity label", code));
+    }
+    Ok(())
+}
+
+/// The explicit label of `path` as `(level SID string, policy)` (tests).
+#[cfg(test)]
+pub(crate) fn explicit_label_of(path: &Path) -> io::Result<Option<(String, u32)>> {
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    let current = SecurityAcl::read(path, LABEL_SECURITY_INFORMATION)?;
+    Ok(current.explicit_label().map(|(sid, mask, _)| {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        unsafe { ConvertSidToStringSidW(sid, &mut text) };
+        let len = (0..).take_while(|i| unsafe { *text.add(*i) } != 0).count();
+        let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        unsafe { LocalFree(text as HLOCAL) };
+        (value, mask)
+    }))
+}
+
 /// Whether `path` has an allow ACE for `sid` covering `mask` (tests).
 #[cfg(test)]
 pub(crate) fn has_allow(path: &Path, sid: PSID, mask: u32) -> io::Result<bool> {
-    Ok(Dacl::read(path)?.has_ace(ACCESS_ALLOWED_ACE_TYPE, sid, mask))
+    Ok(SecurityAcl::read(path, DACL_SECURITY_INFORMATION)?.has_ace(ACCESS_ALLOWED_ACE_TYPE, sid, mask))
 }
 
 /// Whether `path` has a deny ACE for `sid` covering `mask` (tests).
 #[cfg(test)]
 pub(crate) fn has_deny(path: &Path, sid: PSID, mask: u32) -> io::Result<bool> {
-    Ok(Dacl::read(path)?.has_ace(ACCESS_DENIED_ACE_TYPE, sid, mask))
+    Ok(SecurityAcl::read(path, DACL_SECURITY_INFORMATION)?.has_ace(ACCESS_DENIED_ACE_TYPE, sid, mask))
 }
 
 #[cfg(test)]
@@ -256,7 +379,7 @@ mod tests {
         let file = dir.join("existing.txt");
         std::fs::write(&file, "x").unwrap();
         let sid = LocalSid::parse(&capability_sid_for(&format!("acl-test-{}", uuid::Uuid::new_v4()))).unwrap();
-        let ace_count = |path: &Path| unsafe { (*Dacl::read(path).unwrap().acl).AceCount };
+        let ace_count = |path: &Path| unsafe { (*SecurityAcl::read(path, DACL_SECURITY_INFORMATION).unwrap().acl).AceCount };
         let file_aces_before = ace_count(&file);
 
         assert!(!has_allow(&dir, sid.as_ptr(), WRITE_ALLOW_MASK).unwrap());
@@ -278,6 +401,46 @@ mod tests {
         assert!(!has_allow(&file, sid.as_ptr(), 0).unwrap(), "inherited copy is gone too");
         assert_eq!(ace_count(&file), file_aces_before);
         assert!(!revoke(&dir, sid.as_ptr()).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_propagate_are_idempotent_and_only_our_label_is_removed() {
+        use crate::windows_sandbox::token::{LOW_INTEGRITY_SID, MEDIUM_INTEGRITY_SID};
+        let dir = std::env::temp_dir().join(format!("locagens-label-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("sub").join("existing.txt");
+        std::fs::write(&file, "x").unwrap();
+        let low = LocalSid::parse(LOW_INTEGRITY_SID).unwrap();
+        let medium = LocalSid::parse(MEDIUM_INTEGRITY_SID).unwrap();
+        let inherited = |path: &Path| {
+            let current = SecurityAcl::read(path, LABEL_SECURITY_INFORMATION).unwrap();
+            if current.acl.is_null() { 0 } else { unsafe { (*current.acl).AceCount } }
+        };
+
+        assert_eq!(explicit_label_of(&dir).unwrap(), None);
+        assert!(set_label(&dir, low.as_ptr(), NO_WRITE_UP).unwrap());
+        assert!(!set_label(&dir, low.as_ptr(), NO_WRITE_UP).unwrap(), "second label is a no-op");
+        assert_eq!(explicit_label_of(&dir).unwrap(), Some((LOW_INTEGRITY_SID.to_string(), NO_WRITE_UP)));
+        assert_eq!(inherited(&file), 1, "the existing child inherited the label");
+        assert_eq!(explicit_label_of(&file).unwrap(), None);
+
+        // A different label on the child overrides the inherited one.
+        assert!(set_label(&file, medium.as_ptr(), NO_WRITE_UP | NO_READ_UP).unwrap());
+        assert_eq!(
+            explicit_label_of(&file).unwrap(),
+            Some((MEDIUM_INTEGRITY_SID.to_string(), NO_WRITE_UP | NO_READ_UP))
+        );
+        assert!(!remove_label(&file, medium.as_ptr(), NO_WRITE_UP).unwrap(), "another policy is not ours");
+        assert!(remove_label(&file, medium.as_ptr(), NO_WRITE_UP | NO_READ_UP).unwrap());
+        assert_eq!(explicit_label_of(&file).unwrap(), None);
+
+        assert!(!remove_label(&dir, medium.as_ptr(), NO_WRITE_UP).unwrap(), "another level is not ours");
+        assert!(remove_label(&dir, low.as_ptr(), NO_WRITE_UP).unwrap());
+        assert_eq!(explicit_label_of(&dir).unwrap(), None);
+        assert_eq!(inherited(&file), 0, "the inherited copy is gone too");
+        assert!(!remove_label(&dir, low.as_ptr(), NO_WRITE_UP).unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

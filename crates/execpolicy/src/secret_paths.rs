@@ -6,15 +6,16 @@
 //! | --- | --- | --- |
 //! | macOS Seatbelt | denied (`deny file-read*`) | denied |
 //! | Linux Bubblewrap | hidden (empty tmpfs / `/dev/null` bind) | denied |
-//! | Windows restricted token | **not restricted** | deny-write ACE where a writable root covers them |
+//! | Windows restricted token | denied (Medium no-read-up label) | denied (same label; plus a deny-write ACE where a writable root covers them) |
 //!
-//! Windows cannot deny reads here: the sandbox token is *write-restricted*,
-//! so its restricting SIDs (the workspace capability SID among them) are
-//! only consulted for the rights `GENERIC_WRITE` maps to. A deny-read ACE
-//! for the capability SID is never evaluated for reads (and `DELETE` is not
-//! such a right either, so deletes are not restricted by the token at all);
-//! only a different token design (AppContainer, a separate user, integrity
-//! labels) could hide files from reads.
+//! On Windows a deny-read ACE would not work: the sandbox token is
+//! *write-restricted*, so its restricting SIDs (the workspace capability SID
+//! among them) are only consulted for the rights `GENERIC_WRITE` maps to.
+//! The token runs at Low integrity instead, and each existing credential
+//! location gets a Medium mandatory label with `NO_READ_UP | NO_WRITE_UP`
+//! (inherited by a directory's contents): no read, list, write, delete or
+//! rename from the command. For processes at Medium integrity or above —
+//! everything else the user runs — that label changes nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -122,7 +123,7 @@ mod tests {
         let masked = maskable(&[ssh.clone(), aws.clone(), aws.clone(), home.join("missing")], &[workspace]);
         assert_eq!(masked, vec![std::fs::canonicalize(&aws).unwrap()]);
         // A secret inside a writable root (e.g. `writable_roots = ["~"]`) is masked.
-        assert_eq!(maskable(&[aws.clone()], &[home.clone()]), vec![std::fs::canonicalize(&aws).unwrap()]);
+        assert_eq!(maskable(std::slice::from_ref(&aws), std::slice::from_ref(&home)), vec![std::fs::canonicalize(&aws).unwrap()]);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

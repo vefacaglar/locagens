@@ -10,6 +10,7 @@ use std::time::Duration;
 use locagens_execpolicy::network_proxy::{DomainAllowlist, NetworkPolicy};
 use locagens_execpolicy::processes::{ProcessManager, SpawnOptions};
 use locagens_execpolicy::sandbox::{run_captured, CapturedOutput, SandboxSpec};
+use locagens_execpolicy::windows_sandbox::plan::normalize_path;
 use locagens_execpolicy::windows_sandbox::revoke_workspace_access;
 use locagens_protocol::SandboxMode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,13 +23,16 @@ struct Workspace {
 }
 
 impl Workspace {
+    /// Both paths are canonical long forms (CI runners' `%TEMP%` can be an
+    /// 8.3 short path such as `C:\Users\RUNNER~1\…`), so they compare equal
+    /// to the paths the sandbox plans and revokes.
     fn new(label: &str) -> Self {
         let id = uuid::Uuid::new_v4();
         let root = std::env::temp_dir().join(format!("locagens-sbx-it-{label}-{id}"));
         let outside = std::env::temp_dir().join(format!("locagens-sbx-it-{label}-{id}-outside"));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        Self { root, outside }
+        Self { root: normalize_path(&root), outside: normalize_path(&outside) }
     }
 
     fn spec(&self, mode: SandboxMode, network: Option<NetworkPolicy>) -> SandboxSpec {
@@ -46,7 +50,7 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         // Revoke the ACEs, then delete this workspace's private temp dir.
-        let sandbox_temp = std::env::temp_dir().join("locagens-sandbox");
+        let sandbox_temp = normalize_path(&std::env::temp_dir()).join("locagens-sandbox");
         for path in revoke_workspace_access(&self.root, &[], &[]).unwrap_or_default() {
             if path.starts_with(&sandbox_temp) {
                 let _ = std::fs::remove_dir_all(path);
@@ -304,12 +308,134 @@ async fn sandbox_setup_errors_fail_the_session_closed() {
     assert!(!logs.contains("should-not-run"));
 }
 
+/// The command runs at Low integrity, so files outside the writable roots
+/// (unlabeled = Medium) cannot be deleted, renamed, moved into the
+/// workspace, hard-linked, re-ACLed or modified — the rights
+/// `WRITE_RESTRICTED` alone does not check against the capability SID.
+#[tokio::test]
+async fn workspace_write_cannot_delete_move_or_modify_files_outside() {
+    let ws = Workspace::new("outside");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    let victim = ws.outside.join("victim.txt");
+    std::fs::write(&victim, "original").unwrap();
+    let nested = ws.outside.join("dir");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("inner.txt"), "inner").unwrap();
+    let victim_path = victim.display().to_string();
+
+    for script in [
+        format!("del /f /q \"{victim_path}\""),
+        format!("move \"{victim_path}\" moved.txt"),
+        format!("ren \"{victim_path}\" renamed.txt"),
+        format!("rmdir /s /q \"{}\"", nested.display()),
+        format!("echo pwned>> \"{victim_path}\""),
+        format!("echo pwned> \"{victim_path}\""),
+        format!("\"%SystemRoot%\\System32\\icacls.exe\" \"{victim_path}\" /grant *S-1-1-0:(F)"),
+        format!("mklink /h linked.txt \"{victim_path}\""),
+    ] {
+        let output = run(&ws, &spec, &script).await;
+        assert!(victim.exists(), "{script}: {}", text(&output));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original", "{script}: {}", text(&output));
+    }
+    assert_eq!(std::fs::read_to_string(nested.join("inner.txt")).unwrap(), "inner");
+    for name in ["moved.txt", "linked.txt"] {
+        assert!(!ws.root.join(name).exists(), "{name}");
+    }
+    assert!(!ws.outside.join("renamed.txt").exists());
+    let acl = std::process::Command::new("icacls").arg(&victim).output().unwrap();
+    assert!(!String::from_utf8_lossy(&acl.stdout).contains("Everyone"), "the DACL is unchanged");
+
+    // Control: the same delete succeeds in full-access mode.
+    let full = ws.spec(SandboxMode::DangerFullAccess, None);
+    let control = run(&ws, &full, &format!("del /f /q \"{victim_path}\"")).await;
+    assert!(!victim.exists(), "{}", text(&control));
+}
+
+/// Credential locations of an injected temp "home" (never the real one)
+/// are labeled Medium + no-read-up: the Low-integrity command can neither
+/// read, list, copy, delete nor rename them, while ordinary files next to
+/// them stay readable. Revoking removes the labels again.
+#[tokio::test]
+async fn workspace_write_cannot_read_planted_credentials() {
+    let ws = Workspace::new("readsecret");
+    let home = ws.outside.join("home");
+    let ssh = home.join(".ssh");
+    let agent_dir = home.join(".locagens");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(ssh.join("id_ed25519"), "PRIVATE-KEY-MARKER").unwrap();
+    std::fs::write(agent_dir.join("auth.json"), "API-KEY-MARKER").unwrap();
+    std::fs::write(home.join("notes.txt"), "public-notes").unwrap();
+    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, std::slice::from_ref(&agent_dir));
+    assert_eq!(secrets, vec![ssh.clone(), agent_dir.join("auth.json")]);
+    let mut spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    spec.secret_paths = secrets.clone();
+
+    let key = ssh.join("id_ed25519").display().to_string();
+    let auth = agent_dir.join("auth.json").display().to_string();
+    for script in [
+        format!("type \"{key}\""),
+        format!("type \"{auth}\""),
+        format!("copy \"{auth}\" stolen.json"),
+        format!("findstr /s MARKER \"{}\\*\"", home.display()),
+        format!("del /f /q \"{key}\" & ren \"{auth}\" gone.json"),
+    ] {
+        let output = run(&ws, &spec, &script).await;
+        assert!(!text(&output).contains("MARKER"), "{script}: {}", text(&output));
+    }
+    let listing = run(&ws, &spec, &format!("dir /b \"{}\"", ssh.display())).await;
+    assert!(!String::from_utf8_lossy(&listing.stdout).contains("id_ed25519"), "{}", text(&listing));
+    assert!(!ws.root.join("stolen.json").exists());
+    assert_eq!(std::fs::read_to_string(ssh.join("id_ed25519")).unwrap(), "PRIVATE-KEY-MARKER");
+    assert_eq!(std::fs::read_to_string(agent_dir.join("auth.json")).unwrap(), "API-KEY-MARKER");
+
+    let notes = run(&ws, &spec, &format!("type \"{}\"", home.join("notes.txt").display())).await;
+    assert!(String::from_utf8_lossy(&notes.stdout).contains("public-notes"), "{}", text(&notes));
+
+    let revoked = revoke_workspace_access(&ws.root, &[], &secrets).unwrap();
+    assert!(revoked.contains(&ssh) && revoked.contains(&agent_dir.join("auth.json")), "{revoked:?}");
+    let unlabeled = run(&ws, &ws.spec(SandboxMode::WorkspaceWrite, None), &format!("type \"{auth}\"")).await;
+    assert!(String::from_utf8_lossy(&unlabeled.stdout).contains("API-KEY-MARKER"), "{}", text(&unlabeled));
+}
+
+/// Low integrity does not break ordinary read-and-run commands.
+#[tokio::test]
+async fn ordinary_commands_still_work_at_low_integrity() {
+    let ws = Workspace::new("ordinary");
+    let spec = ws.spec(SandboxMode::WorkspaceWrite, None);
+    std::fs::create_dir_all(ws.root.join("src")).unwrap();
+    std::fs::write(ws.root.join("src").join("lib.txt"), "workspace-content").unwrap();
+
+    let checks = [
+        ("echo sandbox-echo", "sandbox-echo"),
+        ("where cmd", "cmd.exe"),
+        ("type src\\lib.txt", "workspace-content"),
+        ("type \"%SystemRoot%\\System32\\drivers\\etc\\hosts\" >nul && echo hosts-ok", "hosts-ok"),
+        ("dir /b \"%SystemRoot%\\System32\\cmd.exe\"", "cmd.exe"),
+        ("echo edited>> src\\lib.txt && type src\\lib.txt", "edited"),
+        ("ren src\\lib.txt lib2.txt && del src\\lib2.txt && rmdir src && echo cleanup-ok", "cleanup-ok"),
+        ("\"%SystemRoot%\\System32\\whoami.exe\" /groups", "S-1-16-4096"),
+    ];
+    for (script, expected) in checks {
+        let output = run(&ws, &spec, script).await;
+        assert!(output.success(), "{script}: {}", text(&output));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected), "{script}: {}", text(&output));
+    }
+
+    let git_on_host = std::process::Command::new("git").arg("--version").output().is_ok_and(|out| out.status.success());
+    if git_on_host {
+        let git = run(&ws, &spec, "git --version && git init -q repo && cd repo && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init && git log --oneline").await;
+        assert!(git.success(), "{}", text(&git));
+        assert!(String::from_utf8_lossy(&git.stdout).contains("git version"), "{}", text(&git));
+        assert!(String::from_utf8_lossy(&git.stdout).contains("init"), "{}", text(&git));
+    } else {
+        eprintln!("skipping the git check: git is not installed");
+    }
+}
+
 /// QA-020: credentials inside a writable root (here a temp "home" granted
 /// as an extra writable root, never the real home) cannot be overwritten,
 /// appended to or added to, while the rest of that root stays writable.
-/// Reads (and deletes, which a write-restricted token does not check
-/// against its restricting SIDs) cannot be denied with this token; see
-/// `locagens_execpolicy::secret_paths`.
 #[tokio::test]
 async fn credentials_inside_writable_roots_are_write_protected() {
     let ws = Workspace::new("secrets");
@@ -320,7 +446,7 @@ async fn credentials_inside_writable_roots_are_write_protected() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
     std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
-    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, &[agent_dir.clone()]);
+    let secrets = locagens_execpolicy::secret_paths::credential_paths(&home, std::slice::from_ref(&agent_dir));
     assert_eq!(secrets, vec![ssh.clone(), agent_dir.join("auth.json")]);
 
     let mut spec = ws.spec(SandboxMode::WorkspaceWrite, None);
@@ -341,7 +467,7 @@ async fn credentials_inside_writable_roots_are_write_protected() {
     assert!(!ssh.join("authorized_keys").exists());
     assert_eq!(std::fs::read_to_string(agent_dir.join("auth.json")).unwrap(), "{}");
 
-    let revoked = revoke_workspace_access(&ws.root, &[home.clone()], &secrets).unwrap();
+    let revoked = revoke_workspace_access(&ws.root, std::slice::from_ref(&home), &secrets).unwrap();
     assert!(revoked.contains(&ssh) && revoked.contains(&agent_dir.join("auth.json")), "{revoked:?}");
 }
 

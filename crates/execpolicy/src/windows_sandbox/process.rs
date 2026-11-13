@@ -26,7 +26,7 @@ use windows_sys::Win32::System::Threading::{
 use super::acl;
 use super::job::JobObject;
 use super::plan::{build_plan, strip_verbatim_prefix, TokenMode, WindowsSandboxPlan};
-use super::token::{create_restricted_token, to_wide, LocalSid};
+use super::token::{create_restricted_token, to_wide, LocalSid, LOW_INTEGRITY_SID, MEDIUM_INTEGRITY_SID};
 use crate::sandbox::SandboxSpec;
 
 /// What to run inside the sandbox.
@@ -106,24 +106,45 @@ pub fn spawn_sandboxed(spec: &SandboxSpec, request: &SpawnRequest) -> Result<San
         .map_err(|err| format!("Windows sandbox: cannot start the sandboxed process: {err}"))
 }
 
-/// Creates the plan's directories and applies its ACEs.
+/// Integrity labels the sandbox writes: writable roots become Low (the
+/// command's own level), protected paths inside them Medium again, and
+/// credentials Medium + no-read-up.
+const ROOT_LABEL: (&str, u32) = (LOW_INTEGRITY_SID, acl::NO_WRITE_UP);
+const PROTECTED_LABEL: (&str, u32) = (MEDIUM_INTEGRITY_SID, acl::NO_WRITE_UP);
+const SECRET_LABEL: (&str, u32) = (MEDIUM_INTEGRITY_SID, acl::NO_WRITE_UP | acl::NO_READ_UP);
+
+/// Creates the plan's directories and applies its ACEs and labels.
 fn apply_plan(plan: &WindowsSandboxPlan, capability: &LocalSid) -> Result<(), String> {
-    if plan.token_mode == TokenMode::ReadOnly {
-        return Ok(());
+    let refuse = |path: &Path, err: io::Error| {
+        format!("Windows sandbox: cannot protect {} ({err}); refusing to run the command", path.display())
+    };
+    if plan.token_mode == TokenMode::WorkspaceWrite {
+        for dir in &plan.create_dirs {
+            std::fs::create_dir_all(dir)
+                .map_err(|err| format!("Windows sandbox: cannot create {}: {err}", dir.display()))?;
+        }
+        let low = LocalSid::parse(ROOT_LABEL.0).map_err(|err| err.to_string())?;
+        for root in &plan.writable_roots {
+            acl::grant_write(root, capability.as_ptr())
+                .and_then(|_| acl::set_label(root, low.as_ptr(), ROOT_LABEL.1))
+                .map_err(|err| {
+                    format!("Windows sandbox: cannot grant workspace write access ({err}); refusing to run the command unsandboxed")
+                })?;
+        }
+        let medium = LocalSid::parse(PROTECTED_LABEL.0).map_err(|err| err.to_string())?;
+        for path in &plan.deny_write_paths {
+            acl::deny_write(path, capability.as_ptr())
+                .and_then(|_| acl::set_label(path, medium.as_ptr(), PROTECTED_LABEL.1))
+                .map_err(|err| refuse(path, err))?;
+        }
+        // Their label comes with `secret_read_paths` below.
+        for path in &plan.secret_deny_write_paths {
+            acl::deny_write(path, capability.as_ptr()).map_err(|err| refuse(path, err))?;
+        }
     }
-    for dir in &plan.create_dirs {
-        std::fs::create_dir_all(dir)
-            .map_err(|err| format!("Windows sandbox: cannot create {}: {err}", dir.display()))?;
-    }
-    for root in &plan.writable_roots {
-        acl::grant_write(root, capability.as_ptr()).map_err(|err| {
-            format!("Windows sandbox: cannot grant workspace write access ({err}); refusing to run the command unsandboxed")
-        })?;
-    }
-    for path in plan.deny_write_paths.iter().chain(&plan.secret_deny_write_paths) {
-        acl::deny_write(path, capability.as_ptr()).map_err(|err| {
-            format!("Windows sandbox: cannot protect {} ({err}); refusing to run the command", path.display())
-        })?;
+    let secret = LocalSid::parse(SECRET_LABEL.0).map_err(|err| err.to_string())?;
+    for path in &plan.secret_read_paths {
+        acl::set_label(path, secret.as_ptr(), SECRET_LABEL.1).map_err(|err| refuse(path, err))?;
     }
     Ok(())
 }
@@ -148,11 +169,19 @@ pub fn revoke_workspace_access(
     let capability = LocalSid::parse(&plan.capability_sid).map_err(|err| err.to_string())?;
     let _guard = PREPARE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut changed = Vec::new();
-    for path in plan.deny_write_paths.iter().chain(&plan.secret_deny_write_paths).chain(&plan.writable_roots) {
+    // Children before their roots, so inherited entries vanish last.
+    let edits = (plan.deny_write_paths.iter().map(|path| (path, PROTECTED_LABEL)))
+        .chain(plan.secret_deny_write_paths.iter().map(|path| (path, SECRET_LABEL)))
+        .chain(plan.secret_read_paths.iter().map(|path| (path, SECRET_LABEL)))
+        .chain(plan.writable_roots.iter().map(|path| (path, ROOT_LABEL)));
+    for (path, (level, policy)) in edits {
         if !path.exists() {
             continue;
         }
-        if acl::revoke(path, capability.as_ptr()).map_err(|err| err.to_string())? {
+        let level = LocalSid::parse(level).map_err(|err| err.to_string())?;
+        let revoked = acl::revoke(path, capability.as_ptr()).map_err(|err| err.to_string())?;
+        let unlabeled = acl::remove_label(path, level.as_ptr(), policy).map_err(|err| err.to_string())?;
+        if (revoked || unlabeled) && !changed.contains(path) {
             changed.push(path.clone());
         }
     }
