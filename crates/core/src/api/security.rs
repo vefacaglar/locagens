@@ -64,13 +64,14 @@ async fn status_value() -> SecurityStatus {
 fn sandbox_status() -> SecuritySandbox {
     use locagens_execpolicy::sandbox::{detect_backend, SandboxBackend};
     let platform = std::env::consts::OS.to_string();
+    let unix_network_note = "Network is all-or-nothing in Build mode: offline unless a command names network_domains (or network_access is enabled), which opens the whole network for that command - there is no per-domain proxy on this platform.";
     match detect_backend() {
         SandboxBackend::MacosSeatbelt => SecuritySandbox {
             platform,
             backend: "macos-seatbelt".to_string(),
             status: "ready".to_string(),
             errors: Vec::new(),
-            warnings: Vec::new(),
+            warnings: vec![unix_network_note.to_string()],
             can_install: false,
         },
         SandboxBackend::LinuxBubblewrap => SecuritySandbox {
@@ -78,7 +79,7 @@ fn sandbox_status() -> SecuritySandbox {
             backend: "linux-bwrap".to_string(),
             status: "ready".to_string(),
             errors: Vec::new(),
-            warnings: Vec::new(),
+            warnings: vec![unix_network_note.to_string()],
             can_install: false,
         },
         SandboxBackend::WindowsRestrictedToken => SecuritySandbox {
@@ -87,7 +88,9 @@ fn sandbox_status() -> SecuritySandbox {
             status: "ready".to_string(),
             errors: Vec::new(),
             warnings: vec![
-                "Network isolation is proxy-based: sandboxed commands get HTTP(S)_PROXY pointing at a per-domain allowlist proxy, but programs that ignore proxy variables are not blocked (firewall rules would need admin rights)."
+                "Windows network approval is best-effort: the allowlist is an HTTP proxy that programs can bypass (curl --noproxy, raw sockets), and local services stay reachable. Do not rely on it to contain a hostile command."
+                    .to_string(),
+                "Windows Build mode restricts writes only: sandboxed commands can still read anything you can, including ~/.locagens/auth.json, .ssh and .env files."
                     .to_string(),
             ],
             can_install: false,
@@ -95,12 +98,9 @@ fn sandbox_status() -> SecuritySandbox {
         SandboxBackend::HostEnvOnly => SecuritySandbox {
             platform,
             backend: "host-env-only".to_string(),
-            status: "ready".to_string(),
-            errors: Vec::new(),
-            warnings: vec![
-                "Compatibility mode is active: commands run on the host with secrets removed from their environment."
-                    .to_string(),
-            ],
+            status: "unavailable".to_string(),
+            errors: vec![locagens_execpolicy::sandbox::unavailable_backend_message()],
+            warnings: Vec::new(),
             can_install: false,
         },
     }

@@ -369,29 +369,10 @@ pub async fn execute_with_mode(
     }
 }
 
-/// Builds the secret-stripped environment for exec sessions (`exec_command`).
+/// The secret-stripped base environment for exec sessions
+/// (`exec_command`); `[shell_environment_policy]` refines it at spawn time.
 pub fn exec_session_env() -> std::collections::HashMap<String, String> {
-    const SAFE: [&str; 18] = [
-        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE",
-        "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "NUMBER_OF_PROCESSORS", "OS", "PROCESSOR_ARCHITECTURE",
-        "LANG", "TERM", "SHELL",
-    ];
-    let mut env = std::collections::HashMap::new();
-    for (name, value) in std::env::vars() {
-        if is_secret_env(&name) {
-            continue;
-        }
-        if is_safe_env_name(&name, &SAFE) {
-            env.insert(name, value);
-        }
-    }
-    // Long build/tool output never blocks on a pager; keep ANSI color noise
-    // out of model-visible output.
-    env.insert("PAGER".to_string(), "cat".to_string());
-    env.insert("GIT_PAGER".to_string(), "cat".to_string());
-    env.insert("GH_PAGER".to_string(), "cat".to_string());
-    env.insert("NO_COLOR".to_string(), "1".to_string());
-    env
+    locagens_execpolicy::env_policy::safe_base_env()
 }
 
 /// Maximum image size `view_image` will inline as base64 (10 MiB).
@@ -718,25 +699,34 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 // Dangerous tools
 // ----------------------------------------------------------------------
 
-/// Environment variable names that must never leak into child processes.
-fn is_secret_env(name: &str) -> bool {
-    let upper = name.to_uppercase();
-    upper.contains("API_KEY")
-        || upper.contains("APIKEY")
-        || upper.contains("SECRET")
-        || upper.contains("TOKEN")
-        || upper.contains("PASSWORD")
-        || upper.contains("PASSWD")
-        || upper == "LOCAGENS_API_TOKEN"
-        || upper.contains("PRIVATE_KEY")
-}
-
-/// Whether `name` is on the safe environment allowlist. Windows variable
-/// names are case-insensitive (`SystemRoot`, `Path`, `ComSpec`); without
-/// `SystemRoot` a child process cannot even initialize Winsock.
-fn is_safe_env_name(name: &str, safe: &[&str]) -> bool {
-    let name = if cfg!(windows) { name.to_uppercase() } else { name.to_string() };
-    safe.contains(&name.as_str()) || name.starts_with("SYSTEMROOT")
+/// The one place the sandbox of a command tool call (`run_command` and
+/// `exec_command`) is decided, so both tools agree (QA-015).
+///
+/// Network rules:
+/// - Full Access runs unsandboxed (the spec is then ignored).
+/// - `[sandbox_workspace_write] network_access = true` opens the network in
+///   every sandboxed mode and on every OS.
+/// - Windows otherwise routes through the per-domain proxy (`network`).
+/// - macOS/Linux have no per-domain proxy: a call that names
+///   `network_domains` (approved by the user with the command) opens the
+///   whole network for that command; without domains it stays offline.
+pub fn command_sandbox_spec(
+    mode: &str,
+    project: &Path,
+    network: locagens_execpolicy::network_proxy::NetworkPolicy,
+    requested_domains: &[String],
+) -> locagens_execpolicy::sandbox::SandboxSpec {
+    let sandbox_mode = locagens_protocol::from_run_mode(mode).1;
+    let allow_network = sandbox_mode == locagens_protocol::SandboxMode::DangerFullAccess
+        || crate::config_runtime::sandbox_network_access()
+        || (!cfg!(windows) && !requested_domains.is_empty());
+    locagens_execpolicy::sandbox::SandboxSpec {
+        mode: sandbox_mode,
+        project_path: project.to_path_buf(),
+        allow_network,
+        network: Some(network),
+        writable_roots: crate::config_runtime::sandbox_writable_roots(),
+    }
 }
 
 async fn run_command(project: &Path, mode: &str, args: &Value) -> Result<String, String> {
@@ -762,35 +752,15 @@ pub async fn run_command_with_network(
             locagens_execpolicy::network_proxy::DomainAllowlist::new(&domains),
         )
     });
-    let spec = locagens_execpolicy::sandbox::SandboxSpec {
-        mode: locagens_protocol::from_run_mode(mode).1,
-        project_path: project.to_path_buf(),
-        allow_network: !domains.is_empty() || mode == "auto",
-        network: Some(network),
-        writable_roots: crate::config_runtime::sandbox_writable_roots(),
-    };
+    let spec = command_sandbox_spec(mode, project, network, &domains);
     let (shell_prog, shell_args): (String, Vec<String>) = if cfg!(windows) {
         ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
     } else {
         ("sh".to_string(), vec!["-c".to_string(), command.to_string()])
     };
 
-    // Deny-by-default network + secret-free environment.
-    let mut env = std::collections::HashMap::new();
-    for (name, value) in std::env::vars() {
-        if is_secret_env(&name) {
-            continue;
-        }
-        // Only pass a small safe allowlist plus the bare minimum.
-        const SAFE: [&str; 18] = [
-            "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE",
-            "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "NUMBER_OF_PROCESSORS", "OS", "PROCESSOR_ARCHITECTURE",
-            "LANG", "TERM", "SHELL",
-        ];
-        if is_safe_env_name(&name, &SAFE) {
-            env.insert(name, value);
-        }
-    }
+    // Secret-free environment, refined by `[shell_environment_policy]`.
+    let env = locagens_execpolicy::env_policy::command_env();
 
     let output = locagens_execpolicy::sandbox::run_captured(
         &shell_prog,
@@ -1267,6 +1237,29 @@ mod tests {
         assert_eq!(preview["action"], "create");
         assert_eq!(preview["oldContent"], Value::Null);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// QA-015: both command tools build the same spec, so network rules agree.
+    #[test]
+    fn command_sandbox_spec_applies_one_network_rule() {
+        use locagens_execpolicy::network_proxy::NetworkPolicy;
+        let ws = std::env::temp_dir();
+        let domains = vec!["registry.npmjs.org".to_string()];
+        let build = |mode: &str, domains: &[String]| {
+            command_sandbox_spec(mode, &ws, NetworkPolicy::default(), domains)
+        };
+        // Full Access: unrestricted.
+        assert!(build("auto", &[]).allow_network);
+        // Build without domains: offline everywhere.
+        assert!(!build("accept_edits", &[]).allow_network);
+        assert!(!build("ask_permissions", &[]).allow_network);
+        // Build with domains: Windows keeps the per-domain proxy, Unix has
+        // no proxy and opens the network for that command.
+        assert_eq!(build("accept_edits", &domains).allow_network, !cfg!(windows));
+        assert_eq!(
+            build("accept_edits", &domains).mode,
+            locagens_protocol::SandboxMode::WorkspaceWrite
+        );
     }
 
     #[test]

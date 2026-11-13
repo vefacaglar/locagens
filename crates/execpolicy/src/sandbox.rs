@@ -29,7 +29,8 @@ pub enum SandboxBackend {
     LinuxBubblewrap,
     /// Windows write-restricted token + capability-SID ACLs + Job Object.
     WindowsRestrictedToken,
-    /// No native backend: commands run on the host (secrets stripped).
+    /// No native backend found (e.g. no `bwrap` on Linux). Sandboxed modes
+    /// refuse to run commands (fail closed); only Full Access runs.
     HostEnvOnly,
 }
 
@@ -38,8 +39,9 @@ pub enum SandboxBackend {
 pub struct SandboxSpec {
     pub mode: SandboxMode,
     pub project_path: PathBuf,
-    /// macOS/Linux: allow all outbound network. Ignored by the Windows
-    /// backend, which always routes sandboxed commands through the proxy.
+    /// Allow unrestricted outbound network. macOS/Linux have no per-domain
+    /// proxy, so this is all-or-nothing there. Windows skips its proxy when
+    /// set and otherwise always routes through the proxy.
     pub allow_network: bool,
     /// Windows: the per-domain allowlist (+ approval hook) enforced by the
     /// command's network proxy. `None` means deny every host.
@@ -49,14 +51,40 @@ pub struct SandboxSpec {
     pub writable_roots: Vec<PathBuf>,
 }
 
+/// The first existing file among `hard_paths`, else `name` found on `path_var`
+/// (absolute entries only).
+fn find_binary_in(name: &str, hard_paths: &[&str], path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(found) = hard_paths.iter().map(Path::new).find(|path| path.is_file()) {
+        return Some(found.to_path_buf());
+    }
+    std::env::split_paths(&path_var?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn find_binary(name: &str, hard_paths: &[&str]) -> Option<PathBuf> {
+    find_binary_in(name, hard_paths, std::env::var_os("PATH"))
+}
+
+/// The backend's executable, resolved from well-known paths and `PATH`
+/// (NixOS, `/usr/local/bin`, Homebrew). `None` when it is not installed.
+pub fn backend_binary(backend: SandboxBackend) -> Option<PathBuf> {
+    match backend {
+        SandboxBackend::MacosSeatbelt => find_binary("sandbox-exec", &["/usr/bin/sandbox-exec"]),
+        SandboxBackend::LinuxBubblewrap => find_binary("bwrap", &["/usr/bin/bwrap", "/bin/bwrap"]),
+        _ => None,
+    }
+}
+
 /// Detects the best available sandbox backend on this platform.
 pub fn detect_backend() -> SandboxBackend {
     #[cfg(target_os = "macos")]
-    if Path::new("/usr/bin/sandbox-exec").is_file() {
+    if backend_binary(SandboxBackend::MacosSeatbelt).is_some() {
         return SandboxBackend::MacosSeatbelt;
     }
     #[cfg(target_os = "linux")]
-    if Path::new("/usr/bin/bwrap").is_file() || Path::new("/bin/bwrap").is_file() {
+    if backend_binary(SandboxBackend::LinuxBubblewrap).is_some() {
         return SandboxBackend::LinuxBubblewrap;
     }
     #[cfg(windows)]
@@ -126,9 +154,16 @@ pub fn spawn_native(
     mut env: HashMap<String, String>,
     stdin_pipe: bool,
 ) -> Result<NativeChild, String> {
-    let (proxy, proxy_env) = start_network_proxy(spec)
-        .map_err(|err| format!("Windows sandbox: cannot start the network proxy: {err}"))?;
-    env.extend(proxy_env);
+    // Unrestricted network (`network_access = true`): no proxy. Otherwise
+    // every sandboxed command goes through the allowlist proxy.
+    let proxy = if spec.allow_network {
+        None
+    } else {
+        let (proxy, proxy_env) = start_network_proxy(spec)
+            .map_err(|err| format!("Windows sandbox: cannot start the network proxy: {err}"))?;
+        env.extend(proxy_env);
+        Some(proxy)
+    };
     let request = crate::windows_sandbox::SpawnRequest {
         program,
         args,
@@ -139,7 +174,7 @@ pub fn spawn_native(
     let child = crate::windows_sandbox::spawn_sandboxed(spec, &request)?;
     let session = SandboxSession {
         job: std::sync::Arc::clone(&child.job),
-        proxy: Some(proxy),
+        proxy,
     };
     Ok(NativeChild { child, session })
 }
@@ -162,8 +197,9 @@ impl CapturedOutput {
 
 /// Runs `program args` to completion with exactly `env` as its environment,
 /// sandboxed per `spec`, killing the process tree after `timeout`
-/// (`ErrorKind::TimedOut`). On Windows a sandbox that cannot be set up is an
-/// error — the command never runs unsandboxed outside full-access mode.
+/// (`ErrorKind::TimedOut`). A sandbox that is unavailable or cannot be set up
+/// is an error (`PermissionDenied` / Windows setup errors): the command never
+/// runs unsandboxed outside full-access mode.
 pub async fn run_captured(
     program: &str,
     args: &[String],
@@ -176,7 +212,8 @@ pub async fn run_captured(
     if let Some(spec) = spec.filter(|spec| uses_native_spawn(Some(spec))) {
         return run_captured_native(spec, program, args, cwd, env, timeout).await;
     }
-    let (program, prog_args) = wrap_shell_command(program, args, spec);
+    let (program, prog_args) = try_wrap_shell_command(program, args, spec)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::PermissionDenied, err))?;
     let mut cmd = tokio::process::Command::new(&program);
     set_command_args(&mut cmd, &program, &prog_args);
     cmd.current_dir(cwd)
@@ -357,15 +394,11 @@ fn seatbelt_string(value: &str) -> String {
 
 /// Builds the `bwrap` command line (`program` + `args` appended after `--`).
 pub fn build_linux_bwrap_args(
+    bwrap: &Path,
     spec: &SandboxSpec,
     program: &str,
     args: &[String],
 ) -> (String, Vec<String>) {
-    let bwrap = if Path::new("/usr/bin/bwrap").is_file() {
-        "/usr/bin/bwrap"
-    } else {
-        "/bin/bwrap"
-    };
     let mut out: Vec<String> = vec![
         "--ro-bind".to_string(),
         "/".to_string(),
@@ -407,24 +440,38 @@ pub fn build_linux_bwrap_args(
     out.push("--".to_string());
     out.push(program.to_string());
     out.extend(args.iter().cloned());
-    (bwrap.to_string(), out)
+    (bwrap.to_string_lossy().to_string(), out)
 }
 
 /// Wraps a shell command into its sandboxed equivalent, dispatching on the
-/// detected backend. `None` spec or `DangerFullAccess` runs unchanged.
-pub fn wrap_shell_command(
+/// detected backend. `None` spec or `DangerFullAccess` runs unchanged. A
+/// sandboxed mode with no usable backend is an `Err` with the reason and how
+/// to fix it (fail closed): the command must not be run.
+pub fn try_wrap_shell_command(
     program: &str,
     args: &[String],
     spec: Option<&SandboxSpec>,
-) -> (String, Vec<String>) {
+) -> Result<(String, Vec<String>), String> {
+    let backend = detect_backend();
+    wrap_with_backend(backend, backend_binary(backend), program, args, spec)
+}
+
+/// [`try_wrap_shell_command`] with the backend and its binary given.
+fn wrap_with_backend(
+    backend: SandboxBackend,
+    binary: Option<PathBuf>,
+    program: &str,
+    args: &[String],
+    spec: Option<&SandboxSpec>,
+) -> Result<(String, Vec<String>), String> {
     let Some(spec) = spec else {
-        return (program.to_string(), args.to_vec());
+        return Ok((program.to_string(), args.to_vec()));
     };
     if spec.mode == SandboxMode::DangerFullAccess {
-        return (program.to_string(), args.to_vec());
+        return Ok((program.to_string(), args.to_vec()));
     }
-    match detect_backend() {
-        SandboxBackend::MacosSeatbelt => {
+    match (backend, binary) {
+        (SandboxBackend::MacosSeatbelt, Some(sandbox_exec)) => {
             let (profile, params) = build_macos_seatbelt_profile_and_params(spec);
             let mut out: Vec<String> = vec!["-p".to_string(), profile];
             for (key, value) in params {
@@ -433,25 +480,62 @@ pub fn wrap_shell_command(
             out.push("--".to_string());
             out.push(program.to_string());
             out.extend(args.iter().cloned());
-            ("/usr/bin/sandbox-exec".to_string(), out)
+            Ok((sandbox_exec.to_string_lossy().to_string(), out))
         }
-        SandboxBackend::LinuxBubblewrap => build_linux_bwrap_args(spec, program, args),
-        SandboxBackend::WindowsRestrictedToken => refuse_unsandboxed_windows_command(),
-        SandboxBackend::HostEnvOnly => (program.to_string(), args.to_vec()),
+        (SandboxBackend::LinuxBubblewrap, Some(bwrap)) => {
+            Ok(build_linux_bwrap_args(&bwrap, spec, program, args))
+        }
+        (SandboxBackend::WindowsRestrictedToken, _) => Err(
+            "Locagens: sandboxed Windows commands must be spawned through the Windows sandbox backend; refusing to run unsandboxed."
+                .to_string(),
+        ),
+        _ => Err(unavailable_backend_message()),
     }
 }
 
-/// Fail-closed stand-in for callers that try to argv-wrap a sandboxed
-/// Windows command instead of using [`uses_native_spawn`]: the replacement
-/// command only prints an error and exits non-zero.
-fn refuse_unsandboxed_windows_command() -> (String, Vec<String>) {
-    (
-        "cmd".to_string(),
-        vec![
-            "/C".to_string(),
-            "echo Locagens: sandboxed Windows commands must be spawned through the Windows sandbox backend; refusing to run unsandboxed. 1>&2 & exit /b 126".to_string(),
-        ],
+/// Why no sandbox is available on this platform and what the user can do.
+pub fn unavailable_backend_message() -> String {
+    let install = if cfg!(target_os = "macos") {
+        "sandbox-exec was not found (expected /usr/bin/sandbox-exec or on PATH)"
+    } else if cfg!(target_os = "linux") {
+        "bubblewrap (bwrap) was not found (looked in /usr/bin, /bin and PATH); install it, e.g. `apt install bubblewrap` or `dnf install bubblewrap`"
+    } else {
+        "this platform has no supported command sandbox"
+    };
+    format!(
+        "Locagens sandbox unavailable: {install}. Refusing to run the command unsandboxed. Install the sandbox backend or switch the run to Full Access."
     )
+}
+
+/// Argv-wrapping for callers that cannot handle an error: an unavailable
+/// sandbox yields a stand-in command that prints the reason and exits with
+/// code 126 instead of the original command.
+pub fn wrap_shell_command(
+    program: &str,
+    args: &[String],
+    spec: Option<&SandboxSpec>,
+) -> (String, Vec<String>) {
+    try_wrap_shell_command(program, args, spec).unwrap_or_else(|err| refusal_command(&err))
+}
+
+/// A command that only prints `message` to stderr and exits with code 126.
+fn refusal_command(message: &str) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), format!("echo {message} 1>&2 & exit /b 126")],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "printf '%s\\n' \"$1\" >&2; exit 126".to_string(),
+                "locagens".to_string(),
+                message.to_string(),
+            ],
+        )
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -504,6 +588,64 @@ mod tests {
         assert!(args[1].contains("refusing to run unsandboxed"));
         assert!(args[1].contains("exit /b 126"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// QA-010: with no backend binary a sandboxed mode refuses to run (it
+    /// used to pass the command through unchanged); Full Access still runs.
+    #[test]
+    fn missing_backend_binary_fails_closed() {
+        let (root, spec) = temp_spec("nobackend");
+        let args = vec!["-c".to_string(), "touch x".to_string()];
+        for backend in [SandboxBackend::HostEnvOnly, SandboxBackend::LinuxBubblewrap, SandboxBackend::MacosSeatbelt] {
+            let err = wrap_with_backend(backend, None, "sh", &args, Some(&spec))
+                .expect_err("no backend must refuse");
+            assert!(err.contains("Refusing to run the command unsandboxed"), "{err}");
+            assert!(err.contains("Full Access"), "{err}");
+        }
+        let mut read_only = spec.clone();
+        read_only.mode = SandboxMode::ReadOnly;
+        assert!(wrap_with_backend(SandboxBackend::HostEnvOnly, None, "sh", &args, Some(&read_only)).is_err());
+        // Full access and "no spec" are never wrapped.
+        let mut full = spec.clone();
+        full.mode = SandboxMode::DangerFullAccess;
+        let (program, out) = wrap_with_backend(SandboxBackend::HostEnvOnly, None, "sh", &args, Some(&full)).unwrap();
+        assert_eq!((program.as_str(), out.as_slice()), ("sh", args.as_slice()));
+        assert!(wrap_with_backend(SandboxBackend::HostEnvOnly, None, "sh", &args, None).is_ok());
+        // The infallible wrapper never returns the original command.
+        let (program, out) = refusal_command("nope");
+        assert_ne!(out, args);
+        assert!(program == "cmd" || program == "/bin/sh");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A resolved bwrap path (not just /usr/bin) is the program that runs.
+    #[test]
+    fn bwrap_uses_the_resolved_binary_and_honours_allow_network() {
+        let (root, mut spec) = temp_spec("bwrap");
+        let args = vec!["-c".to_string(), "true".to_string()];
+        let bwrap = PathBuf::from("/nix/store/x-bubblewrap/bin/bwrap");
+        let (program, out) =
+            wrap_with_backend(SandboxBackend::LinuxBubblewrap, Some(bwrap.clone()), "sh", &args, Some(&spec)).unwrap();
+        assert_eq!(program, bwrap.to_string_lossy());
+        assert!(out.contains(&"--unshare-net".to_string()));
+        assert_eq!(&out[out.len() - 3..], ["sh", "-c", "true"]);
+        spec.allow_network = true;
+        let (_, out) =
+            wrap_with_backend(SandboxBackend::LinuxBubblewrap, Some(bwrap), "sh", &args, Some(&spec)).unwrap();
+        assert!(!out.contains(&"--unshare-net".to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_binary_falls_back_to_path() {
+        let dir = std::env::temp_dir().join(format!("locagens-sbx-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "locagens-fake-bwrap";
+        std::fs::write(dir.join(name), b"").unwrap();
+        assert_eq!(find_binary_in(name, &["/definitely/not/here"], None), None);
+        let path_var = std::env::join_paths([dir.clone()]).unwrap();
+        assert_eq!(find_binary_in(name, &["/definitely/not/here"], Some(path_var)), Some(dir.join(name)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// When the sandbox cannot be set up the command must not run at all.

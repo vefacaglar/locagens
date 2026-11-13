@@ -91,11 +91,16 @@ fn PermissionCard(request: Value) -> Element {
                         .join(", ")
                 })
                 .unwrap_or_default();
+            // QA-020: the Windows allowlist is an advisory proxy.
+            let url_note = (cfg!(windows) && !network.is_empty())
+                .then(|| url.map(|url| format!("{url}  ({})", store.t("perm.network_best_effort"))))
+                .flatten();
             command
-                .or(url)
-                .or(query)
-                .or(dest)
                 .map(str::to_string)
+                .or(url_note)
+                .or(url.map(str::to_string))
+                .or(query.map(str::to_string))
+                .or(dest.map(str::to_string))
                 .unwrap_or_else(|| {
                     if network.is_empty() {
                         display_path.clone()

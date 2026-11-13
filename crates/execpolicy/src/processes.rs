@@ -427,11 +427,15 @@ impl ProcessManager {
         options: &SpawnOptions,
     ) {
         let (shell_prog, shell_args) = shell_for_options(options, command);
-        let (program, prog_args) = crate::sandbox::wrap_shell_command(
+        let (program, prog_args) = match crate::sandbox::try_wrap_shell_command(
             &shell_prog,
             &shell_args,
             options.sandbox.as_ref(),
-        );
+        ) {
+            Ok(wrapped) => wrapped,
+            // No sandbox backend: fail closed, never run unsandboxed.
+            Err(err) => return self.record_spawn_error(id, &format!("[Failed to spawn process: {err}]")),
+        };
 
         let mut cmd = tokio::process::Command::new(&program);
         crate::sandbox::set_command_args(&mut cmd, &program, &prog_args);
@@ -530,11 +534,14 @@ impl ProcessManager {
         use std::os::unix::process::CommandExt;
 
         let (shell_prog, shell_args) = shell_for_options(options, command);
-        let (program, prog_args) = crate::sandbox::wrap_shell_command(
+        let (program, prog_args) = match crate::sandbox::try_wrap_shell_command(
             &shell_prog,
             &shell_args,
             options.sandbox.as_ref(),
-        );
+        ) {
+            Ok(wrapped) => wrapped,
+            Err(err) => return self.record_spawn_error(id, &format!("[Failed to spawn process: {err}]")),
+        };
 
         let mut master_fd: libc::c_int = -1;
         let mut slave_fd: libc::c_int = -1;
@@ -835,18 +842,15 @@ impl Default for ProcessManager {
     }
 }
 
-/// The environment of a natively sandboxed child: exactly `options.env` for
-/// clean exec sessions, otherwise the parent environment plus overrides.
+/// The environment of a natively sandboxed child: the same
+/// `[shell_environment_policy]`-aware resolution the pipe / PTY spawns use
+/// (QA-016), plus `FORCE_COLOR` for non-clean sessions.
 #[cfg(windows)]
 fn sandboxed_child_env(options: &SpawnOptions) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = if options.env_clean {
-        HashMap::new()
-    } else {
-        let mut inherited: HashMap<String, String> = std::env::vars().collect();
-        inherited.insert("FORCE_COLOR".to_string(), "1".to_string());
-        inherited
-    };
-    env.extend(options.env.clone().unwrap_or_default());
+    let mut env = crate::env_policy::full_child_env(options.env_clean, options.env.as_ref());
+    if !options.env_clean {
+        env.entry("FORCE_COLOR".to_string()).or_insert_with(|| "1".to_string());
+    }
     env
 }
 

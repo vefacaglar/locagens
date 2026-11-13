@@ -190,6 +190,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("perm.allow_always", "Always Allow", "Her zaman izin ver"),
     ("perm.deny", "Deny", "Reddet"),
     ("perm.network", "network", "ağ"),
+    ("perm.network_best_effort", "best-effort on Windows: programs can bypass the network proxy", "Windows üzerinde en iyi çaba: programlar ağ proxy'sini atlayabilir"),
     ("perm.requested", "Permission requested", "İzin isteniyor"),
     ("perm.wants_run", "The agent wants to run", "Ajan şunu çalıştırmak istiyor:"),
     ("perm.on", "on", "hedef:"),

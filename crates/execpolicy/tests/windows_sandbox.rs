@@ -301,3 +301,20 @@ async fn sandbox_setup_errors_fail_the_session_closed() {
     assert!(logs.contains("Windows sandbox"), "{logs}");
     assert!(!logs.contains("should-not-run"));
 }
+
+/// QA-015: `allow_network` (network_access = true) is honoured on Windows:
+/// no proxy variables; without it the allowlist proxy is injected.
+#[tokio::test]
+async fn allow_network_skips_the_proxy_and_default_uses_it() {
+    let ws = Workspace::new("net");
+    let mut spec = ws.spec(SandboxMode::WorkspaceWrite, Some(NetworkPolicy::default()));
+    let proxied = run(&ws, &spec, "echo [%LOCAGENS_NETWORK_PROXY_ACTIVE%]").await;
+    assert!(String::from_utf8_lossy(&proxied.stdout).contains("[1]"), "{}", text(&proxied));
+    spec.allow_network = true;
+    let direct = run(&ws, &spec, "echo [%LOCAGENS_NETWORK_PROXY_ACTIVE%]").await;
+    assert!(
+        String::from_utf8_lossy(&direct.stdout).contains("[%LOCAGENS_NETWORK_PROXY_ACTIVE%]"),
+        "{}",
+        text(&direct)
+    );
+}

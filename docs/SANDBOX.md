@@ -7,8 +7,23 @@ native sandbox chosen from the run's mode (`locagens-protocol`
 | Mode | Sandbox mode | Effect |
 | --- | --- | --- |
 | `chat`, `plan` | `read-only` | (commands are not offered in these modes) |
-| `accept_edits` (Build), `ask_permissions` | `workspace-write` | writes only inside the workspace + a temp dir, network through the allowlist proxy |
+| `accept_edits` (Build), `ask_permissions` | `workspace-write` | writes only inside the workspace + a temp dir; network see "Network by platform" below |
 | `auto` (Full Access) | `danger-full-access` | no sandbox, no proxy, unrestricted network |
+
+### Network by platform
+
+`run_command` and `exec_command` build their sandbox with one function
+(`tools::command_sandbox_spec`), so they follow the same rules:
+
+| Case | Windows | macOS / Linux |
+| --- | --- | --- |
+| Full Access | unrestricted | unrestricted |
+| `[sandbox_workspace_write] network_access = true` | unrestricted (no proxy) | unrestricted |
+| Build, call without `network_domains` | per-domain allowlist proxy (config + grants; unknown hosts prompt) | offline |
+| Build, call with approved `network_domains` | per-domain allowlist proxy | **whole network opens for that command** (no per-domain proxy exists on these platforms) |
+
+The per-domain allowlist is therefore a Windows-only feature. On macOS/Linux
+approving `network_domains` is an all-or-nothing grant for the command.
 
 Backends (`locagens_execpolicy::sandbox::detect_backend`):
 
@@ -18,8 +33,17 @@ Backends (`locagens_execpolicy::sandbox::detect_backend`):
 | Linux | `linux-bwrap` | Bubblewrap bind mounts (argv wrapper) |
 | Windows | `windows-restricted-token` | write-restricted token + capability-SID ACLs + Job Object + network proxy (in-process spawn) |
 
-macOS and Linux behave as before; the rest of this document describes the
-Windows backend (`crates/execpolicy/src/windows_sandbox/`) and the per-domain
+### Fail closed on macOS / Linux
+
+The backend binary is looked up in its well-known paths (`/usr/bin/sandbox-exec`;
+`/usr/bin/bwrap`, `/bin/bwrap`) and then on `PATH` (NixOS, `/usr/local/bin`,
+Homebrew). If it is not found, **sandboxed modes refuse to run commands**
+(the tool result / session log says `Locagens sandbox unavailable: …` with
+how to install bubblewrap or to switch to Full Access); nothing runs
+unsandboxed outside Full Access. The desktop security tab shows the status
+`unavailable` with the same message.
+
+The rest of this document describes the Windows backend (`crates/execpolicy/src/windows_sandbox/`) and the per-domain
 network proxy (`crates/execpolicy/src/network_proxy.rs`).
 
 ## Windows backend
@@ -102,6 +126,12 @@ temp dir). Manually: `icacls "<workspace>"` lists the entry as a raw
 - **Reads** are not restricted (same as Codex's non-elevated backend and the
   macOS profile's `file-read*`): a sandboxed command can read anything the
   user can.
+- **Network approval is best-effort on Windows** (the permission card and
+  the security tab say so). `NO_PROXY` also exposes local services. Deny-read
+  ACEs for `~/.locagens` or `.ssh` are not possible with this token model:
+  `WRITE_RESTRICTED` applies the restricting-SID check to writes only, so an
+  ACE naming the capability SID never affects reads. Only dedicated sandbox
+  user accounts (the elevated Codex backend) would close this.
 - **Network isolation is proxy-based only.** Programs that ignore the proxy
   variables (raw sockets, some native tools) can still connect directly.
   Codex blocks that with dedicated sandbox user accounts plus Windows
@@ -151,8 +181,12 @@ the global `*` is ignored. A command may reach:
 4. hosts approved with "Allow for Run" earlier in the same run.
 
 Targets that resolve to loopback, private, link-local or CGNAT addresses are
-refused unless the allowlist names that exact host (`localhost` or an IP
-literal) — this blocks DNS-rebinding.
+refused unless the allowlist has an exact entry that is `localhost` or an IP
+literal. An approved ordinary hostname that resolves to such an address
+(DNS rebinding, `169.254.169.254`) stays refused. Request hosts must be plain
+hostnames (`[A-Za-z0-9.-]`) or IP literals; anything else (`*.com`, spaces)
+gets `400` before any prompt, and approved hosts are stored as literal
+entries, never wildcards.
 
 ### Approval of new hosts
 
@@ -179,6 +213,14 @@ with network_domains: ["<host>"]`, which tools like curl/npm print. In
 addition the tool result (`run_command`) or the session log (`exec_command`)
 ends with `Sandbox blocked network access to: <hosts>. To request access,
 re-run the command with network_domains: [...]`.
+
+### Environment of a command
+
+Every command path (`run_command`, `exec_command` via pipes, PTY or the
+Windows sandbox spawn) builds its environment with
+`locagens_execpolicy::env_policy`: a secret-free safe allowlist (`PATH`,
+`HOME`, `TEMP`, …, no `*API_KEY*`/`*TOKEN*`/`*SECRET*`/…) refined by
+`[shell_environment_policy]` (`inherit`, `exclude`, `set`, `include_only`).
 
 ### Environment of a proxied command
 
@@ -211,7 +253,7 @@ All of these point at `http://127.0.0.1:<port>`: `HTTP_PROXY`, `HTTPS_PROXY`,
 - `windows_sandbox::acl` — grant / deny / revoke round trip (Windows).
 - `network_proxy` — allowlist semantics, env injection, request parsing,
   allow/deny against a local test server, decider prompts once per host.
-- `sandbox` — fail-closed setup errors and argv wrapping (Windows).
+- `sandbox` — fail-closed setup errors and argv wrapping (Windows); missing bwrap / sandbox-exec refuses, resolved bwrap path, PATH lookup (all platforms).
 - `crates/execpolicy/tests/windows_sandbox.rs` (Windows) — writes inside the
   workspace and temp dir succeed, writes to a sibling dir and the home dir
   are denied (with a full-access control), `.git`/`.locagens` carve-outs,
