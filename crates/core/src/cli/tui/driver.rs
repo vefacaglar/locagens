@@ -317,6 +317,25 @@ impl Driver {
     // ---- resume --------------------------------------------------------------
 
     /// Loads the persisted transcript and run details of `run_id`.
+    /// Fills the `/model ` popup with every model of the callable providers.
+    pub async fn load_model_choices(&mut self) {
+        self.app.model_choices = self
+            .state
+            .pi
+            .list_providers()
+            .await
+            .into_iter()
+            .flat_map(|provider| {
+                let name = provider.display_name.clone();
+                provider.models.into_iter().map(move |model| PopupItem {
+                    value: format!("{}/{model}", provider.id),
+                    label: format!("{}/{model}", provider.id),
+                    detail: name.clone(),
+                })
+            })
+            .collect();
+    }
+
     pub async fn load_session(&mut self, run_id: &str) {
         if let Ok(run) = runs_api::get_run(&self.state, run_id).await {
             self.app.title = Some(run.title.clone()).filter(|t| !t.trim().is_empty());

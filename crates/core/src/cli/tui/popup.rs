@@ -14,6 +14,10 @@ pub enum PopupKind {
     File,
     /// Targets of `/review ` (uncommitted changes, branches, commits).
     Review,
+    /// `provider/model` ids for `/model `.
+    Model,
+    /// Reasoning levels for `/thinking `.
+    Thinking,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +88,31 @@ pub fn file_items(paths: &[String]) -> Vec<PopupItem> {
         .collect()
 }
 
+/// Choices matching `query` (case-insensitive): prefix matches of the value
+/// (or of its part after `provider/`) first, then substring matches; capped
+/// so a long catalog stays quick to scan.
+pub fn argument_items(choices: &[PopupItem], query: &str) -> Vec<PopupItem> {
+    const MAX_ITEMS: usize = 50;
+    let query = query.trim().to_lowercase();
+    let starts = |item: &PopupItem| {
+        let value = item.value.to_lowercase();
+        value.starts_with(&query) || value.split_once('/').is_some_and(|(_, model)| model.starts_with(&query))
+    };
+    let (mut prefix, rest): (Vec<&PopupItem>, Vec<&PopupItem>) = choices.iter().partition(|item| starts(item));
+    prefix.extend(rest.into_iter().filter(|item| {
+        item.value.to_lowercase().contains(&query) || item.detail.to_lowercase().contains(&query)
+    }));
+    prefix.into_iter().take(MAX_ITEMS).cloned().collect()
+}
+
+/// `/thinking` levels as popup items.
+pub fn thinking_choices() -> Vec<PopupItem> {
+    crate::cli::commands::THINKING_LEVELS
+        .iter()
+        .map(|level| PopupItem { value: (*level).to_string(), label: (*level).to_string(), detail: String::new() })
+        .collect()
+}
+
 /// A completion trigger found before the cursor.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Trigger {
@@ -96,6 +125,13 @@ pub struct Trigger {
 /// `@file` token ending at `cursor`.
 pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
     let before = &text[..cursor];
+    for (prefix, kind) in [("/model ", PopupKind::Model), ("/thinking ", PopupKind::Thinking)] {
+        if let Some(rest) = before.strip_prefix(prefix) {
+            if !rest.contains(char::is_whitespace) {
+                return Some(Trigger { kind, start: prefix.len(), query: rest.to_string() });
+            }
+        }
+    }
     if let Some(rest) = before.strip_prefix("/review ") {
         if !rest.contains('\n') {
             return Some(Trigger {
@@ -131,7 +167,7 @@ pub fn completion_text(kind: PopupKind, item: &PopupItem) -> String {
     match kind {
         PopupKind::Slash => format!("{} ", item.value),
         PopupKind::File => format!("@{} ", item.value),
-        PopupKind::Review => item.value.clone(),
+        PopupKind::Review | PopupKind::Model | PopupKind::Thinking => item.value.clone(),
     }
 }
 
@@ -143,6 +179,31 @@ pub fn command_takes_no_args(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn choice(value: &str, detail: &str) -> PopupItem {
+        PopupItem { value: value.into(), label: value.into(), detail: detail.into() }
+    }
+
+    #[test]
+    fn model_arguments_trigger_a_filtered_model_list() {
+        let trigger = detect_trigger("/model gl", 9).unwrap();
+        assert_eq!((trigger.kind, trigger.start, trigger.query.as_str()), (PopupKind::Model, 7, "gl"));
+        assert_eq!(detect_trigger("/thinking hi", 12).unwrap().kind, PopupKind::Thinking);
+        assert!(detect_trigger("/model a b", 10).is_none(), "one argument only");
+
+        let choices = vec![
+            choice("xai/grok-4.7", "xAI"),
+            choice("opencode-go/glm-5.3", "OpenCode Go"),
+            choice("opencode-go/kimi-k3", "OpenCode Go"),
+        ];
+        let values = |query: &str| argument_items(&choices, query).into_iter().map(|item| item.value).collect::<Vec<_>>();
+        assert_eq!(values("gl"), vec!["opencode-go/glm-5.3"], "matches the model part after the provider");
+        assert_eq!(values("x")[0], "xai/grok-4.7", "prefix matches first");
+        assert_eq!(values("opencode").len(), 2);
+        assert_eq!(values("").len(), 3);
+        assert!(values("zzz").is_empty());
+        assert_eq!(completion_text(PopupKind::Model, &choices[0]), "xai/grok-4.7");
+    }
 
     #[test]
     fn slash_filter_prefers_prefix_matches() {
@@ -167,7 +228,10 @@ mod tests {
         let trigger = detect_trigger("/mo", 3).unwrap();
         assert_eq!(trigger.kind, PopupKind::Slash);
         assert_eq!(trigger.query, "mo");
-        assert!(detect_trigger("/model gpt", 10).is_none());
+        // A command with its argument is no longer a command query (`/model `
+        // and `/thinking ` open their own argument popups instead).
+        assert!(detect_trigger("/mcp list", 9).is_none());
+        assert_eq!(detect_trigger("/model gpt", 10).unwrap().kind, PopupKind::Model);
         assert!(detect_trigger("hi /mo", 6).is_none());
     }
 

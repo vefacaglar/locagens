@@ -119,6 +119,8 @@ pub struct App {
     pub popup: Option<Popup>,
     /// Targets offered after `/review ` (filled by the driver from git).
     pub review_targets: Vec<super::popup::PopupItem>,
+    /// `provider/model` ids offered by the `/model ` popup.
+    pub model_choices: Vec<super::popup::PopupItem>,
     pub overlay: Option<Overlay>,
     pub busy: bool,
     pub busy_since: Option<Instant>,
@@ -193,6 +195,7 @@ impl App {
             composer: Composer::default(),
             popup: None,
             review_targets: Vec::new(),
+            model_choices: Vec::new(),
             overlay: None,
             busy: false,
             busy_since: None,

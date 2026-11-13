@@ -127,11 +127,12 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
         },
         files_tx,
     );
+    driver.load_model_choices().await;
     match &config.initial_session {
         Some(id) => driver.load_session(id).await,
         None if driver.app.model.is_none() => driver
             .app
-            .push_notice("No model selected. Use /model <provider/id> (type /model to list models)."),
+            .push_notice("No model selected. Type /model and pick one from the list."),
         None => {}
     }
 

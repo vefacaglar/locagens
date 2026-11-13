@@ -285,6 +285,8 @@ fn draw_popup(f: &mut Frame, popup: &Popup, composer: Rect, transcript: Rect) {
         PopupKind::Slash => " Commands · Tab complete ",
         PopupKind::File => " Files · Tab insert ",
         PopupKind::Review => " Review target · Enter run ",
+        PopupKind::Model => " Models · Enter switch · Tab insert ",
+        PopupKind::Thinking => " Reasoning level · Enter set ",
     };
     let block = Block::default()
         .borders(Borders::ALL)

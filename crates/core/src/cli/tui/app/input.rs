@@ -162,7 +162,7 @@ impl App {
         let run_now = run_if_complete
             && match popup.kind {
                 PopupKind::Slash => command_takes_no_args(&item.value),
-                PopupKind::Review => true,
+                PopupKind::Review | PopupKind::Model | PopupKind::Thinking => true,
                 PopupKind::File => false,
             };
         self.composer
@@ -172,7 +172,10 @@ impl App {
         }
         let mut actions = Vec::new();
         // `/review ` keeps the popup open to pick the target.
-        let opens_review = popup.kind == PopupKind::Slash && item.value == "/review";
+        // `/review `, `/model ` and `/thinking ` keep the popup open to
+        // pick their argument.
+        let opens_review = popup.kind == PopupKind::Slash
+            && matches!(item.value.as_str(), "/review" | "/model" | "/thinking");
         if !opens_review {
             self.popup_dismissed_for = Some(self.composer.text().to_string());
         }
@@ -285,6 +288,21 @@ impl App {
                 let items = review_items(&self.review_targets, &trigger.query);
                 self.popup = (!items.is_empty()).then_some(Popup {
                     kind: PopupKind::Review,
+                    items,
+                    selected: 0,
+                    query: trigger.query,
+                    token_start: trigger.start,
+                });
+            }
+            PopupKind::Model | PopupKind::Thinking => {
+                let choices = if trigger.kind == PopupKind::Model {
+                    self.model_choices.clone()
+                } else {
+                    crate::cli::tui::popup::thinking_choices()
+                };
+                let items = crate::cli::tui::popup::argument_items(&choices, &trigger.query);
+                self.popup = (!items.is_empty()).then_some(Popup {
+                    kind: trigger.kind,
                     items,
                     selected: 0,
                     query: trigger.query,
