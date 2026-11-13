@@ -50,7 +50,7 @@ const ENV_FALLBACKS: [&str; 13] = [
 ];
 
 /// One credential entry of `~/.pi/agent/auth.json`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "snake_case", default)]
 pub struct AuthCredential {
     #[serde(rename = "type")]
@@ -59,6 +59,65 @@ pub struct AuthCredential {
     pub key: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// `Debug` text for an optional secret: never the value.
+fn redacted(secret: &Option<String>) -> &'static str {
+    if secret.is_some() { "Some(<redacted>)" } else { "None" }
+}
+
+impl std::fmt::Debug for AuthCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthCredential")
+            .field("kind", &self.kind)
+            .field("key", &format_args!("{}", redacted(&self.key)))
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SaveProviderConfigInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveProviderConfigInput")
+            .field("provider_type", &self.provider_type)
+            .field("base_url", &self.base_url)
+            .field("api_key", &format_args!("{}", redacted(&self.api_key)))
+            .field("models", &self.models)
+            .field("display_name", &self.display_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for FetchModelsInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchModelsInput")
+            .field("provider_type", &self.provider_type)
+            .field("base_url", &self.base_url)
+            .field("api_key", &format_args!("{}", redacted(&self.api_key)))
+            .field("provider_id", &self.provider_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TestProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestProviderInput")
+            .field("provider_id", &self.provider_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &format_args!("{}", redacted(&self.api_key)))
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SetPiAuthInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetPiAuthInput")
+            .field("provider_id", &self.provider_id)
+            .field("action", &self.action)
+            .field("api_key", &format_args!("{}", redacted(&self.api_key)))
+            .finish()
+    }
 }
 
 impl AuthCredential {
@@ -129,7 +188,7 @@ pub struct EditableProviderConfig {
 
 /// One entry of the map submitted to `POST /api/providers/config`
 /// (`{ [providerId]: { type, displayName, baseUrl, apiKey, models, modelSettings } }`).
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveProviderConfigInput {
     #[serde(rename = "type", alias = "api")]
@@ -143,7 +202,7 @@ pub struct SaveProviderConfigInput {
 
 /// Body of `POST /api/providers/fetch-models` — `providerId` is optional;
 /// when absent the `baseUrl`/`apiKey`/`type` from the body are used directly.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchModelsInput {
     #[serde(rename = "type", alias = "api")]
@@ -154,7 +213,7 @@ pub struct FetchModelsInput {
 }
 
 /// Body of `POST /api/providers/test`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProviderInput {
     pub provider_id: String,
@@ -164,7 +223,7 @@ pub struct TestProviderInput {
 }
 
 /// Body of `POST /api/pi/auth`.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SetPiAuthInput {
     pub provider_id: String,
@@ -571,13 +630,8 @@ impl PiProviderManager {
     }
 
     fn write_json(path: &Path, value: &Value) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(value)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
+        crate::private_file::write_private_atomic(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -921,8 +975,7 @@ impl PiProviderManager {
             return Ok(existing);
         }
         let created = uuid::Uuid::new_v4().to_string();
-        std::fs::create_dir_all(&self.primary_dir)?;
-        std::fs::write(&path, &created)?;
+        crate::private_file::write_private_atomic(&path, created.as_bytes())?;
         Ok(created)
     }
 
@@ -1066,27 +1119,7 @@ impl PiProviderManager {
     }
 
     async fn run_key_command(&self, command: &str) -> Result<String> {
-        #[cfg(windows)]
-        let mut cmd = {
-            let mut c = tokio::process::Command::new("cmd");
-            c.args(["/C", command]);
-            c
-        };
-        #[cfg(not(windows))]
-        let mut cmd = {
-            let mut c = tokio::process::Command::new("sh");
-            c.args(["-c", command]);
-            c
-        };
-        cmd.stdin(std::process::Stdio::null());
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "credential command exited with {}",
-                output.status
-            );
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        run_credential_command(command, KEY_COMMAND_TIMEOUT).await
     }
 
     pub fn has_api_key(&self, provider_id: &str) -> bool {
@@ -1799,17 +1832,13 @@ impl PiProviderManager {
                 .unwrap_or_else(|| base_url.contains("anthropic")),
         };
 
-        let supplied_key = input
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(str::to_string);
+        let supplied_key = literal_ui_key(input.api_key.as_deref());
         let api_key = match supplied_key {
             Some(key) => Some(key),
+            // The stored credential only goes to the provider's own endpoint.
             None => match provider_id.as_ref() {
-                Some(id) => self.resolve_api_key(id, None).await,
-                None => None,
+                Some(id) if self.is_configured_base_url(id, &base_url) => self.resolve_api_key(id, None).await,
+                _ => None,
             },
         };
 
@@ -1900,10 +1929,16 @@ impl PiProviderManager {
         }
         let base_url = base_url.trim_end_matches('/');
         let api = self.resolve_api(&input.provider_id);
-        let api_key = self
-            .resolve_api_key(&input.provider_id, input.api_key.as_deref())
-            .await
-            .ok_or_else(|| {
+        // A key typed in the UI is used literally (never `!command` / `$VAR`),
+        // and the stored credential is never sent to a foreign `baseUrl`.
+        let api_key = match literal_ui_key(input.api_key.as_deref()) {
+            Some(key) => Some(key),
+            None if self.is_configured_base_url(&input.provider_id, base_url) => {
+                self.resolve_api_key(&input.provider_id, None).await
+            }
+            None => None,
+        }
+        .ok_or_else(|| {
                 anyhow::anyhow!(
                     "No API key available for provider \"{}\"",
                     input.provider_id
@@ -2007,10 +2042,8 @@ impl PiProviderManager {
                             "command".to_string()
                         } else if key.starts_with('$') {
                             "environment".to_string()
-                        } else if key.len() <= 8 {
-                            "***".to_string()
                         } else {
-                            format!("{}***{}", &key[..4], &key[key.len() - 4..])
+                            key_preview_for(key)
                         }
                     });
                 let mut status = json!({
@@ -2092,6 +2125,63 @@ impl Drop for PendingLoginGuard<'_> {
     }
 }
 
+/// A key supplied by the UI form: trimmed, used verbatim. The preserve marker
+/// and blanks mean "none supplied".
+fn literal_ui_key(key: Option<&str>) -> Option<String> {
+    key.map(str::trim).filter(|k| !k.is_empty() && *k != PRESERVE_API_KEY).map(str::to_string)
+}
+
+impl PiProviderManager {
+    /// Whether `base_url` is the endpoint this provider is configured with
+    /// (only then may its stored credential be sent there).
+    fn is_configured_base_url(&self, provider_id: &str, base_url: &str) -> bool {
+        let normalize = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+        normalize(base_url) == normalize(&self.resolve_base_url(provider_id))
+    }
+}
+
+/// How long a `!command` credential helper may run before it is killed.
+const KEY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs a `!command` credential helper (no stdin, killed on timeout or drop)
+/// and returns its trimmed stdout.
+async fn run_credential_command(command: &str, timeout: std::time::Duration) -> Result<String> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("cmd");
+        // `cmd` does not parse Rust's backslash-quote escaping: pass the line
+        // verbatim; `/S` strips exactly the outer quotes.
+        c.raw_arg(format!("/S /C \"{command}\""));
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let output = match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(output) => output?,
+        Err(_) => anyhow::bail!("credential command timed out after {}s", timeout.as_secs()),
+    };
+    if !output.status.success() {
+        anyhow::bail!("credential command exited with {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Key preview for status screens: at most the last 4 characters, and only
+/// for keys long enough that 4 characters reveal little.
+fn key_preview_for(key: &str) -> String {
+    let count = key.chars().count();
+    if count < 20 {
+        return "***".to_string();
+    }
+    let tail: String = key.chars().skip(count - 4).collect();
+    format!("…{tail}")
+}
+
 /// `access` of an OAuth credential whose `expires` (epoch ms) is still ahead.
 fn valid_oauth_access(credential: &Value) -> Option<String> {
     let expires = credential.get("expires").and_then(Value::as_i64)?;
@@ -2155,7 +2245,7 @@ mod tests {
         let status = manager.pi_auth_status();
         assert_eq!(status.len(), 1);
         assert_eq!(status[0]["providerId"], "acme");
-        assert_eq!(status[0]["keyPreview"], "sk-a***3456");
+        assert_eq!(status[0]["keyPreview"], "***");
         assert_eq!(
             manager.resolve_api_key("acme", None).await.as_deref(),
             Some("sk-abcdef123456")
@@ -3252,5 +3342,71 @@ wire_api = "chat"
         let raw = serde_json::to_string(&manager.pi_auth_status()).unwrap() + &serde_json::to_string(&manager.login_providers()).unwrap();
         assert!(!raw.contains("secret"), "{raw}");
         assert!(raw.contains("github-copilot") && raw.contains("kimi-coding"));
+    }
+}
+
+#[cfg(test)]
+mod credential_hygiene_tests {
+    use super::*;
+
+    #[test]
+    fn key_preview_shows_only_four_characters_of_long_keys() {
+        assert_eq!(key_preview_for("sk-ant-api03-abcdefghijklmnopabcd"), "…abcd");
+        assert_eq!(key_preview_for("short-key"), "***");
+        // Multi-byte characters never panic the slicing.
+        assert_eq!(key_preview_for("ééééééééééééééééééééé"), "…éééé");
+    }
+
+    #[tokio::test]
+    async fn credential_command_is_killed_after_the_timeout() {
+        let command = if cfg!(windows) { "powershell -NoProfile -Command Start-Sleep 30" } else { "sleep 30" };
+        let started = std::time::Instant::now();
+        let err = run_credential_command(command, std::time::Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn ui_keys_are_literal_and_stored_keys_stay_on_their_endpoint() {
+        assert_eq!(literal_ui_key(Some(" !rm -rf ")), Some("!rm -rf".to_string()));
+        assert_eq!(literal_ui_key(Some(PRESERVE_API_KEY)), None);
+        assert_eq!(literal_ui_key(Some("  ")), None);
+        let dir = tempfile::tempdir().unwrap();
+        let manager = PiProviderManager::with_dirs(dir.path().join("agent"), dir.path().join("support"));
+        let own = manager.resolve_base_url("openai");
+        assert!(manager.is_configured_base_url("openai", &format!("{own}/")));
+        assert!(!manager.is_configured_base_url("openai", "https://evil.example.com/v1"));
+    }
+
+    #[test]
+    fn debug_output_of_credential_types_hides_keys() {
+        let credential = AuthCredential::api_key("sk-super-secret-key");
+        let input = TestProviderInput { api_key: Some("sk-super-secret-key".into()), ..Default::default() };
+        let text = format!("{credential:?} {input:?}");
+        assert!(!text.contains("super-secret"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn credential_command_keeps_embedded_quotes() {
+        let out = run_credential_command("echo \"quoted value\"", std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(out.contains("quoted value"), "{out}");
+    }
+
+    #[test]
+    fn device_id_and_auth_writes_leave_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let manager = PiProviderManager::with_dirs(agent.clone(), dir.path().join("support"));
+        manager.device_id().unwrap();
+        PiProviderManager::write_json(&agent.join("auth.json"), &json!({"a": 1})).unwrap();
+        let names: Vec<String> = std::fs::read_dir(&agent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
     }
 }

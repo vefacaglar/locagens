@@ -78,7 +78,10 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<PollStep<T>>>,
 {
-    let deadline = Instant::now() + Duration::from_secs_f64(expires_in_secs.max(0.0));
+    // Server-supplied values are untrusted: NaN, negative or huge numbers
+    // must neither panic `Duration`/`Instant` nor wait for days.
+    let expires_in_secs = if expires_in_secs.is_finite() { expires_in_secs.clamp(0.0, MAX_EXPIRES_SECS) } else { 0.0 };
+    let deadline = Instant::now() + Duration::from_secs_f64(expires_in_secs);
     let mut interval = interval_secs
         .and_then(positive_duration)
         .unwrap_or(timing.default_interval)
@@ -104,11 +107,33 @@ where
     bail!(if slow_downs > 0 { SLOW_DOWN_TIMEOUT_MESSAGE } else { TIMEOUT_MESSAGE })
 }
 
+/// Longest device-code lifetime / poll interval honoured (1 hour).
+const MAX_EXPIRES_SECS: f64 = 3600.0;
+
 fn positive_duration(secs: f64) -> Option<Duration> {
-    (secs.is_finite() && secs > 0.0).then(|| Duration::from_secs_f64(secs))
+    (secs.is_finite() && secs > 0.0).then(|| Duration::from_secs_f64(secs.min(MAX_EXPIRES_SECS)))
 }
 
 async fn sleep_until_or_deadline(interval: Duration, deadline: Instant) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     tokio::time::sleep(interval.min(remaining)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn absurd_server_durations_neither_panic_nor_wait_forever() {
+        let timing = PollTiming {
+            default_interval: Duration::from_millis(10),
+            min_interval: Duration::from_millis(1),
+            slow_down_step: Duration::from_millis(1),
+        };
+        let value = poll_device_code(None, 1e300, timing, || async { Ok(PollStep::Complete(7)) }).await.unwrap();
+        assert_eq!(value, 7);
+        let nan = poll_device_code::<u8, _, _>(None, f64::NAN, timing, || async { Ok(PollStep::Pending) }).await;
+        assert!(nan.is_err());
+        assert_eq!(positive_duration(1e300), Some(Duration::from_secs(3600)));
+    }
 }

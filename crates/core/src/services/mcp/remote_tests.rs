@@ -402,6 +402,104 @@ fn saving_from_the_form_keeps_stored_auth_settings() {
     assert_eq!(merged.scopes.unwrap(), vec!["read".to_string()]);
 }
 
+#[tokio::test]
+async fn concurrent_expired_calls_share_one_refresh() {
+    let (base, mock) = spawn_mock(false, None).await;
+    let config = remote_config("single-flight", &format!("{base}/mcp"));
+    let (_dir, store) = temp_store();
+    store
+        .put(
+            &oauth::store_key(&config),
+            OAuthEntry {
+                server_url: format!("{base}/mcp"),
+                client_id: "cid-1".to_string(),
+                client_secret: None,
+                token_endpoint: format!("{base}/token"),
+                access_token: "old".to_string(),
+                refresh_token: Some("rt-0".to_string()),
+                expires_at: Some(1),
+            },
+        )
+        .unwrap();
+    let calls = (0..4).map(|_| oauth::access_token(&store, &config, false));
+    let results = futures::future::join_all(calls).await;
+    for result in results {
+        assert_eq!(result.unwrap().as_deref(), Some("at-2"));
+    }
+    assert_eq!(mock.lock().unwrap().token_forms.len(), 1);
+}
+
+#[test]
+fn ui_view_masks_env_and_header_values_and_saving_it_back_keeps_them() {
+    let project = tempfile::tempdir().unwrap();
+    let project_path = std::fs::canonicalize(project.path()).unwrap().to_string_lossy().to_string();
+    let mut stored = remote_config("masked-srv", "http://127.0.0.1:1/mcp");
+    stored.scope = "project".to_string();
+    stored.project_path = Some(project_path.clone());
+    stored.env = Some(BTreeMap::from([("API_KEY".to_string(), "env-secret-123".to_string())]));
+    stored.http_headers = Some(BTreeMap::from([("Authorization".to_string(), "Bearer hdr-secret-456".to_string())]));
+    super::save_config(&stored).unwrap();
+
+    let masked = stored.masked();
+    let json = serde_json::to_string(&masked).unwrap();
+    assert!(!json.contains("env-secret") && !json.contains("hdr-secret"), "{json}");
+    assert!(json.contains("API_KEY") && json.contains("Authorization"));
+    let debug = format!("{stored:?}");
+    assert!(!debug.contains("env-secret") && !debug.contains("hdr-secret"), "{debug}");
+
+    // The form sends the masked view back, with an extra new variable.
+    let mut edited = masked;
+    edited.env.as_mut().unwrap().insert("NEW".to_string(), "fresh".to_string());
+    let merged = super::keep_stored_auth(edited);
+    let env = merged.env.unwrap();
+    assert_eq!(env["API_KEY"], "env-secret-123");
+    assert_eq!(env["NEW"], "fresh");
+    assert_eq!(merged.http_headers.unwrap()["Authorization"], "Bearer hdr-secret-456");
+}
+
+#[test]
+fn preserve_markers_without_a_stored_value_are_dropped() {
+    let mut edited = remote_config("never-stored", "http://127.0.0.1:1/mcp");
+    edited.env = Some(BTreeMap::from([("GHOST".to_string(), super::PRESERVE_SECRET.to_string())]));
+    assert!(super::keep_stored_auth(edited).env.unwrap().is_empty());
+}
+
+#[test]
+fn unparsable_token_store_is_never_overwritten() {
+    let (dir, store) = temp_store();
+    let path = dir.path().join("mcp-oauth.json");
+    std::fs::write(&path, "{ not json").unwrap();
+    let entry = OAuthEntry {
+        server_url: "https://x.test/mcp".to_string(),
+        client_id: "c".to_string(),
+        client_secret: None,
+        token_endpoint: "https://x.test/token".to_string(),
+        access_token: "a".to_string(),
+        refresh_token: None,
+        expires_at: None,
+    };
+    assert!(store.put("k", entry).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+}
+
+#[test]
+fn insecure_or_foreign_oauth_endpoints_are_refused() {
+    assert!(oauth::require_secure_endpoint("https://auth.example.com/token").is_ok());
+    assert!(oauth::require_secure_endpoint("http://127.0.0.1:9/token").is_ok());
+    assert!(oauth::require_secure_endpoint("http://auth.example.com/token").is_err());
+    assert!(oauth::require_secure_endpoint("ftp://127.0.0.1/token").is_err());
+}
+
+#[test]
+fn expires_in_accepts_floats_and_strings() {
+    let at = |v: Value| oauth::expires_at_from(Some(&v));
+    let now = oauth::now_ms();
+    assert!(at(json!(3600.0)).unwrap() - now > 3_500_000);
+    assert!(at(json!("3600")).unwrap() - now > 3_500_000);
+    assert!(at(json!(-5)).is_none());
+    assert!(oauth::expires_at_from(None).is_none());
+}
+
 #[test]
 fn config_toml_servers_map_onto_user_scope() {
     let toml = r#"

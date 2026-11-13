@@ -7,6 +7,7 @@
 pub mod config_toml;
 pub mod oauth;
 pub mod paths;
+pub mod private_file;
 pub mod providers;
 
 /// Backwards-compatible alias: the provider engine used to live at
