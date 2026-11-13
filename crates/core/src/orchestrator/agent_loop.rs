@@ -470,7 +470,7 @@ impl AgentLoop {
                 }
             }
             "exec_command" | "apply_patch" => self.gated_execute(call_id, name, args).await,
-            "write_stdin" => self.write_stdin_tool(args).await,
+            "write_stdin" => self.write_stdin_tool(call_id, args).await,
             name if WORKSPACE_TOOLS.contains(&name) => self.gated_execute(call_id, name, args).await,
             other => Err(AgentError::Failed(format!("Unknown tool \"{other}\"."))),
         }

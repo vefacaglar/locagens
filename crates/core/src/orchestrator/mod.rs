@@ -263,8 +263,9 @@ pub struct Orchestrator {
     /// Exec sessions per run id. They outlive a `done` turn (a dev server the
     /// agent started stays reachable via `write_stdin` next turn) and are
     /// killed when a turn of the run is cancelled, fails or panics, or when
-    /// [`Orchestrator::kill_exec_sessions`] is called (QA-027).
-    exec_sessions: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// [`Orchestrator::kill_exec_sessions`] is called (QA-027). Each carries
+    /// its typed-input state for `write_stdin` gating (QA-012).
+    exec_sessions: Mutex<HashMap<String, HashMap<String, exec_session::ExecSessionInput>>>,
 }
 
 impl Default for Orchestrator {

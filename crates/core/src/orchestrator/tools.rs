@@ -137,7 +137,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "network_domains": json!({ "type": "array", "items": { "type": "string" }, "description": "Outbound hosts the command needs (e.g. registry.npmjs.org); the user approves them with the command." }),
                 "justification": json!({ "type": "string", "description": "Short reason shown on the permission card." })
             }), &["cmd"]),
-        def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll.",
+        def("write_stdin", "Send characters to a running exec session and collect its latest output. Omit `chars` to just poll. If the session is an interactive shell or REPL (exec_command started cmd, powershell/pwsh, bash/sh/zsh, python, node, a database or remote shell, ... without a script or command argument), every line you submit (text up to a newline) is treated as a command and needs the same approval as exec_command outside Full Access; text after the last newline is held and sent once a later write completes the line. Input to any other program (answering a prompt of a running build, data for a script) and Ctrl-C (\\u0003) / Ctrl-D (\\u0004) are sent as-is. Prefer exec_command for new commands.",
             json!({
                 "session_id": json!({ "type": "string", "description": "Session id returned by exec_command." }),
                 "chars": json!({ "type": "string", "description": "Characters to write to the session's stdin." }),

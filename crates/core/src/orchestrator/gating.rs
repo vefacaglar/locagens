@@ -2,6 +2,17 @@
 //! interactive prompts.
 
 use super::*;
+use locagens_execpolicy::stdin_input;
+
+/// Pre-prompt verdict for one line typed into a shell / REPL session.
+enum TypedLineGate {
+    /// Known-safe, allow-listed or covered by a grant: send it.
+    Send,
+    /// Forbidden by an execpolicy rule.
+    Blocked(String),
+    /// Needs a prompt; `once_only` for dangerous lines (no standing grant).
+    Prompt { once_only: bool },
+}
 
 impl AgentLoop {
     /// Loads the merged Starlark `.rules` exec policy for this run: every
@@ -87,47 +98,19 @@ impl AgentLoop {
 
         // Pause for an interactive decision: status → awaiting_permission,
         // permission_requested event, then wait for `api::runs::permission_decision`.
-        let tool_call = json!({
-            "id": call_id,
-            "function": {
-                "name": name,
-                "arguments": serde_json::to_string(args).unwrap_or_else(|_| "{}".into()),
-            }
-        });
         let mut preview = tools::build_preview(&self.project_path, name, args);
         if let (Some(path), Some(Value::Object(fields))) = (protected.as_ref(), preview.as_mut()) {
             fields.insert("protectedPath".into(), json!(path));
         }
-        match self.permission_hook(call_id, name, args).await {
-            hook_calls::PermissionVerdict::Allow => return self.execute_with_turn_diff(name, args).await,
-            hook_calls::PermissionVerdict::Deny(reason) => return Ok(format!("Denied by PermissionRequest hook: {reason}")),
-            hook_calls::PermissionVerdict::Ask => {}
-        }
-        // One shared prompt path: queues behind other sub-agents' and network
-        // prompts, and its slot/status are restored even if this future is
-        // aborted (`close_agent` mid-prompt).
-        self.notification_hook("permission_prompt", &format!("Locagens needs permission to run {name}")).await;
-        let prompt = PermissionPrompt {
-            tool_call,
-            preview,
-            agent_role: self.agent_role.clone(),
-            agent_name: self.agent_name.clone(),
-            armed: None,
+        let decision = match self.ask_tool_permission(call_id, name, args, preview).await? {
+            Ok(decision) => decision,
+            Err(reason) => return Ok(format!("Denied by PermissionRequest hook: {reason}")),
         };
-        let Some(decision) = self.handle.ask_permission(&self.state.db, prompt).await else {
-            return Err(AgentError::Cancelled);
-        };
-        if self.stop_requested() {
-            return Err(AgentError::Cancelled);
-        }
 
         // Standing grants are persisted here only (QA-031), never by the facade.
         // Unknown answers deny (QA-006); protected / dangerous calls are
         // approved once, never as a standing or run-wide grant.
-        let mut decision = PermissionDecision::parse_or_deny(&decision);
-        if must_prompt && decision.allows() {
-            decision = PermissionDecision::AllowOnce;
-        }
+        let decision = if must_prompt && decision.allows() { PermissionDecision::AllowOnce } else { decision };
         match decision {
             PermissionDecision::Deny => Ok("The user denied permission for this tool call.".to_string()),
             PermissionDecision::AllowRun => {
@@ -151,6 +134,154 @@ impl AgentLoop {
             }
             PermissionDecision::AllowOnce => self.execute_with_turn_diff(name, args).await,
         }
+    }
+
+    /// The one prompt path of a gated call: the PermissionRequest hook first,
+    /// then the shared permission queue (it queues behind other sub-agents'
+    /// and network prompts, and its slot/status are restored even if this
+    /// future is aborted, e.g. `close_agent` mid-prompt). `Ok(Err(reason))`
+    /// is a hook denial; a hook approval counts as "allow once".
+    pub(super) async fn ask_tool_permission(
+        &self,
+        call_id: &str,
+        name: &str,
+        args: &Value,
+        preview: Option<Value>,
+    ) -> Result<Result<PermissionDecision, String>, AgentError> {
+        match self.permission_hook(call_id, name, args).await {
+            hook_calls::PermissionVerdict::Allow => return Ok(Ok(PermissionDecision::AllowOnce)),
+            hook_calls::PermissionVerdict::Deny(reason) => return Ok(Err(reason)),
+            hook_calls::PermissionVerdict::Ask => {}
+        }
+        self.notification_hook("permission_prompt", &format!("Locagens needs permission to run {name}")).await;
+        let prompt = PermissionPrompt {
+            tool_call: json!({
+                "id": call_id,
+                "function": {
+                    "name": name,
+                    "arguments": serde_json::to_string(args).unwrap_or_else(|_| "{}".into()),
+                }
+            }),
+            preview,
+            agent_role: self.agent_role.clone(),
+            agent_name: self.agent_name.clone(),
+            armed: None,
+        };
+        let Some(decision) = self.handle.ask_permission(&self.state.db, prompt).await else {
+            return Err(AgentError::Cancelled);
+        };
+        if self.stop_requested() {
+            return Err(AgentError::Cancelled);
+        }
+        Ok(Ok(PermissionDecision::parse_or_deny(&decision)))
+    }
+
+    /// The pre-prompt verdict for one line typed into a shell / REPL
+    /// session: the same classification as an `exec_command` of that line
+    /// (execpolicy rules, known-safe commands, dangerous commands, standing
+    /// grants and "Allow for Run" of `exec_command`).
+    fn typed_line_gate(&self, policy: &locagens_execpolicy::rules::Policy, line: &str) -> TypedLineGate {
+        match command_safety::command_bypasses_prompt_with_policy(&self.mode, line, Some(policy)) {
+            Err(reason) => return TypedLineGate::Blocked(reason),
+            Ok(true) => return TypedLineGate::Send,
+            Ok(false) => {}
+        }
+        if command_safety::is_dangerous_command(line) {
+            return TypedLineGate::Prompt { once_only: true };
+        }
+        let as_command = json!({ "cmd": line });
+        if self.handle.tool_allowed_for_run("exec_command") || self.standing_grant("exec_command", &as_command) {
+            return TypedLineGate::Send;
+        }
+        TypedLineGate::Prompt { once_only: false }
+    }
+
+    /// QA-012: what of `chars` may be written to exec session `session_id`
+    /// now. Outside Full Access, input to a session that reads commands
+    /// (see `locagens_execpolicy::stdin_input`) is split into submitted
+    /// lines and each line is gated like a command; one prompt covers every
+    /// line of the write that needs approval. Text after the last line break
+    /// is held back until a later write ends the line. Input to any other
+    /// program, and interrupt / end-of-input keys, pass unchanged.
+    ///
+    /// Returns the text to write, or `Err(response)` when nothing is sent.
+    pub(super) async fn gate_stdin_input(
+        &self,
+        call_id: &str,
+        session_id: &str,
+        chars: &str,
+    ) -> Result<Result<String, String>, AgentError> {
+        let orchestrator = &self.state.orchestrator;
+        if self.mode == "auto" || !orchestrator.exec_session_reads_commands(&self.run_id, session_id) {
+            return Ok(Ok(chars.to_string()));
+        }
+        if stdin_input::is_signal_input(chars) {
+            orchestrator.set_held_input(&self.run_id, session_id, String::new());
+            return Ok(Ok(chars.to_string()));
+        }
+        // The held text is dropped unless this write is allowed.
+        let input = stdin_input::split_submitted_input(&orchestrator.take_held_input(&self.run_id, session_id), chars);
+        let policy = self.load_exec_policy();
+        let mut prompted: Vec<String> = Vec::new();
+        let mut once_only = false;
+        for line in input.lines.iter().map(|line| line.trim()).filter(|line| !line.is_empty()) {
+            match self.typed_line_gate(&policy, line) {
+                TypedLineGate::Send => {}
+                TypedLineGate::Blocked(reason) => {
+                    return Ok(Err(json!({
+                        "ok": false,
+                        "error": format!("Input blocked by execpolicy rule: {reason}. Nothing was sent.")
+                    })
+                    .to_string()))
+                }
+                TypedLineGate::Prompt { once_only: dangerous } => {
+                    once_only |= dangerous;
+                    prompted.push(line.to_string());
+                }
+            }
+        }
+        if !prompted.is_empty() {
+            let commands = prompted.join("\n");
+            let args = json!({ "session_id": session_id, "chars": commands });
+            let preview = json!({
+                "tool": "write_stdin",
+                "action": "command",
+                "path": "",
+                "absolutePath": self.project_path.display().to_string(),
+                "oldContent": Value::Null,
+                "newContent": Value::Null,
+                "command": commands,
+                "sessionId": session_id,
+                "networkDomains": [],
+            });
+            let decision = match self.ask_tool_permission(call_id, "write_stdin", &args, Some(preview)).await? {
+                Ok(decision) => decision,
+                Err(reason) => return Ok(Err(format!("Denied by PermissionRequest hook: {reason}. Nothing was sent."))),
+            };
+            match decision {
+                PermissionDecision::Deny => {
+                    return Ok(Err("The user denied permission for this input; nothing was sent.".to_string()))
+                }
+                // Dangerous lines are approved for this write only.
+                _ if once_only => {}
+                PermissionDecision::AllowOnce => {}
+                PermissionDecision::AllowRun => self.handle.allow_tool_for_run("exec_command"),
+                PermissionDecision::AllowProject | PermissionDecision::AllowAlways => {
+                    for line in &prompted {
+                        self.state.db.upsert_permission(
+                            decision.standing_scope().unwrap_or("project"),
+                            &self.project_path.display().to_string(),
+                            "exec_command",
+                            line,
+                            Vec::new(),
+                            decision.as_str(),
+                        );
+                    }
+                }
+            }
+        }
+        orchestrator.set_held_input(&self.run_id, session_id, input.held);
+        Ok(Ok(input.to_send))
     }
 
     /// Executes a gated tool, snapshotting turn-diff baselines for mutating

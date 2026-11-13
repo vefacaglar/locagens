@@ -156,7 +156,7 @@ async fn exec_sessions_are_killed_when_a_turn_is_cancelled_or_fails() {
     let h = harness(echo_handler).await;
     let command = if cfg!(windows) { "%SystemRoot%\\System32\\ping.exe -n 30 127.0.0.1 > nul" } else { "sleep 30" };
     let info = h.state.processes.spawn(command, h.project.clone(), None);
-    h.state.orchestrator.track_exec_session("run-exec", &info.id);
+    h.state.orchestrator.track_exec_session("run-exec", &info.id, command);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(h.state.processes.is_running(&info.id), Some(true), "{:?}", h.state.processes.get_logs(&info.id));
 
@@ -167,7 +167,7 @@ async fn exec_sessions_are_killed_when_a_turn_is_cancelled_or_fails() {
     for (status, kept) in [("done", true), ("failed", false)] {
         let run_id = format!("run-exec-{status}");
         seed_run(&h.state, &run_id, status);
-        h.state.orchestrator.track_exec_session(&run_id, "proc-fake");
+        h.state.orchestrator.track_exec_session(&run_id, "proc-fake", "");
         let handle = h.state.orchestrator.ensure_handle(&run_id);
         h.state.orchestrator.finish_drive(&h.state, &handle).await;
         assert_eq!(!h.state.orchestrator.exec_sessions(&run_id).is_empty(), kept, "{status}");

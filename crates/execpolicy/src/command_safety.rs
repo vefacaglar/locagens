@@ -82,7 +82,7 @@ pub enum CommandSafety {
 
 /// Program name of a token: basename, lower case, without `.exe` and a
 /// leading cmd `@` (echo-off prefix).
-fn program_name(token: &str) -> String {
+pub(crate) fn program_name(token: &str) -> String {
     let base = token.rsplit(['/', '\\']).next().unwrap_or(token).trim_start_matches('@').to_lowercase();
     base.strip_suffix(".exe").map(str::to_string).unwrap_or(base)
 }

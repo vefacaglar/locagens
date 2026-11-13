@@ -10,6 +10,7 @@ pub mod processes;
 pub mod protected_paths;
 pub mod rules;
 pub mod sandbox;
+pub mod stdin_input;
 pub mod windows_sandbox;
 
 pub use command_safety::*;
