@@ -268,6 +268,7 @@ fn submit_pasted_redirect(
                 pending.set(None);
                 pasted_redirect.set(String::new());
                 store.toast("Signed in.".to_string());
+                store.refresh_providers();
                 reload_accounts(accounts);
             }
             Err(err) => store.toast(format!("Sign-in failed: {err}")),
@@ -299,7 +300,10 @@ fn begin_oauth_login(
         let task = spawn(async move {
             let state = core();
             match locagens_core::api::providers::finish_oauth_login(&state, &start).await {
-                Ok(()) => store.toast("Signed in.".to_string()),
+                Ok(()) => {
+                    store.toast("Signed in.".to_string());
+                    store.refresh_providers();
+                }
                 Err(err) => store.toast(format!("Sign-in failed: {err}")),
             }
             pending.set(None);

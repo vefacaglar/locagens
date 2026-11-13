@@ -146,6 +146,8 @@ pub fn MessageThread() -> Element {
                     "Working…"
                 }
             }
+            // Sized by `window.lcgnChat` so a just-sent message can sit at the top.
+            div { id: "chat-tail-spacer", class: "chat-tail-spacer" }
         }
     }
 }
@@ -156,6 +158,7 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
             div {
                 class: "msg-user",
                 key: "{message.id}",
+                "data-mid": "{message.id}",
                 div { class: "bubble", "{message.content}" }
             }
         },
@@ -453,6 +456,7 @@ fn render_group_owned(group: &Group, depth: u8) -> Element {
             div {
                 class: "msg-user",
                 key: "{message.id}",
+                "data-mid": "{message.id}",
                 div { class: "bubble", "{message.content}" }
             }
         },

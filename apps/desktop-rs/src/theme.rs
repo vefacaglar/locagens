@@ -452,6 +452,8 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
   display: flex; flex-direction: column; gap: 20px;
 }
 #chat-scroll > * { flex-shrink: 0; max-width: 800px; width: 100%; margin-left: auto; margin-right: auto; }
+/* Grows/shrinks from JS (window.lcgnChat) to let a sent message sit at the top. */
+#chat-scroll > .chat-tail-spacer { height: 0; margin-top: -20px; pointer-events: none; }
 .msg-user { display: flex; justify-content: flex-end; }
 .msg-user .bubble {
   max-width: 78%;

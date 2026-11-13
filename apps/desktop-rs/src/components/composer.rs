@@ -479,6 +479,10 @@ pub fn Composer() -> Element {
                         title: "Model",
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("model") { None } else { Some("model") };
+                            if next.is_some() {
+                                // Pick up credentials added elsewhere (CLI, pi, Settings).
+                                store.refresh_providers();
+                            }
                             hovered_model.set(None);
                             context_menu.set(next);
                         },
@@ -801,11 +805,11 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                     let msgs = locagens_core::api::runs::list_messages(&state, &run_id)
                         .await
                         .unwrap_or_default();
+                    crate::state_ui::pin_sent_message(&msgs);
                     store.messages.set(msgs);
                     if let Ok(updated_run) = locagens_core::api::runs::get_run(&state, &run_id).await {
                         store.active_run.set(Some(updated_run));
                     }
-                    crate::state_ui::scroll_chat_to_bottom();
                     store.attach_event_stream(run_id, continued.events);
                     store.refresh_runs();
                 }
@@ -841,8 +845,8 @@ fn submit(store: &UiStore, busy: Signal<bool>) {
                 let initial_msgs = locagens_core::api::runs::list_messages(&state, &run_id)
                     .await
                     .unwrap_or_default();
+                crate::state_ui::pin_sent_message(&initial_msgs);
                 store.messages.set(initial_msgs);
-                crate::state_ui::scroll_chat_to_bottom();
                 store.plan.set(None);
                 store.run_usage.set(None);
                 store.pending_permission.set(None);

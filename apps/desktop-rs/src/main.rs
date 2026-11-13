@@ -111,9 +111,10 @@ fn App() -> Element {
     };
     use_context_provider(|| store);
 
-    // Clipboard handler used by the copy buttons inside rendered code blocks.
+    // Clipboard handler for code-block copy buttons, and chat scroll helpers.
     use_effect(|| {
         dioxus::document::eval(markdown::COPY_SCRIPT);
+        dioxus::document::eval(state_ui::CHAT_SCROLL_SCRIPT);
     });
 
     // Load projects, runs and the provider catalog once at startup.

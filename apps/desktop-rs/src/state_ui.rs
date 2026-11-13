@@ -136,6 +136,29 @@ impl UiStore {
     /// Initial load: projects, runs and the provider catalog (picking the
     /// first configured provider + its first model as defaults), then select
     /// the most recent project and its most recent run.
+    /// Reloads the provider/model catalog, e.g. after a sign-in or a new
+    /// API key in Settings, so the model picker shows it without a restart.
+    pub fn refresh_providers(&self) {
+        let store = *self;
+        spawn(async move { store.load_providers().await });
+    }
+
+    /// Loads the provider catalog and picks a default model when none is set.
+    async fn load_providers(&self) {
+        let mut store = *self;
+        let Ok(providers) = api::providers::list_providers(&core()).await else { return };
+        let first = providers.iter().find(|provider| !provider.models.is_empty()).cloned();
+        store.providers_catalog.set(providers);
+        if let Some(provider) = first {
+            if store.selected_provider.read().is_empty() {
+                store.selected_provider.set(provider.id.clone());
+            }
+            if store.selected_model.read().is_empty() {
+                store.selected_model.set(provider.models.first().cloned().unwrap_or_default());
+            }
+        }
+    }
+
     pub fn refresh_initial(&self) {
         let mut store = *self;
         spawn(async move {
@@ -149,18 +172,7 @@ impl UiStore {
             let latest_run = runs.first().cloned();
             store.runs.set(runs);
 
-            if let Ok(providers) = api::providers::list_providers(&state).await {
-                let first = providers.iter().find(|provider| !provider.models.is_empty()).cloned();
-                store.providers_catalog.set(providers);
-                if let Some(provider) = first {
-                    if store.selected_provider.read().is_empty() {
-                        store.selected_provider.set(provider.id.clone());
-                    }
-                    if store.selected_model.read().is_empty() {
-                        store.selected_model.set(provider.models.first().cloned().unwrap_or_default());
-                    }
-                }
-            }
+            store.load_providers().await;
 
             if let Some(run) = latest_run {
                 store.select_run(run.id);
@@ -274,7 +286,7 @@ impl UiStore {
                     if !updated {
                         store.messages.with_mut(|messages| messages.push(message));
                     }
-                    scroll_chat_to_bottom();
+                    follow_chat();
                 }
             }
             "status_changed" => {
@@ -414,14 +426,138 @@ pub fn run_is_active(status: &str) -> bool {
     )
 }
 
-/// Scrolls the chat thread to the bottom (`#chat-scroll`).
+/// Chat scrolling, installed once at startup (`window.lcgnChat`).
+///
+/// Dioxus patches the DOM after the store changes, so a scroll issued right
+/// after `messages.set` runs before the new message exists. Both helpers
+/// therefore wait for the DOM over a few frames instead of scrolling once.
+///
+/// - `pin(id)`: waits for the user message `[data-mid=id]` (falls back to the
+///   last user message), scrolls it to the top of the thread, and sizes
+///   `#chat-tail-spacer` so it can stay there while the reply is still short.
+///   The spacer shrinks as the reply grows (Claude/ChatGPT-style).
+/// - `follow()`: on streamed updates, sticks to the bottom only when nothing
+///   is pinned and the reader is already near the bottom.
+/// - `toBottom()`: drops any pin and keeps the thread at the bottom while the
+///   freshly opened run lays out.
+pub const CHAT_SCROLL_SCRIPT: &str = r#"(() => {
+  if (window.lcgnChat) return;
+  const box = () => document.getElementById('chat-scroll');
+  const spacer = () => document.getElementById('chat-tail-spacer');
+  let pinned = null;
+  let token = 0;
+  let queued = false;
+
+  function lastUser() {
+    const b = box();
+    if (!b) return null;
+    const all = b.querySelectorAll('.msg-user');
+    return all.length ? all[all.length - 1] : null;
+  }
+  function fitSpacer() {
+    const b = box(), s = spacer();
+    if (!b || !s) return;
+    if (!pinned || !pinned.isConnected) { pinned = null; s.style.height = '0px'; return; }
+    // Height of the content from the pinned message down to the spacer.
+    const below = s.getBoundingClientRect().top - pinned.getBoundingClientRect().top;
+    s.style.height = Math.max(0, b.clientHeight - below - 40) + 'px';
+  }
+  function scheduleFit() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; fitSpacer(); });
+  }
+  // Whether the reader is at the bottom, tracked from scroll events so that
+  // content growth (which fires none) does not flip it.
+  let stuck = true;
+  function watch() {
+    const b = box();
+    if (!b || b.dataset.lcgnWatched) return;
+    b.dataset.lcgnWatched = '1';
+    new MutationObserver(scheduleFit).observe(b, { childList: true, subtree: true, characterData: true });
+    new ResizeObserver(scheduleFit).observe(b);
+    b.addEventListener('scroll', () => {
+      stuck = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+    }, { passive: true });
+  }
+  function pinTo(el) {
+    const b = box();
+    if (!b || !el) return;
+    pinned = el;
+    watch();
+    fitSpacer();
+    const top = Math.max(0, b.scrollTop + el.getBoundingClientRect().top - b.getBoundingClientRect().top - 16);
+    // Long smooth scrolls lag far behind; jump unless the move is short.
+    const near = Math.abs(top - b.scrollTop) < b.clientHeight;
+    b.scrollTo({ top, behavior: near ? 'smooth' : 'auto' });
+  }
+  window.lcgnChat = {
+    pin(id) {
+      const mine = ++token;
+      let frames = 0;
+      const tick = () => {
+        if (mine !== token) return;
+        const b = box();
+        const el = b && id ? b.querySelector('.msg-user[data-mid="' + CSS.escape(id) + '"]') : null;
+        if (el) return pinTo(el);
+        if (++frames > 90) return pinTo(lastUser());
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    },
+    follow() {
+      // Streaming: leave a pinned message where it is, and never yank a
+      // reader who scrolled up; otherwise stay glued to the bottom.
+      if (pinned && pinned.isConnected) return;
+      const b = box();
+      if (!b) return;
+      watch();
+      if (!stuck) return;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (stuck && !(pinned && pinned.isConnected)) b.scrollTop = b.scrollHeight;
+      }));
+    },
+    toBottom() {
+      const mine = ++token;
+      pinned = null;
+      stuck = true;
+      let frames = 0;
+      const tick = () => {
+        // Stop if a newer request took over or the reader scrolled away.
+        if (mine !== token || (frames > 0 && !stuck)) return;
+        const b = box();
+        if (b) {
+          watch();
+          fitSpacer();
+          b.scrollTop = b.scrollHeight;
+        }
+        if (++frames < 20) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    },
+  };
+})();"#;
+
+/// Scrolls the chat thread to the bottom once the opened run has rendered.
 pub fn scroll_chat_to_bottom() {
-    dioxus::document::eval(
-        r#"requestAnimationFrame(() => {
-            const el = document.getElementById('chat-scroll');
-            if (el) { el.scrollTop = el.scrollHeight; }
-        });"#,
-    );
+    dioxus::document::eval("window.lcgnChat && window.lcgnChat.toBottom();");
+}
+
+/// Keeps up with streamed output (see `follow()` above).
+pub fn follow_chat() {
+    dioxus::document::eval("window.lcgnChat && window.lcgnChat.follow();");
+}
+
+/// Pins the just-sent user message to the top of the thread.
+pub fn pin_sent_message(messages: &[RunMessage]) {
+    let id = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user" && m.agent_role.is_none())
+        .map(|m| m.id.as_str())
+        .unwrap_or_default();
+    let literal = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());
+    dioxus::document::eval(&format!("window.lcgnChat && window.lcgnChat.pin({literal});"));
 }
 
 /// Formats a cost in USD for display (`$1.2345`).

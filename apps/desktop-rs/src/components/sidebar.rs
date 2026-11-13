@@ -455,7 +455,12 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
         div {
             class: "{item_class}",
             title: "{run_title} · {model}",
-            onclick: move |_| store.select_run(run_id_select.clone()),
+            onclick: move |_| {
+                // Opening a chat from Settings / Usage must leave that page.
+                let mut store = store;
+                store.page.set(crate::state_ui::AppPage::Chat);
+                store.select_run(run_id_select.clone());
+            },
             span { class: "run-title", "{run_title}" }
             if is_live {
                 {status_dot(&status)}
