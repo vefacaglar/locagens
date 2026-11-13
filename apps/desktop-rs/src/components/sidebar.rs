@@ -296,6 +296,8 @@ pub fn Sidebar() -> Element {
                                 div {
                                     class: "{project_row_class}",
                                     title: "{project.path}",
+                                    role: "button",
+                                    tabindex: "0",
                                     onclick: move |_| {
                                         let mut store = store;
                                         store.selected_project.set(Some(path_select.clone()));
@@ -455,6 +457,8 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
         div {
             class: "{item_class}",
             title: "{run_title} · {model}",
+            role: "button",
+            tabindex: "0",
             onclick: move |_| {
                 // Opening a chat from Settings / Usage must leave that page.
                 let mut store = store;
@@ -520,6 +524,8 @@ fn AddProjectModal(on_close: EventHandler) -> Element {
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal",
+                role: "dialog",
+                "aria-modal": "true",
                 onclick: move |event| event.stop_propagation(),
                 h3 { "{store.t(\"sidebar.add_project_title\")}" }
                 label { "{store.t(\"sidebar.project_folder\")}" }
@@ -636,13 +642,13 @@ fn fork_run_action(store: &UiStore, run_id: &str) {
     });
 }
 
-/// Deletes a run (direct DB call; the facade does not expose a wrapper).
+/// Deletes a run through the api facade, which cancels an active run first.
 fn delete_run(store: &UiStore, run_id: &str) {
     let mut store = *store;
     let run_id = run_id.to_string();
     spawn(async move {
         let state = crate::state_ui::core();
-        state.db.delete_run(&run_id);
+        let _ = locagens_core::api::runs::delete_run(&state, &run_id).await;
         if store.active_run_id.read().as_deref() == Some(run_id.as_str()) {
             store.active_run_id.set(None);
             store.active_run.set(None);

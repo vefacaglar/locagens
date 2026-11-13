@@ -59,8 +59,9 @@ fn code_block_html(code: &str, lang: &str) -> String {
         format!(" class=\"language-{}\"", escape_html(lang))
     };
     format!(
-        "<div class=\"code-block\"><button class=\"code-copy\" type=\"button\" title=\"Copy\" data-code=\"{raw}\" onclick=\"locagensCopy(this)\"><span class=\"ico-copy\">{copy}</span><span class=\"ico-check\">{check}</span></button><pre><code{lang_class}>{body}</code></pre></div>",
+        "<div class=\"code-block\"><button class=\"code-copy\" type=\"button\" title=\"{copy_title}\" data-code=\"{raw}\" onclick=\"locagensCopy(this)\"><span class=\"ico-copy\">{copy}</span><span class=\"ico-check\">{check}</span></button><pre><code{lang_class}>{body}</code></pre></div>",
         raw = escape_html(code),
+        copy_title = crate::i18n::tc("md.copy"),
         copy = crate::components::icons::COPY_SVG,
         check = crate::components::icons::CHECK_SVG,
     )
@@ -189,7 +190,10 @@ pub fn pseudo_diff(old: Option<&str>, new: Option<&str>) -> String {
                 out.push('\n');
             }
         }
-        None => out.push_str("+ (file deleted)\n"),
+        None => {
+            out.push_str(crate::i18n::tc("md.file_deleted"));
+            out.push('\n');
+        }
     }
     out
 }

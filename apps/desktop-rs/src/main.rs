@@ -121,6 +121,7 @@ fn App() -> Element {
     use_effect(|| {
         dioxus::document::eval(markdown::COPY_SCRIPT);
         dioxus::document::eval(state_ui::CHAT_SCROLL_SCRIPT);
+        dioxus::document::eval(state_ui::A11Y_SCRIPT);
     });
 
     // Load projects, runs and the provider catalog once at startup.
@@ -147,6 +148,7 @@ fn App() -> Element {
     });
 
     // The platform-native stylesheet (re-rendered when appearance changes).
+    i18n::set_current(appearance.read().language);
     let stylesheet = theme::build_stylesheet_appearance(&appearance.read());
 
     let show_right_panel = *store.right_panel_open.read();

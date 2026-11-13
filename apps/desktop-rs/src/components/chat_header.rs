@@ -36,10 +36,12 @@ pub fn ChatHeader() -> Element {
         .unwrap_or(0);
 
     let usage_text = store.run_usage.read().as_ref().map(|usage| {
-        format!(
-            "{} tok · {}",
-            fmt_tokens(usage.total_input_tokens + usage.total_output_tokens),
-            fmt_cost(usage.total_cost),
+        store.tf(
+            "header.tokens_cost",
+            &[
+                &fmt_tokens(usage.total_input_tokens + usage.total_output_tokens),
+                &fmt_cost(usage.total_cost),
+            ],
         )
     });
     let folder = std::path::Path::new(&project_path)

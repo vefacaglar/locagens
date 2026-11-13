@@ -65,7 +65,7 @@ pub fn Toast() -> Element {
         return rsx! {};
     };
     rsx! {
-        div { class: "toast", "{message}" }
+        div { class: "toast", role: "status", "{message}" }
     }
 }
 

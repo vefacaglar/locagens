@@ -370,7 +370,7 @@ button, .btn {
 }
 button:hover { background: var(--hover); color: var(--text); }
 button:active { background: var(--active); }
-button:focus-visible, .row-focusable:focus-visible {
+button:focus-visible, .row-focusable:focus-visible, [role="button"]:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent-ring); outline-offset: 1px;
 }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
