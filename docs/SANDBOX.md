@@ -135,7 +135,7 @@ Patterns follow Codex: `example.com` matches exactly that host,
 `*.example.com` any subdomain, `**.example.com` the apex and any subdomain;
 the global `*` is ignored. A command may reach:
 
-1. `[sandbox.network] allowed_domains` in `~/.locagens/config.toml` (empty by
+1. `[sandbox.network] allowed_domains` in config.toml (`~/.locagens`, then the `~/.codex` / `~/.pi/agent` fallbacks; empty by
    default, like Codex — package registries are **not** allowed implicitly):
 
    ```toml

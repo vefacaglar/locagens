@@ -62,6 +62,27 @@ pub fn sandbox_network_access() -> bool {
     current().sandbox_network_access()
 }
 
+/// `[sandbox_workspace_write] writable_roots`, `~` expanded.
+pub fn sandbox_writable_roots() -> Vec<std::path::PathBuf> {
+    let config = current();
+    let Some(table) = config.sandbox_workspace_write.as_ref() else { return Vec::new() };
+    table
+        .writable_roots
+        .iter()
+        .map(|root| root.trim())
+        .filter(|root| !root.is_empty())
+        .map(|root| match root.strip_prefix("~/").or_else(|| root.strip_prefix("~\\")) {
+            Some(rest) => crate::util::home_dir().join(rest),
+            None => std::path::PathBuf::from(root),
+        })
+        .collect()
+}
+
+/// `[sandbox.network] allowed_domains` from the merged config chain.
+pub fn sandbox_allowed_domains() -> Vec<String> {
+    current().sandbox.as_ref().map(|sandbox| sandbox.network.allowed_domains.clone()).unwrap_or_default()
+}
+
 /// Program + args for the `notify` command with the turn-complete event
 /// appended as the last argument (Codex contract). `None` when unset.
 pub fn notify_invocation(config: &Config, event: &serde_json::Value) -> Option<(String, Vec<String>)> {

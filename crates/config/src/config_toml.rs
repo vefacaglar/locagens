@@ -24,6 +24,21 @@ pub struct SandboxWorkspaceWrite {
     pub exclude_slash_tmp: bool,
 }
 
+/// `[sandbox]` (Locagens: per-domain network proxy allowlist).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxTable {
+    pub network: SandboxNetwork,
+}
+
+/// `[sandbox.network]`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxNetwork {
+    /// Hosts sandboxed commands may reach (`a.com`, `*.a.com`, `**.a.com`).
+    pub allowed_domains: Vec<String>,
+}
+
 /// `[shell_environment_policy]` as written in the file.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -112,6 +127,7 @@ pub struct Config {
     pub approval_policy: Option<String>,
     pub sandbox_mode: Option<String>,
     pub sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
+    pub sandbox: Option<SandboxTable>,
     pub shell_environment_policy: Option<ShellEnvironmentPolicyToml>,
 
     /// Raw `[model_providers.<id>]` tables (consumed by the provider engine).

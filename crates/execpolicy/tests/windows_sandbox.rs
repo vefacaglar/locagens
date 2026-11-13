@@ -37,6 +37,7 @@ impl Workspace {
             project_path: self.root.clone(),
             allow_network: false,
             network,
+            writable_roots: Vec::new(),
         }
     }
 }
@@ -45,7 +46,7 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         // Revoke the ACEs, then delete this workspace's private temp dir.
         let sandbox_temp = std::env::temp_dir().join("locagens-sandbox");
-        for path in revoke_workspace_access(&self.root).unwrap_or_default() {
+        for path in revoke_workspace_access(&self.root, &[]).unwrap_or_default() {
             if path.starts_with(&sandbox_temp) {
                 let _ = std::fs::remove_dir_all(path);
             }
@@ -290,6 +291,7 @@ async fn sandbox_setup_errors_fail_the_session_closed() {
                 project_path: missing,
                 allow_network: false,
                 network: None,
+                writable_roots: Vec::new(),
             }),
             ..SpawnOptions::default()
         },

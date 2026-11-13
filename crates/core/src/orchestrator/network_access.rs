@@ -1,7 +1,7 @@
 //! Network policy for sandboxed commands (Codex network approval).
 //!
 //! A sandboxed command may reach, through its per-command proxy:
-//! - `[sandbox.network] allowed_domains` from `~/.locagens/config.toml`
+//! - `[sandbox.network] allowed_domains` from config.toml (agent-dir chain)
 //!   (empty by default, like Codex),
 //! - the command's own approved `network_domains`,
 //! - hosts with a standing `network_access` grant (Allow in Project /
@@ -32,24 +32,9 @@ pub const NETWORK_ACCESS_TOOL: &str = "network_access";
 static RUN_APPROVED_HOSTS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// `[sandbox.network] allowed_domains` from `~/.locagens/config.toml`.
+/// `[sandbox.network] allowed_domains` from the merged config.toml chain.
 pub fn configured_allowed_domains() -> Vec<String> {
-    let path = locagens_config::paths::locagens_home().join("config.toml");
-    std::fs::read_to_string(path)
-        .map(|text| parse_allowed_domains(&text))
-        .unwrap_or_default()
-}
-
-fn parse_allowed_domains(text: &str) -> Vec<String> {
-    let Ok(doc) = toml::from_str::<toml::Value>(text) else {
-        return Vec::new();
-    };
-    doc.get("sandbox")
-        .and_then(|sandbox| sandbox.get("network"))
-        .and_then(|network| network.get("allowed_domains"))
-        .and_then(toml::Value::as_array)
-        .map(|items| items.iter().filter_map(toml::Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default()
+    crate::config_runtime::sandbox_allowed_domains()
 }
 
 /// The `network_domains` argument of a command tool call.
@@ -202,10 +187,13 @@ mod tests {
 
     #[test]
     fn config_allowed_domains_are_read_from_sandbox_network_table() {
+        let parse = |text: &str| -> Vec<String> {
+            let config: locagens_config::config_toml::Config = toml::from_str(text).unwrap();
+            config.sandbox.map(|sandbox| sandbox.network.allowed_domains).unwrap_or_default()
+        };
         let text = "[sandbox.network]\nallowed_domains = [\"registry.npmjs.org\", \"**.crates.io\"]\n";
-        assert_eq!(parse_allowed_domains(text), vec!["registry.npmjs.org", "**.crates.io"]);
-        assert!(parse_allowed_domains("[model_providers.x]\nname = \"x\"\n").is_empty());
-        assert!(parse_allowed_domains("not toml [").is_empty());
+        assert_eq!(parse(text), vec!["registry.npmjs.org", "**.crates.io"]);
+        assert!(parse("[model_providers.x]\nname = \"x\"\n").is_empty());
     }
 
     /// `run_command` in Build mode runs sandboxed on Windows: workspace
@@ -229,7 +217,7 @@ mod tests {
             .unwrap();
         assert!(output.contains("Sandbox blocked network access to: blocked.example"), "{output}");
         assert!(ws.join("marker.txt").exists(), "{output}");
-        let _ = locagens_execpolicy::windows_sandbox::revoke_workspace_access(&ws);
+        let _ = locagens_execpolicy::windows_sandbox::revoke_workspace_access(&ws, &[]);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

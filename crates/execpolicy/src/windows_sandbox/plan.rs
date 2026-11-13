@@ -46,6 +46,7 @@ pub fn build_plan(
     mode: SandboxMode,
     project_path: &Path,
     temp_base: &Path,
+    extra_writable_roots: &[PathBuf],
 ) -> Result<WindowsSandboxPlan, String> {
     if mode == SandboxMode::DangerFullAccess {
         return Err("danger-full-access does not use the Windows sandbox".to_string());
@@ -87,7 +88,15 @@ pub fn build_plan(
     Ok(WindowsSandboxPlan {
         token_mode: TokenMode::WorkspaceWrite,
         capability_sid,
-        writable_roots: vec![root, temp_dir.clone()],
+        writable_roots: [root, temp_dir.clone()]
+            .into_iter()
+            .chain(
+                extra_writable_roots
+                    .iter()
+                    .filter_map(|extra| std::fs::canonicalize(extra).ok())
+                    .map(|extra| strip_verbatim_prefix(&extra)),
+            )
+            .collect(),
         deny_write_paths,
         create_dirs: vec![temp_dir.clone(), locagens_dir],
         temp_dir: Some(temp_dir),
@@ -161,7 +170,7 @@ mod tests {
         std::fs::write(root.join(".git").join("config"), "[core]\n").unwrap();
         let temp_base = std::env::temp_dir();
 
-        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &temp_base).unwrap();
+        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &temp_base, &[]).unwrap();
         assert_eq!(plan.token_mode, TokenMode::WorkspaceWrite);
         assert_eq!(plan.writable_roots[0], root);
         let temp_dir = plan.temp_dir.clone().unwrap();
@@ -185,7 +194,7 @@ mod tests {
     #[test]
     fn missing_git_metadata_is_not_planned() {
         let root = temp_workspace("nogit");
-        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir()).unwrap();
+        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir(), &[]).unwrap();
         assert_eq!(plan.deny_write_paths, vec![root.join(".locagens")]);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -195,9 +204,9 @@ mod tests {
         let first = temp_workspace("a");
         let second = temp_workspace("b");
         let temp_base = std::env::temp_dir();
-        let plan_a = build_plan(SandboxMode::WorkspaceWrite, &first, &temp_base).unwrap();
-        let plan_a_again = build_plan(SandboxMode::WorkspaceWrite, &first, &temp_base).unwrap();
-        let plan_b = build_plan(SandboxMode::WorkspaceWrite, &second, &temp_base).unwrap();
+        let plan_a = build_plan(SandboxMode::WorkspaceWrite, &first, &temp_base, &[]).unwrap();
+        let plan_a_again = build_plan(SandboxMode::WorkspaceWrite, &first, &temp_base, &[]).unwrap();
+        let plan_b = build_plan(SandboxMode::WorkspaceWrite, &second, &temp_base, &[]).unwrap();
         assert_eq!(plan_a.capability_sid, plan_a_again.capability_sid);
         assert_ne!(plan_a.capability_sid, plan_b.capability_sid);
         assert_ne!(plan_a.temp_dir, plan_b.temp_dir);
@@ -205,7 +214,7 @@ mod tests {
         let upper = PathBuf::from(first.to_string_lossy().to_uppercase());
         if upper.exists() {
             // Case-insensitive file systems map both spellings to one SID.
-            let plan_upper = build_plan(SandboxMode::WorkspaceWrite, &upper, &temp_base).unwrap();
+            let plan_upper = build_plan(SandboxMode::WorkspaceWrite, &upper, &temp_base, &[]).unwrap();
             assert_eq!(plan_upper.capability_sid, plan_a.capability_sid);
         }
         let _ = std::fs::remove_dir_all(&first);
@@ -215,7 +224,7 @@ mod tests {
     #[test]
     fn read_only_plan_grants_nothing() {
         let root = temp_workspace("ro");
-        let plan = build_plan(SandboxMode::ReadOnly, &root, &std::env::temp_dir()).unwrap();
+        let plan = build_plan(SandboxMode::ReadOnly, &root, &std::env::temp_dir(), &[]).unwrap();
         assert_eq!(plan.token_mode, TokenMode::ReadOnly);
         assert!(plan.writable_roots.is_empty());
         assert!(plan.deny_write_paths.is_empty());
@@ -228,9 +237,9 @@ mod tests {
     #[test]
     fn plan_fails_closed_for_missing_workspace_and_full_access() {
         let missing = std::env::temp_dir().join(format!("locagens-plan-missing-{}", uuid::Uuid::new_v4()));
-        let err = build_plan(SandboxMode::WorkspaceWrite, &missing, &std::env::temp_dir()).unwrap_err();
+        let err = build_plan(SandboxMode::WorkspaceWrite, &missing, &std::env::temp_dir(), &[]).unwrap_err();
         assert!(err.contains("not accessible"), "{err}");
-        assert!(build_plan(SandboxMode::DangerFullAccess, &std::env::temp_dir(), &std::env::temp_dir()).is_err());
+        assert!(build_plan(SandboxMode::DangerFullAccess, &std::env::temp_dir(), &std::env::temp_dir(), &[]).is_err());
     }
 
     #[test]
@@ -239,4 +248,18 @@ mod tests {
         assert_eq!(strip_verbatim_prefix(Path::new(r"\\?\UNC\srv\share")), PathBuf::from(r"\\srv\share"));
         assert_eq!(strip_verbatim_prefix(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
     }
+
+    #[test]
+    fn extra_writable_roots_are_granted_when_they_exist() {
+        let root = std::env::temp_dir().join(format!("locagens-plan-extra-{}", std::process::id()));
+        let extra = root.join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        let missing = root.join("missing");
+        let plan = build_plan(SandboxMode::WorkspaceWrite, &root, &std::env::temp_dir(), &[extra.clone(), missing]).unwrap();
+        let extra = strip_verbatim_prefix(&std::fs::canonicalize(&extra).unwrap());
+        assert!(plan.writable_roots.contains(&extra));
+        assert_eq!(plan.writable_roots.len(), 3, "workspace + temp + the existing extra root");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }

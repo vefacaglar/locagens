@@ -1189,6 +1189,7 @@ impl AgentLoop {
                 project_path: self.project_path.clone(),
                 allow_network: self.mode == "auto" || crate::config_runtime::sandbox_network_access(),
                 network: Some(network),
+                writable_roots: crate::config_runtime::sandbox_writable_roots(),
             }),
         };
         let info = self

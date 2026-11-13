@@ -767,6 +767,7 @@ pub async fn run_command_with_network(
         project_path: project.to_path_buf(),
         allow_network: !domains.is_empty() || mode == "auto",
         network: Some(network),
+        writable_roots: crate::config_runtime::sandbox_writable_roots(),
     };
     let (shell_prog, shell_args): (String, Vec<String>) = if cfg!(windows) {
         ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])

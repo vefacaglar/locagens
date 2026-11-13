@@ -44,6 +44,9 @@ pub struct SandboxSpec {
     /// Windows: the per-domain allowlist (+ approval hook) enforced by the
     /// command's network proxy. `None` means deny every host.
     pub network: Option<NetworkPolicy>,
+    /// Extra directories writable in `workspace-write` (config.toml
+    /// `[sandbox_workspace_write] writable_roots`). Missing ones are skipped.
+    pub writable_roots: Vec<PathBuf>,
 }
 
 /// Detects the best available sandbox backend on this platform.
@@ -316,6 +319,9 @@ pub fn build_macos_seatbelt_profile_and_params(
                 params.push(("DARWIN_TMP_DIR".to_string(), canonical.to_string_lossy().to_string()));
             }
         }
+        for extra in existing_roots(&spec.writable_roots) {
+            profile.push_str(&format!("(allow file-write* (subpath {}))\n", seatbelt_string(&extra)));
+        }
         params.push(("PROJECT_ROOT".to_string(), root.clone()));
         params.push(("GIT_HOOKS_DIR".to_string(), format!("{root}/.git/hooks")));
         params.push(("GIT_CONFIG_FILE".to_string(), format!("{root}/.git/config")));
@@ -333,6 +339,20 @@ pub fn build_macos_seatbelt_profile_and_params(
     }
 
     (profile, params)
+}
+
+/// Canonical string forms of the extra writable roots that exist.
+fn existing_roots(roots: &[PathBuf]) -> Vec<String> {
+    roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .map(|root| root.to_string_lossy().to_string())
+        .collect()
+}
+
+/// A Seatbelt (SBPL) string literal.
+fn seatbelt_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Builds the `bwrap` command line (`program` + `args` appended after `--`).
@@ -366,6 +386,9 @@ pub fn build_linux_bwrap_args(
         out.push("--bind".to_string());
         out.push(root.clone());
         out.push(root.clone());
+        for extra in existing_roots(&spec.writable_roots) {
+            out.extend(["--bind".to_string(), extra.clone(), extra]);
+        }
         // Carve-outs stay read-only so hooks/config/tool state cannot be
         // rewritten by sandboxed commands.
         for carve_out in [
@@ -451,6 +474,7 @@ mod tests {
             project_path: canonical.clone(),
             allow_network: false,
             network: None,
+            writable_roots: Vec::new(),
         };
         (canonical, spec)
     }
@@ -493,6 +517,7 @@ mod tests {
             project_path: missing.clone(),
             allow_network: false,
             network: None,
+            writable_roots: Vec::new(),
         };
         let script = format!("echo ran > \"{}\"", marker.display());
         let result = run_captured(
@@ -557,6 +582,7 @@ mod tests {
                 project_path: root.clone(),
                 allow_network: true,
                 network: None,
+                writable_roots: Vec::new(),
             }),
         );
         assert_eq!(program, "/bin/sh");
