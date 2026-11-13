@@ -73,55 +73,66 @@ impl TokenStore {
         Self { path }
     }
 
-    fn load(&self) -> StoreFile {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+    /// A missing file is an empty store; an unreadable or unparsable one is an
+    /// error so a write never replaces other servers' tokens with a blank file.
+    fn load(&self) -> Result<StoreFile, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(raw) => serde_json::from_str(&raw).map_err(|err| {
+                format!("{} is not valid JSON ({err}); fix or delete it before signing in again.", self.path.display())
+            }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(StoreFile::default()),
+            Err(err) => Err(format!("Cannot read {}: {err}", self.path.display())),
+        }
     }
 
     fn save(&self, file: &StoreFile) -> Result<(), String> {
-        use std::io::Write;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-        }
         let body = serde_json::to_vec_pretty(file).map_err(|err| err.to_string())?;
-        let tmp = self.path.with_extension("json.tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut handle = options.open(&tmp).map_err(|err| err.to_string())?;
-        handle.write_all(&body).map_err(|err| err.to_string())?;
-        drop(handle);
-        std::fs::rename(&tmp, &self.path).map_err(|err| err.to_string())
+        locagens_config::private_file::write_private_atomic(&self.path, &body).map_err(|err| err.to_string())
     }
 
     pub fn get(&self, key: &str) -> Option<OAuthEntry> {
         let _guard = STORE_LOCK.lock().ok()?;
-        self.load().servers.get(key).cloned()
+        self.load().ok()?.servers.get(key).cloned()
+    }
+
+    /// Read-modify-write under the in-process mutex and the cross-process
+    /// `mcp-oauth.json.lock` directory lock.
+    fn update<T>(&self, change: impl FnOnce(&mut StoreFile) -> T) -> Result<T, String> {
+        let _guard = STORE_LOCK.lock().map_err(|err| err.to_string())?;
+        let _file_lock = locagens_config::oauth::auth_lock::AuthFileLock::acquire_blocking(&self.path)
+            .map_err(|err| err.to_string())?;
+        let mut file = self.load()?;
+        let result = change(&mut file);
+        self.save(&file)?;
+        Ok(result)
     }
 
     pub fn put(&self, key: &str, entry: OAuthEntry) -> Result<(), String> {
-        let _guard = STORE_LOCK.lock().map_err(|err| err.to_string())?;
-        let mut file = self.load();
-        file.servers.insert(key.to_string(), entry);
-        self.save(&file)
+        self.update(|file| {
+            file.servers.insert(key.to_string(), entry);
+        })
     }
 
     /// Removes a stored sign-in; returns whether one existed.
     pub fn remove(&self, key: &str) -> Result<bool, String> {
-        let _guard = STORE_LOCK.lock().map_err(|err| err.to_string())?;
-        let mut file = self.load();
-        if file.servers.remove(key).is_none() {
+        if self.get(key).is_none() {
             return Ok(false);
         }
-        self.save(&file)?;
-        Ok(true)
+        self.update(|file| file.servers.remove(key).is_some())
     }
+
+    /// Lock path for token refreshes. Separate from the store's own lock
+    /// because `put` takes that one while a refresh is still in flight.
+    fn refresh_lock_path(&self) -> PathBuf {
+        self.path.with_file_name("mcp-oauth.refresh")
+    }
+}
+
+/// One async mutex per store key: concurrent tool calls share a single refresh.
+fn refresh_gate(key: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static GATES: Mutex<BTreeMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>> = Mutex::new(BTreeMap::new());
+    let mut gates = GATES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    gates.entry(key.to_string()).or_default().clone()
 }
 
 /// Store key for a server: name plus URL, so editing the URL signs out.
@@ -137,7 +148,7 @@ pub fn logout(store: &TokenStore, config: &McpServerConfig) -> Result<bool, Stri
     store.remove(&store_key(config))
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -216,23 +227,50 @@ pub async fn discover(http: &reqwest::Client, server_url: &str) -> Result<AuthSe
         well_known(&issuer, "openid-configuration"),
         format!("{issuer_origin}{issuer_path}/.well-known/openid-configuration"),
     ];
+    let expected_issuer = issuer.as_str().trim_end_matches('/').to_string();
     for url in candidates {
         let Some(doc) = get_json(http, &url).await else { continue };
+        // RFC 8414 section 3.3: the document must name the issuer it was fetched for.
+        if str_field(&doc, "issuer").is_some_and(|found| found.trim_end_matches('/') != expected_issuer) {
+            continue;
+        }
         if let (Some(authorization_endpoint), Some(token_endpoint)) =
             (str_field(&doc, "authorization_endpoint"), str_field(&doc, "token_endpoint"))
         {
-            return Ok(AuthServerMetadata {
-                authorization_endpoint,
-                token_endpoint,
-                registration_endpoint: str_field(&doc, "registration_endpoint"),
-            });
+            let registration_endpoint = str_field(&doc, "registration_endpoint");
+            for endpoint in [Some(&authorization_endpoint), Some(&token_endpoint), registration_endpoint.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                require_secure_endpoint(endpoint)?;
+            }
+            return Ok(AuthServerMetadata { authorization_endpoint, token_endpoint, registration_endpoint });
         }
     }
-    Ok(AuthServerMetadata {
+    let fallback = AuthServerMetadata {
         authorization_endpoint: format!("{issuer_origin}/authorize"),
         token_endpoint: format!("{issuer_origin}/token"),
         registration_endpoint: Some(format!("{issuer_origin}/register")),
-    })
+    };
+    require_secure_endpoint(&fallback.token_endpoint)?;
+    Ok(fallback)
+}
+
+/// Endpoints that receive codes, tokens or client registrations must be https
+/// (plain http only to a loopback host, for local servers and tests).
+pub(super) fn require_secure_endpoint(endpoint: &str) -> Result<(), String> {
+    let url = Url::parse(endpoint).map_err(|err| format!("Bad OAuth endpoint \"{endpoint}\": {err}"))?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        Ok(())
+    } else {
+        Err(format!("Refusing OAuth endpoint \"{endpoint}\": it must use https."))
+    }
 }
 
 /// RFC 7591 dynamic registration of a public loopback client.
@@ -294,8 +332,18 @@ async fn token_request(
     Ok(TokenResponse {
         access_token: str_field(&doc, "access_token").ok_or("Token response has no access_token.")?,
         refresh_token: str_field(&doc, "refresh_token"),
-        expires_at: doc.get("expires_in").and_then(Value::as_i64).map(|secs| now_ms() + secs * 1000),
+        expires_at: expires_at_from(doc.get("expires_in")),
     })
+}
+
+/// `expires_in` is seconds, sometimes a float (`3600.0`) or a numeric string.
+pub(super) fn expires_at_from(expires_in: Option<&Value>) -> Option<i64> {
+    let secs = match expires_in? {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (secs.is_finite() && secs >= 0.0).then(|| now_ms().saturating_add((secs.min(1e9) * 1000.0) as i64))
 }
 
 // ----------------------------------------------------------------------
@@ -424,6 +472,26 @@ pub async fn access_token(
     }
     // A token that is merely close to expiry stays usable if renewing fails.
     let still_valid = !force_refresh && !entry.expires_at.is_some_and(|at| at <= now_ms());
+
+    // Single flight: one refresh per server in this process (async mutex) and
+    // across processes (lock directory), because refresh tokens may rotate.
+    let gate = refresh_gate(&key);
+    let _in_process = gate.lock().await;
+    let _cross_process = locagens_config::oauth::auth_lock::AuthFileLock::acquire(&store.refresh_lock_path())
+        .await
+        .map_err(|err| err.to_string())?;
+    // Someone else may have refreshed while we waited.
+    let entry = match store.get(&key) {
+        Some(current) if current.access_token != entry.access_token => {
+            let expiring = current.expires_at.is_some_and(|at| at - EXPIRY_SKEW_MS <= now_ms());
+            if !expiring {
+                return Ok(Some(current.access_token));
+            }
+            current
+        }
+        Some(current) => current,
+        None => return Ok(None),
+    };
     match refresh(store, &key, &entry).await {
         Ok(Some(updated)) => Ok(Some(updated.access_token)),
         Ok(None) => Ok(still_valid.then_some(entry.access_token)),

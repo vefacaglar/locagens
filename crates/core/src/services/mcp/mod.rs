@@ -38,7 +38,7 @@ const STDIO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
 
 /// Serializable shape of one server config (camelCase for the frontend).
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     pub name: String,
@@ -70,6 +70,72 @@ pub struct McpServerConfig {
     /// OAuth scopes to request at login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+}
+
+/// Shown in place of a secret value in API responses. Sending it back on save
+/// keeps the stored value (same marker as provider API keys).
+pub const PRESERVE_SECRET: &str = locagens_config::providers::PRESERVE_API_KEY;
+
+/// `Debug` lists env / header names only: their values are credentials.
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |map: &Option<BTreeMap<String, String>>| map.as_ref().map(|m| m.keys().cloned().collect::<Vec<_>>());
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("scope", &self.scope)
+            .field("transport", &self.transport)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_names", &names(&self.env))
+            .field("url", &self.url)
+            .field("enabled", &self.enabled)
+            .field("project_path", &self.project_path)
+            .field("bearer_token_env_var", &self.bearer_token_env_var)
+            .field("http_header_names", &names(&self.http_headers))
+            .field("env_http_headers", &self.env_http_headers)
+            .field("oauth_client_id", &self.oauth_client_id)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+impl McpServerConfig {
+    /// Copy for the UI: `env` and `http_headers` values (API keys, static
+    /// `Authorization` headers) are replaced by [`PRESERVE_SECRET`]; names,
+    /// `env_http_headers` (env var *names*) and the rest stay as they are.
+    pub fn masked(&self) -> Self {
+        let mask = |map: &Option<BTreeMap<String, String>>| {
+            map.as_ref().map(|m| m.keys().map(|k| (k.clone(), PRESERVE_SECRET.to_string())).collect())
+        };
+        Self { env: mask(&self.env), http_headers: mask(&self.http_headers), ..self.clone() }
+    }
+}
+
+impl McpServerInfo {
+    /// The info with secrets masked (see [`McpServerConfig::masked`]).
+    pub fn masked(mut self) -> Self {
+        self.config = self.config.masked();
+        self
+    }
+}
+
+/// Replaces [`PRESERVE_SECRET`] values by the stored ones; entries with no
+/// stored counterpart are dropped (nothing real to preserve).
+fn restore_secrets(
+    submitted: Option<BTreeMap<String, String>>,
+    stored: &Option<BTreeMap<String, String>>,
+) -> Option<BTreeMap<String, String>> {
+    submitted.map(|map| {
+        map.into_iter()
+            .filter_map(|(key, value)| {
+                if value == PRESERVE_SECRET {
+                    stored.as_ref()?.get(&key).map(|old| (key, old.clone()))
+                } else {
+                    Some((key, value))
+                }
+            })
+            .collect()
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -384,9 +450,12 @@ pub fn find_config(name: &str, project_path: Option<&str>) -> Option<McpServerCo
 /// headers, OAuth client id, scopes) over from the stored entry with the same
 /// name and scope, so saving a remote server from the UI never drops them.
 pub fn keep_stored_auth(mut config: McpServerConfig) -> McpServerConfig {
-    let Some(stored) = find_config(&config.name, config.project_path.as_deref())
-        .filter(|stored| stored.scope == config.scope)
-    else {
+    let stored = find_config(&config.name, config.project_path.as_deref())
+        .filter(|stored| stored.scope == config.scope);
+    // Masked values coming back from the UI resolve to the stored secrets.
+    config.env = restore_secrets(config.env.take(), &stored.as_ref().and_then(|s| s.env.clone()));
+    config.http_headers = restore_secrets(config.http_headers.take(), &stored.as_ref().and_then(|s| s.http_headers.clone()));
+    let Some(stored) = stored else {
         return config;
     };
     config.bearer_token_env_var = config.bearer_token_env_var.or(stored.bearer_token_env_var);
@@ -417,7 +486,8 @@ pub fn save_config(config: &McpServerConfig) -> Result<(), String> {
     };
     file.mcp_servers.insert(name, entry);
     let serialized = serde_json::to_string_pretty(&file).map_err(|err| err.to_string())?;
-    std::fs::write(&path, serialized).map_err(|err| err.to_string())
+    // The file may hold env values / static auth headers: owner-only, atomic.
+    locagens_config::private_file::write_private_atomic(&path, serialized.as_bytes()).map_err(|err| err.to_string())
 }
 
 fn entry_from_config(config: &McpServerConfig) -> RawMcpEntry {
@@ -458,7 +528,7 @@ fn remove_from_file(path: &PathBuf, name: &str) -> Result<bool, String> {
         return Ok(false);
     }
     let serialized = serde_json::to_string_pretty(&file).map_err(|err| err.to_string())?;
-    std::fs::write(path, serialized).map_err(|err| err.to_string())?;
+    locagens_config::private_file::write_private_atomic(path, serialized.as_bytes()).map_err(|err| err.to_string())?;
     Ok(true)
 }
 

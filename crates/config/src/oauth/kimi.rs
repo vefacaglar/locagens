@@ -30,6 +30,7 @@ impl Default for KimiOAuth {
         let host = ["KIMI_CODE_OAUTH_HOST", "KIMI_OAUTH_HOST"]
             .iter()
             .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+            .filter(|value| host_override_allowed(value))
             .unwrap_or_else(|| DEFAULT_OAUTH_HOST.to_string());
         Self::with_host(&host, PollTiming::default(), Duration::from_secs(1))
     }
@@ -188,9 +189,30 @@ fn poll_step(status: u16, body: &Value) -> PollStep<OAuthTokens> {
     }
 }
 
+/// A `KIMI_*_OAUTH_HOST` override must be https (plain http only to loopback);
+/// anything else would send the device grant and refresh tokens in clear.
+fn host_override_allowed(host: &str) -> bool {
+    let host = host.trim();
+    host.starts_with("https://")
+        || ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|prefix| host.starts_with(prefix) && matches!(host[prefix.len()..].chars().next(), None | Some(':' | '/')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_override_requires_https_or_loopback() {
+        assert!(host_override_allowed("https://auth.example.com"));
+        assert!(host_override_allowed("http://127.0.0.1:8080"));
+        assert!(host_override_allowed("http://localhost"));
+        assert!(!host_override_allowed("http://auth.example.com"));
+        assert!(!host_override_allowed("http://localhost.evil.com"));
+        assert!(!host_override_allowed("auth.example.com"));
+    }
+
     use axum::{extract::State, routing::post, Form, Json, Router};
     use serde_json::json;
     use std::collections::HashMap;

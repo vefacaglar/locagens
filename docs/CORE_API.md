@@ -143,6 +143,16 @@ a read-only, lowest-precedence fallback.
 tokens are refreshed transparently when a run resolves its credential
 (under an `auth.json.lock` directory, compatible with pi). `list_providers`
 only returns configured providers (see `docs/CLI.md`).
+
+Secret files (`auth.json`, `models.json`, `device-id`, `mcp-oauth.json`, MCP
+config files) are written through `locagens_config::private_file::write_private_atomic`
+(same-dir temp file, mode 0600 on unix, fsync, rename). The `auth.json` lock is
+kept fresh by a 2 s heartbeat and released only if its owner token still
+matches. `keyPreview` of an API key is `…` plus its last 4 characters (keys of
+20+ characters; shorter ones show `***`). `!command` keys run with a 30 s
+timeout (`cmd /S /C` on Windows). `test_provider` / `fetch_models` use a key
+typed in the UI literally (no `!`/`$` expansion) and never send the stored
+credential to a `baseUrl` other than the provider's configured one.
 ```
 
 ### `api::permissions` — standing grants
@@ -181,6 +191,13 @@ authorization URL to `on_url` (open it with
 `services::mcp::oauth::open_browser`). Tokens are stored in
 `~/.locagens/mcp-oauth.json` (mode 0600 on unix). `McpServerInfo` carries
 `needs_login` (server answered 401) and `signed_in` (token stored).
+Every `McpServerInfo` returned by this facade is masked: `config.env` and
+`config.http_headers` keep their keys but every value is
+`__LOCAGENS_PRESERVE_API_KEY__`; `upsert_mcp_server` maps that marker back to
+the stored value (a marker with no stored value is dropped). OAuth refreshes
+are single-flight per server (in-process mutex plus `mcp-oauth.refresh.lock`),
+an unparsable `mcp-oauth.json` is never overwritten, and discovered OAuth
+endpoints must be https (http only for loopback) with a matching `issuer`.
 `services::mcp::shutdown_sessions()` DELETEs open streamable-HTTP sessions;
 call it before the process exits.
 

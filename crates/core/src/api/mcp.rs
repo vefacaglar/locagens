@@ -25,6 +25,7 @@ fn resolve_project(state: &AppState, raw: Option<&str>) -> Option<String> {
 pub async fn list_mcp_servers(state: &AppState, project_path: Option<&str>) -> ApiResult<mcp_service::McpServersResponse> {
     let project = resolve_project(state, project_path);
     let servers = mcp_service::probe_all(project.as_deref()).await;
+    let servers = servers.into_iter().map(mcp_service::McpServerInfo::masked).collect();
     Ok(mcp_service::McpServersResponse { servers })
 }
 
@@ -54,7 +55,7 @@ pub async fn upsert_mcp_server(state: &AppState, input: mcp_service::McpServerIn
     mcp_service::save_config(&config).map_err(ApiError::bad_request)?;
     // The stored config changed: drop stale probes for this server name.
     mcp_service::invalidate_server(&config.name);
-    Ok(mcp_service::probe_server(&config).await)
+    Ok(mcp_service::probe_server(&config).await.masked())
 }
 
 /// Deletes an MCP server config by name (trimmed + lowercased); returns
@@ -86,7 +87,7 @@ pub async fn restart_mcp_server(state: &AppState, name: &str, project_path: Opti
     let config = mcp_service::find_config(&name, project.as_deref())
         .ok_or_else(|| ApiError::bad_request(format!("MCP server \"{name}\" not found.")))?;
     mcp_service::invalidate_server(&name);
-    Ok(mcp_service::probe_server(&config).await)
+    Ok(mcp_service::probe_server(&config).await.masked())
 }
 
 /// Enables/disables an MCP server and returns its info.
@@ -103,7 +104,7 @@ pub async fn toggle_mcp_server(state: &AppState, name: &str, enabled: bool, proj
 
     let info = mcp_service::toggle(&name, enabled, project.as_deref()).map_err(ApiError::bad_request)?;
     mcp_service::invalidate_server(&name);
-    Ok(info)
+    Ok(info.masked())
 }
 
 fn find_remote_server(name: &str, project: Option<&str>) -> ApiResult<mcp_service::McpServerConfig> {
@@ -137,7 +138,7 @@ pub async fn login_mcp_server(
         .await
         .map_err(|err| ApiError::bad_request(format!("MCP login failed: {err}")))?;
     mcp_service::invalidate_server(&config.name);
-    Ok(mcp_service::probe_server(&config).await)
+    Ok(mcp_service::probe_server(&config).await.masked())
 }
 
 /// Removes the stored OAuth token of a remote MCP server; returns whether one

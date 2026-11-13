@@ -1,6 +1,8 @@
 //! `auth.json` lock compatible with pi's `proper-lockfile` usage: the lock is
 //! a `<auth.json path>.lock` directory created with `mkdir`, considered stale
-//! when its mtime is older than 10 seconds, and always removed on release.
+//! when its mtime is older than 10 seconds. A held lock refreshes its mtime
+//! every 2 s (heartbeat) so it is never stale while alive, and release only
+//! removes the directory when the owner token still matches.
 
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -10,10 +12,21 @@ const RETRY_DELAY: Duration = Duration::from_millis(100);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 const STALE_AFTER: Duration = Duration::from_secs(10);
 
-/// RAII guard: the lock directory is removed on drop.
+/// How often a held lock refreshes its mtime (proper-lockfile uses stale / 2).
+const HEARTBEAT: Duration = Duration::from_secs(2);
+
+/// RAII guard. While held, a heartbeat thread keeps the lock directory's
+/// mtime fresh so other processes never see it as stale. On drop the lock
+/// directory is removed only if it is still ours: the random owner token in
+/// the sibling `<lock dir>.owner` file must match (a file inside the lock
+/// directory would make pi's `rmdir`-based stale break fail).
 #[derive(Debug)]
 pub struct AuthFileLock {
     lock_dir: PathBuf,
+    owner_path: PathBuf,
+    token: String,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    heartbeat: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AuthFileLock {
@@ -54,7 +67,7 @@ impl AuthFileLock {
         let lock_dir = lock_dir_for(auth_path);
         for _ in 0..2 {
             match std::fs::create_dir(&lock_dir) {
-                Ok(()) => return Ok(Some(Self { lock_dir })),
+                Ok(()) => return Ok(Some(Self::held(lock_dir))),
                 // Windows reports EPERM while a lock directory is being removed.
                 Err(err)
                     if matches!(
@@ -74,9 +87,57 @@ impl AuthFileLock {
     }
 }
 
+impl AuthFileLock {
+    /// Records ownership and starts the heartbeat for a freshly created lock dir.
+    fn held(lock_dir: PathBuf) -> Self {
+        let mut owner_path = lock_dir.as_os_str().to_os_string();
+        owner_path.push(".owner");
+        let owner_path = PathBuf::from(owner_path);
+        let token = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
+        let _ = std::fs::write(&owner_path, &token);
+
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let beat_dir = lock_dir.clone();
+        let heartbeat = std::thread::spawn(move || {
+            // Any message or a dropped sender ends the loop; only a timeout beats.
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(HEARTBEAT) {
+                touch(&beat_dir);
+            }
+        });
+        Self { lock_dir, owner_path, token, stop: Some(stop), heartbeat: Some(heartbeat) }
+    }
+
+    fn still_owner(&self) -> bool {
+        std::fs::read_to_string(&self.owner_path).is_ok_and(|current| current == self.token)
+    }
+}
+
 impl Drop for AuthFileLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.lock_dir);
+        drop(self.stop.take());
+        if let Some(handle) = self.heartbeat.take() {
+            let _ = handle.join();
+        }
+        if self.still_owner() {
+            let _ = std::fs::remove_dir(&self.lock_dir);
+            let _ = std::fs::remove_file(&self.owner_path);
+        }
+    }
+}
+
+/// Sets the directory's mtime to now (best effort).
+fn touch(dir: &Path) {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES, share all, FILE_FLAG_BACKUP_SEMANTICS (opens a directory).
+        options.access_mode(0x100).share_mode(7).custom_flags(0x0200_0000);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    if let Ok(handle) = options.open(dir) {
+        let _ = handle.set_modified(SystemTime::now());
     }
 }
 
@@ -118,6 +179,29 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let lock = AuthFileLock::try_acquire(&auth, Duration::from_millis(5)).unwrap();
         assert!(lock.is_some());
+    }
+
+    #[test]
+    fn held_lock_is_kept_fresh_by_the_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        let lock = AuthFileLock::acquire_blocking(&auth).unwrap();
+        std::thread::sleep(Duration::from_millis(4500));
+        let lock_dir = dir.path().join("auth.json.lock");
+        assert!(!is_stale(&lock_dir, Duration::from_secs(3)));
+        assert!(AuthFileLock::try_acquire(&auth, Duration::from_secs(3)).unwrap().is_none());
+        drop(lock);
+    }
+
+    #[test]
+    fn drop_does_not_remove_a_lock_another_process_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        let lock = AuthFileLock::acquire_blocking(&auth).unwrap();
+        // Simulate the lock having been broken and re-taken by someone else.
+        std::fs::write(dir.path().join("auth.json.lock.owner"), "someone-else").unwrap();
+        drop(lock);
+        assert!(dir.path().join("auth.json.lock").is_dir());
     }
 
     #[tokio::test]
