@@ -9,6 +9,7 @@ members = [
     "apps/cli",
     "apps/desktop-rs",
 ]
+default-members = ["apps/desktop-rs"]
 resolver = "2"
 
 [profile.release]

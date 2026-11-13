@@ -11,23 +11,23 @@
     {
       "name": "Run Locagens Desktop (No Debug)",
       "type": "node-terminal",
-      "command": "${workspaceFolder}/target/debug/locagens.exe",
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "cargo: build desktop (debug)"
+      "command": "cargo run -p locagens-desktop --bin locagens",
+      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-desktop --bin locagens" },
+      "cwd": "${workspaceFolder}"
     },
     {
       "name": "Run Locagens Desktop Release (No Debug)",
       "type": "node-terminal",
-      "command": "${workspaceFolder}/target/release/locagens.exe",
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "cargo: build desktop (release)"
+      "command": "cargo run --release -p locagens-desktop --bin locagens",
+      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run --release -p locagens-desktop --bin locagens" },
+      "cwd": "${workspaceFolder}"
     },
     {
       "name": "Run lcgn CLI (No Debug)",
       "type": "node-terminal",
-      "command": "${workspaceFolder}/target/debug/lcgn.exe",
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "cargo: build lcgn CLI (debug)"
+      "command": "cargo run -p locagens-cli --bin lcgn",
+      "windows": { "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-cli --bin lcgn" },
+      "cwd": "${workspaceFolder}"
     },
     {
       "name": "Debug Locagens Desktop (cppdbg / gdb)",
