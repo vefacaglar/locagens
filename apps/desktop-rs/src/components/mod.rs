@@ -26,38 +26,6 @@ pub fn status_label(status: &str) -> &'static str {
     }
 }
 
-/// Badge class for a run status.
-pub fn status_badge_class(status: &str) -> &'static str {
-    match status {
-        "done" => "badge ok",
-        "failed" => "badge err",
-        "cancelled" => "badge",
-        "awaiting_permission" | "awaiting_input" => "badge warn",
-        _ => "badge run",
-    }
-}
-
-/// UI label for a run mode.
-pub fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "accept_edits" => "Build",
-        "plan" => "Plan",
-        "auto" => "Full Access",
-        "chat" => "Chat",
-        "ask_permissions" => "Ask Permissions",
-        _ => "Other",
-    }
-}
-
-/// Mode badge class.
-pub fn mode_badge_class(mode: &str) -> &'static str {
-    match mode {
-        "plan" => "badge accent",
-        "auto" => "badge warn",
-        _ => "badge ok",
-    }
-}
-
 /// A run is "active" while its status is one of the live states.
 pub fn run_active(run: Option<&Run>) -> bool {
     run.map(|run| {

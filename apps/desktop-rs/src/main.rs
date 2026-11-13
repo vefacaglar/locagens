@@ -20,12 +20,24 @@ fn main() {
     set_core(std::sync::Arc::new(state));
 
     // 2. Launch the Dioxus desktop runtime.
-    let config = Config::new().with_window(
-        WindowBuilder::new()
-            .with_title("Locagens")
-            .with_resizable(true)
-            .with_inner_size(LogicalSize::new(1380.0, 860.0)),
-    );
+    let mut window = WindowBuilder::new()
+        .with_title("Locagens")
+        .with_resizable(true)
+        .with_inner_size(LogicalSize::new(1380.0, 860.0));
+    #[cfg(target_os = "macos")]
+    {
+        use dioxus::desktop::tao::dpi::LogicalPosition;
+        use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
+        window = window
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true)
+            .with_traffic_light_inset(LogicalPosition::new(14.0, 14.0));
+    }
+    let config = Config::new()
+        .with_disable_context_menu(true)
+        .with_menu(None)
+        .with_window(window);
     dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
 }
 
@@ -55,6 +67,8 @@ fn App() -> Element {
     let right_panel_tab: Signal<RightPanelTab> = use_signal(|| RightPanelTab::Plan);
     let status_toast: Signal<Option<String>> = use_signal(|| None);
     let prompt = use_signal(String::new);
+    let turn_diff: Signal<Option<(String, usize)>> = use_signal(|| None);
+    let spawned_agents: Signal<Vec<serde_json::Value>> = use_signal(Vec::new);
 
     let store = UiStore {
         dark_mode,
@@ -79,6 +93,8 @@ fn App() -> Element {
         right_panel_tab,
         status_toast,
         prompt,
+        turn_diff,
+        spawned_agents,
     };
     use_context_provider(|| store);
 

@@ -29,9 +29,18 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
     rsx! {
         div {
             class: "page-header",
+            // Draggable window titlebar strip (double-click to maximize).
+            onmousedown: move |_| {
+                dioxus::desktop::use_window().drag();
+            },
+            ondoubleclick: move |_| {
+                dioxus::desktop::use_window().toggle_maximized();
+            },
             h2 { "Settings" }
             button {
                 class: "subtle icon-btn",
+                // Clicks on the button must not start a window drag.
+                onmousedown: move |e| e.stop_propagation(),
                 onclick: move |_| {
                     let mut store: UiStore = use_context();
                     store.page.set(crate::state_ui::AppPage::Chat);

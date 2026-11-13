@@ -54,6 +54,25 @@ fn PermissionCard(request: Value) -> Element {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    // Multi-file patches report an explicit `files` array; surface it when
+    // there is no single `path`.
+    let affected_files: Vec<String> = preview
+        .as_ref()
+        .and_then(|preview| preview.get("files"))
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let display_path = if path.is_empty() && !affected_files.is_empty() {
+        affected_files.join(", ")
+    } else {
+        path.clone()
+    };
     let detail: String = match preview.as_ref() {
         Some(preview) => {
             let command = preview.get("command").and_then(Value::as_str);
@@ -78,9 +97,9 @@ fn PermissionCard(request: Value) -> Element {
                 .map(str::to_string)
                 .unwrap_or_else(|| {
                     if network.is_empty() {
-                        path.clone()
+                        display_path.clone()
                     } else {
-                        format!("{}  (network: {})", path, network)
+                        format!("{}  (network: {})", display_path, network)
                     }
                 })
         }
@@ -90,17 +109,26 @@ fn PermissionCard(request: Value) -> Element {
         }
     };
 
-    // Diff preview for file edits.
-    let diff_text: Option<String> = preview.as_ref().and_then(|preview| {
-        let old = preview.get("oldContent").and_then(Value::as_str);
-        let new = preview.get("newContent").and_then(Value::as_str);
-        match (old, new) {
-            (Some(old), Some(new)) => Some(pseudo_diff(Some(old), Some(new))),
-            (Some(old), None) => Some(pseudo_diff(Some(old), None)),
-            (None, Some(new)) => Some(pseudo_diff(None, Some(new))),
-            _ => None,
-        }
-    });
+    // Diff preview: a real unified `diff` (apply_patch) wins; otherwise the
+    // pseudo diff between old/new content.
+    let diff_text: Option<String> = preview
+        .as_ref()
+        .and_then(|preview| preview.get("diff"))
+        .and_then(Value::as_str)
+        .filter(|diff| !diff.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            preview.as_ref().and_then(|preview| {
+                let old = preview.get("oldContent").and_then(Value::as_str);
+                let new = preview.get("newContent").and_then(Value::as_str);
+                match (old, new) {
+                    (Some(old), Some(new)) => Some(pseudo_diff(Some(old), Some(new))),
+                    (Some(old), None) => Some(pseudo_diff(Some(old), None)),
+                    (None, Some(new)) => Some(pseudo_diff(None, Some(new))),
+                    _ => None,
+                }
+            })
+        });
 
     let busy = use_signal(|| false);
 
@@ -128,9 +156,9 @@ fn PermissionCard(request: Value) -> Element {
                 class: "pc-detail",
                 "The agent wants to run "
                 span { style: "font-weight:600", "{tool_name}" }
-                if !path.is_empty() {
+                if !display_path.is_empty() {
                     " on "
-                    span { style: "font-weight:600", "{path}" }
+                    span { style: "font-weight:600", "{display_path}" }
                 }
                 "."
             }
@@ -168,7 +196,7 @@ fn PermissionCard(request: Value) -> Element {
 
 /// Standalone diff renderer shared by cards.
 #[component]
-fn DiffViewInline(diff: String) -> Element {
+pub(crate) fn DiffViewInline(diff: String) -> Element {
     let lines: Vec<DiffLine> = parse_diff(&diff);
     rsx! {
         div {

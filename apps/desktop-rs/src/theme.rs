@@ -23,46 +23,47 @@ pub fn build_stylesheet(dark_mode: bool) -> String {
 /// of [`build_stylesheet`] so every platform's output is unit-testable.
 pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
     let (font_ui, font_mono, accent, accent_text, bg_app, bg_sidebar, bg_card, bg_hover, border, radius_ctrl, radius_card) = if platform == "macos" {
-        // macOS: vibrancy-inspired dark surfaces and system blue.
+        // macOS: obsidian/zinc layered surfaces over the system base and
+        // system blue accent (`bg_app` stays the platform baseline token).
         (
             "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"SF Pro Display\", system-ui, sans-serif",
             "\"SF Mono\", \"Menlo\", monospace",
             if dark_mode { "#0a84ff" } else { "#007aff" },
             if dark_mode { "#ffffff" } else { "#ffffff" },
             if dark_mode { "#1c1c1e" } else { "#f5f5f7" },
-            if dark_mode { "#242426" } else { "#ffffff" },
-            if dark_mode { "#2c2c2e" } else { "#fbfbfd" },
-            if dark_mode { "#323234" } else { "#e8e8ed" },
+            if dark_mode { "#0f1013" } else { "#f8f8fa" },
+            if dark_mode { "#1f2128" } else { "#ffffff" },
+            if dark_mode { "#272a33" } else { "#eceef2" },
             if dark_mode { "1px solid rgba(255, 255, 255, 0.1)" } else { "1px solid rgba(0, 0, 0, 0.08)" },
             "8px",
             "10px",
         )
     } else if platform == "windows" {
-        // Windows: Fluent Design / Mica.
+        // Windows: Fluent Design / Mica over the obsidian/zinc layer palette.
         (
             "\"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif",
             "\"Cascadia Code\", \"Consolas\", monospace",
             if dark_mode { "#60cdff" } else { "#0067c0" },
             if dark_mode { "#001a33" } else { "#ffffff" },
             if dark_mode { "#191919" } else { "#f3f3f3" },
-            if dark_mode { "#202020" } else { "#fbfbfb" },
-            if dark_mode { "#272727" } else { "#ffffff" },
-            if dark_mode { "#2f2f2f" } else { "#eaeaea" },
+            if dark_mode { "#0f1013" } else { "#f8f8fa" },
+            if dark_mode { "#1f2128" } else { "#ffffff" },
+            if dark_mode { "#272a33" } else { "#eceef2" },
             if dark_mode { "1px solid rgba(255, 255, 255, 0.08)" } else { "1px solid rgba(0, 0, 0, 0.08)" },
             "6px",
             "8px",
         )
     } else {
-        // Linux / other: neutral dark-first style.
+        // Linux / other: neutral dark-first style over the shared palette.
         (
             "system-ui, \"Ubuntu\", \"Cantarell\", sans-serif",
             "\"JetBrains Mono\", \"DejaVu Sans Mono\", monospace",
             if dark_mode { "#4493f8" } else { "#1a73e8" },
             "#ffffff",
             if dark_mode { "#191919" } else { "#f3f3f3" },
-            if dark_mode { "#202020" } else { "#fbfbfb" },
-            if dark_mode { "#272727" } else { "#ffffff" },
-            if dark_mode { "#2f2f2f" } else { "#eaeaea" },
+            if dark_mode { "#0f1013" } else { "#f8f8fa" },
+            if dark_mode { "#1f2128" } else { "#ffffff" },
+            if dark_mode { "#272a33" } else { "#eceef2" },
             if dark_mode { "1px solid rgba(255, 255, 255, 0.08)" } else { "1px solid rgba(0, 0, 0, 0.08)" },
             "6px",
             "8px",
@@ -75,14 +76,42 @@ pub fn build_stylesheet_for(platform: &str, dark_mode: bool) -> String {
         ("#1a1a1a", "#4a4a4a", "#777777", "0 4px 14px rgba(0, 0, 0, 0.08)")
     };
 
-    let focus_ring = if platform == "windows" {
+    // Modern conversation column tokens: obsidian canvas (dark) / airy paper
+    // (light) plus the user bubble surface.
+    let (chat_canvas, _user_bubble_bg, _user_bubble_border, _reasoning_border, _reasoning_bg) = if dark_mode {
+        (
+            "#111317".to_string(),
+            "#222733".to_string(),
+            "1px solid rgba(255, 255, 255, 0.1)".to_string(),
+            "1px solid rgba(255, 255, 255, 0.06)".to_string(),
+            "rgba(255, 255, 255, 0.02)".to_string(),
+        )
+    } else {
+        (
+            "#f6f7f9".to_string(),
+            format!("color-mix(in srgb, {accent} 10%, #ffffff)"),
+            format!("1px solid color-mix(in srgb, {accent} 25%, transparent)"),
+            "1px solid rgba(0, 0, 0, 0.06)".to_string(),
+            "rgba(0, 0, 0, 0.02)".to_string(),
+        )
+    };
+
+    let _focus_ring = if platform == "windows" {
         format!("0 0 0 2px {bg_app}, 0 0 0 4px {accent}")
     } else {
         format!("0 0 0 3px color-mix(in srgb, {accent} 40%, transparent)")
     };
 
+    // On macOS the traffic lights sit at x: 14..72 inside the full-size
+    // content view, so the brand strip's left padding must clear them.
+    let sidebar_brand_padding = if platform == "macos" {
+        "0 10px 0 80px"
+    } else {
+        "0 12px 0 14px"
+    };
+
     format!(r#"
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }}
 html, body {{ height: 100%; overflow: hidden; }}
 body {{
   font-family: {font_ui};
@@ -90,10 +119,30 @@ body {{
   color: {text};
   background: {bg_app};
   -webkit-font-smoothing: antialiased;
-  user-select: text;
+  user-select: none;
+  -webkit-user-select: none;
   cursor: default;
 }}
+#main {{ height: 100vh; width: 100vw; display: flex; overflow: hidden; }}
 code, pre, .mono {{ font-family: {font_mono}; }}
+
+/* Selectable text: chat content, alerts and inputs only. */
+.msg-user .bubble, .msg-user .bubble *,
+.msg-assistant .bubble, .msg-assistant .bubble *,
+.reasoning-panel .collapsible-body,
+.tool-output, .diff-view, .diff-line,
+.toast,
+.permission-card .pc-detail, .permission-card .pc-pathbox,
+.question-card .qc-question,
+.badge.err, .badge.warn {{
+  user-select: text;
+  -webkit-user-select: text;
+}}
+input, textarea {{
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}}
 
 /* ---------------- shell layout ---------------- */
 .app-shell {{
@@ -102,8 +151,8 @@ code, pre, .mono {{ font-family: {font_mono}; }}
   overflow: hidden;
 }}
 .sidebar {{
-  width: 280px; min-width: 280px; height: 100%;
-  background: {bg_sidebar}; border-right: {border};
+  width: 264px; min-width: 264px; height: 100%;
+  background: {bg_sidebar}; border-right: none;
   display: flex; flex-direction: column;
 }}
 .main-column {{
@@ -113,56 +162,59 @@ code, pre, .mono {{ font-family: {font_mono}; }}
 }}
 .right-panel {{
   width: 340px; min-width: 340px; height: 100%;
-  background: {bg_sidebar}; border-left: {border};
+  background: {bg_sidebar}; border-left: none;
   display: flex; flex-direction: column;
   overflow: hidden;
 }}
 
 /* ---------------- generic controls ---------------- */
 button, .btn {{
-  font: inherit; color: {text};
-  background: {bg_card};
-  border: {border};
-  border-radius: {radius_ctrl};
-  padding: 6px 12px;
+  font: inherit; color: {text_secondary}; background: transparent;
+  border: none; border-radius: 6px;
+  -webkit-appearance: none; appearance: none;
+  padding: 5px 10px;
   cursor: pointer;
-  transition: background 0.12s ease, opacity 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
 }}
-button:hover {{ background: {bg_hover}; }}
+button:hover {{ background: transparent; color: {text}; }}
 button:active {{ opacity: 0.8; }}
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {{
-  outline: none; box-shadow: {focus_ring};
+  outline: none; box-shadow: none;
 }}
 button.primary {{
-  background: {accent}; color: {accent_text};
-  border: 1px solid transparent; font-weight: 600;
+  background: {accent}; color: {accent_text}; border: none;
+  border-radius: 8px; padding: 5px 13px; font-weight: 500;
 }}
-button.primary:hover {{ filter: brightness(1.08); }}
+button.primary:hover {{ background: {accent}; color: {accent_text}; filter: brightness(1.08); }}
 button.subtle {{ background: transparent; border-color: transparent; color: {text_secondary}; }}
-button.subtle:hover {{ background: {bg_hover}; color: {text}; }}
+button.subtle:hover {{ background: transparent; color: {text}; }}
 button.danger {{ color: #ff8a8a; }}
-button.icon-btn {{ padding: 4px 8px; line-height: 1; }}
+button.icon-btn {{ padding: 2px 6px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }}
 button:disabled {{ opacity: 0.45; cursor: default; }}
 
 input, textarea, select {{
   font: inherit; color: {text};
-  background: {bg_card};
-  border: {border};
-  border-radius: {radius_ctrl};
-  padding: 6px 10px;
+  background: transparent; border: none; border-radius: 6px;
+  padding: 5px 8px;
   outline: none;
+  -webkit-appearance: none; appearance: none;
 }}
 input::placeholder, textarea::placeholder {{ color: {text_tertiary}; }}
-select {{ padding: 5px 8px; cursor: pointer; }}
+select {{
+  appearance: none; -webkit-appearance: none;
+  color: {text_tertiary}; font-size: 12px;
+  padding: 3px 6px; cursor: pointer;
+}}
+select:hover {{ color: {text}; background: transparent; }}
 label {{ color: {text_secondary}; font-size: 12px; }}
 
 /* ---------------- badges & pills ---------------- */
 .badge {{
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 8px; border-radius: 999px;
-  font-size: 11px; font-weight: 600;
-  background: {bg_hover}; color: {text_secondary};
-  border: {border};
+  background: transparent; border: none;
+  padding: 1px 4px;
+  font-size: 11px; font-weight: 500;
+  color: {text_tertiary};
   white-space: nowrap;
 }}
 .badge.accent {{ background: color-mix(in srgb, {accent} 18%, transparent); color: {accent}; border-color: transparent; }}
@@ -171,10 +223,10 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 .badge.err {{ color: #ff8a8a; }}
 .badge.run {{ color: {accent}; }}
 .pill {{
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px; border-radius: 999px;
-  background: {bg_hover}; border: {border};
-  font-size: 11.5px; color: {text_secondary};
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: none;
+  padding: 1px 4px;
+  font-size: 11px; font-weight: 500; color: {text_tertiary};
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }}
 .status-dot {{
@@ -190,88 +242,267 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 
 /* ---------------- sidebar ---------------- */
 .sidebar-brand {{
-  padding: 14px 14px 10px;
-  display: flex; flex-direction: column; gap: 10px;
-  border-bottom: {border};
+  height: 44px; padding: {sidebar_brand_padding};
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: none;
+  flex: none;
 }}
-.brand-row {{ display: flex; align-items: center; gap: 8px; }}
-.brand-title {{ font-size: 17px; font-weight: 700; letter-spacing: 0.2px; flex: 1; }}
-.os-badge {{ font-size: 10.5px; padding: 2px 8px; }}
-.sidebar-actions {{ display: flex; gap: 8px; }}
-.sidebar-actions button {{ flex: 1; }}
-.sidebar-search {{ padding: 10px 12px 6px; }}
-.sidebar-search input {{ width: 100%; }}
+.brand-mark {{ font-size: 13px; color: {accent}; line-height: 1; flex: none; }}
+.brand-title {{ font-size: 14px; font-weight: 600; letter-spacing: -0.2px; color: {text}; flex: 1; min-width: 0; }}
+.sidebar-toolbar {{
+  display: flex; align-items: center; gap: 6px; margin-left: auto;
+  flex: none;
+}}
+.sidebar-toolbar button {{
+  width: 26px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: {text_tertiary}; flex: none;
+}}
+.sidebar-toolbar button:hover {{ background: transparent; color: {text}; }}
+.sidebar-toolbar button:disabled {{ opacity: 0.35; cursor: default; }}
+.sidebar-top-controls {{
+  padding: 6px 12px 8px;
+  display: flex; flex-direction: column; gap: 2px;
+  flex: none;
+}}
+.sidebar .new-conv-btn {{
+  width: 100%; height: 34px; min-height: 34px; max-height: 34px;
+  padding: 0 12px; margin-bottom: 6px;
+  display: flex; align-items: center; justify-content: flex-start; gap: 8px;
+  border-radius: 8px; font-size: 13px; font-weight: 500; color: {text};
+  background: color-mix(in srgb, {text} 5%, transparent) !important;
+  border: 1px solid color-mix(in srgb, {text} 8%, transparent) !important;
+}}
+.sidebar .new-conv-btn:hover {{
+  background: color-mix(in srgb, {text} 8%, transparent) !important;
+  color: {text};
+}}
+.sidebar .sidebar-nav-item, .sidebar-footer button {{
+  width: 100%; height: 30px; min-height: 30px; max-height: 30px;
+  padding: 0 10px;
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  font-size: 13px; font-weight: 500; color: {text_secondary};
+  background: transparent !important; border: none !important; border-radius: 8px;
+  text-align: left; white-space: nowrap;
+}}
+.sidebar .sidebar-nav-item:hover, .sidebar-footer button:hover {{
+  background: transparent !important; color: {text};
+}}
+.sidebar .sidebar-nav-item.active, .sidebar-footer button.active {{
+  color: {text}; font-weight: 600;
+}}
+.sidebar-nav-item.active .sidebar-nav-icon {{ color: {accent}; }}
+.sidebar-nav-icon {{
+  width: 16px; display: inline-flex; align-items: center; justify-content: center;
+  color: {text_tertiary}; flex: none;
+}}
+.sidebar-search {{ flex: none; }}
+.sidebar-search input {{
+  width: 100%; height: 28px; font-size: 12.5px;
+  background: transparent; border: none; padding: 0 8px; border-radius: 0;
+  color: {text};
+}}
+.sidebar-search input:focus {{ background: transparent; border: none; }}
 .sidebar-tree {{
-  flex: 1; overflow-y: auto; padding: 4px 8px 12px;
+  flex: 1; overflow-y: auto; padding: 0 8px 12px;
   scrollbar-width: thin;
 }}
-.project-group {{ margin-top: 8px; }}
-.project-row {{
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 6px; border-radius: {radius_ctrl};
-  color: {text_secondary}; font-weight: 600; font-size: 12.5px;
-  cursor: pointer;
+.sidebar-section-header {{
+  height: 28px; padding: 0 10px; margin-top: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; font-weight: 500; color: {text_tertiary};
+  flex: none;
 }}
-.project-row:hover {{ background: {bg_hover}; color: {text}; }}
+.sidebar-section-actions {{ display: flex; align-items: center; gap: 2px; }}
+.sidebar-section-header .icon-btn {{
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: {text_tertiary}; flex: none;
+}}
+.sidebar-section-header .icon-btn:hover {{ background: transparent; color: {text}; }}
+.project-group {{ margin-top: 0; }}
+.project-row {{
+  position: relative;
+  height: 30px; min-height: 30px; max-height: 30px;
+  padding: 0 8px 0 10px; border-radius: 8px;
+  display: flex; align-items: center; gap: 8px;
+  color: {text_secondary}; font-size: 13px; font-weight: 500;
+  cursor: pointer; background: transparent;
+}}
+.project-row:hover {{ background: transparent; color: {text}; }}
+.project-row.selected {{ background: transparent; color: {text}; font-weight: 500; }}
+.project-folder-icon {{
+  width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
+  color: {text_tertiary}; flex: none;
+}}
 .project-row .project-name {{
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }}
+.project-menu-btn, button.project-menu-btn,
+.project-new-btn, button.project-new-btn {{
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: {text_tertiary}; opacity: 0; flex: none;
+  background: transparent; border: none;
+}}
+.project-row:hover .project-menu-btn,
+.project-row:hover .project-new-btn {{ color: {text_tertiary}; }}
+.project-row:hover .project-menu-btn:hover,
+.project-row:hover .project-new-btn:hover {{ color: {text}; }}
+.project-row:hover .project-menu-btn,
+.project-row:hover .project-new-btn,
+.project-row.menu-open .project-menu-btn,
+.project-row.menu-open .project-new-btn {{ opacity: 1; }}
+.project-runs {{
+  margin-left: 0; padding-left: 0;
+  display: flex; flex-direction: column; gap: 1px;
+  margin-top: 0;
+}}
 .run-item {{
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 6px 6px 16px; border-radius: {radius_ctrl};
-  cursor: pointer; font-size: 12.5px; color: {text_secondary};
+  position: relative;
+  height: 32px; min-height: 32px; max-height: 32px;
+  padding: 0 8px 0 28px; border-radius: 8px;
+  display: flex; align-items: center; gap: 6px;
+  cursor: pointer; font-size: 13px; color: {text_secondary};
+  background: transparent;
 }}
-.run-item:hover {{ background: {bg_hover}; color: {text}; }}
-.run-item.active {{ background: color-mix(in srgb, {accent} 14%, transparent); color: {text}; }}
-.run-item .run-title {{ flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.run-item .run-model {{ font-size: 10px; color: {text_tertiary}; }}
-.run-item .run-delete {{ visibility: hidden; }}
-.run-item:hover .run-delete {{ visibility: visible; }}
+.run-item:hover {{ background: color-mix(in srgb, {text} 4%, transparent); color: {text}; }}
+.run-item.active {{
+  background: color-mix(in srgb, {text} 9%, transparent) !important;
+  color: {text}; font-weight: 500;
+}}
+.run-item.active .run-title {{ color: {text}; font-weight: 500; }}
+.run-item .status-dot {{ width: 6px; height: 6px; flex: none; }}
+.run-item .run-title {{
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;
+}}
+.run-item .run-age {{
+  font-size: 11.5px; color: {text_tertiary}; flex: none; padding-right: 4px;
+}}
+.run-item .run-action, button.run-action {{
+  display: none; width: 22px; height: 22px; padding: 0;
+  align-items: center; justify-content: center;
+  color: {text_tertiary}; flex: none;
+  background: transparent; border: none;
+}}
+.run-item:hover .run-age, .run-item.active .run-age, .run-item.menu-open .run-age {{
+  display: none;
+}}
+.run-item:hover .run-action, .run-item.active .run-action, .run-item.menu-open .run-action {{
+  display: inline-flex;
+}}
+.run-item:hover .run-action:hover {{ color: {text}; }}
+.see-all-btn {{
+  height: 28px; min-height: 28px; padding: 0 8px 0 28px;
+  display: flex; align-items: center; justify-content: flex-start;
+  font-size: 12px; color: {text_tertiary};
+  background: transparent !important; border: none !important;
+  text-align: left;
+}}
+.see-all-btn:hover {{ background: transparent !important; color: {text_secondary}; }}
+.row-context-menu {{
+  position: absolute; right: 6px; top: 26px; z-index: 50;
+  min-width: 128px; padding: 4px;
+  background: {bg_card}; border: {border};
+  border-radius: 8px; box-shadow: {shadow};
+  display: flex; flex-direction: column; gap: 1px;
+}}
+.sidebar .row-context-menu button {{
+  width: 100%; height: 26px; padding: 0 10px;
+  display: flex; align-items: center; justify-content: flex-start;
+  font-size: 12px; font-weight: 500; text-align: left;
+  background: transparent !important; border: none !important; border-radius: 5px;
+  color: {text};
+}}
+.sidebar .row-context-menu button:hover {{
+  background: {bg_hover} !important;
+}}
+.sidebar .row-context-menu button.danger {{
+  color: #ff8a8a;
+}}
+.sidebar button, .sidebar input {{
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  -webkit-appearance: none;
+  appearance: none;
+}}
 .sidebar-footer {{
-  border-top: {border}; padding: 8px 12px;
-  display: flex; gap: 8px;
+  border-top: none; padding: 8px 12px 12px;
+  display: flex; flex-direction: column;
+  flex: none;
 }}
-.sidebar-footer button {{ flex: 1; font-size: 12.5px; }}
-.sidebar-footer button.active {{ background: {bg_hover}; color: {accent}; font-weight: 600; }}
 
 /* ---------------- chat header ---------------- */
 .chat-header {{
-  padding: 12px 18px;
-  border-bottom: {border};
-  display: flex; align-items: center; gap: 10px;
-  background: {bg_sidebar};
+  height: 44px; padding: 0 16px;
+  border-bottom: none;
+  background: transparent;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
   flex: none;
 }}
-.chat-title {{ font-size: 14.5px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-.chat-header-meta {{ display: flex; align-items: center; gap: 8px; }}
+.chat-title {{ font-size: 14.5px; font-weight: 600; flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.chat-header-meta {{ display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden; }}
+.chat-header-meta .pill {{ max-width: 220px; flex-shrink: 1; }}
+.chat-header-actions {{ display: flex; align-items: center; gap: 4px; flex: none; }}
+.chat-header-actions button {{ flex: none; white-space: nowrap; }}
 
-/* ---------------- chat thread ---------------- */
-.chat-area {{ flex: 1; display: flex; flex-direction: column; min-height: 0; }}
+/* ---------------- chat thread (centered conversation column) ---------------- */
+.chat-area {{
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  background: {chat_canvas};
+}}
 #chat-scroll {{
   flex: 1; overflow-y: auto;
-  padding: 18px 22px 12px;
+  padding: 24px 28px 16px;
   scrollbar-width: thin;
-  display: flex; flex-direction: column; gap: 14px;
+  display: flex; flex-direction: column; gap: 18px;
 }}
-.msg-user {{ align-self: flex-end; max-width: 78%; }}
+#chat-scroll > * {{
+  flex-shrink: 0; max-width: 800px; width: 100%;
+  margin-left: auto; margin-right: auto;
+}}
+.msg-user {{ display: flex; justify-content: flex-end; }}
 .msg-user .bubble {{
-  background: color-mix(in srgb, {accent} 16%, transparent);
-  border: 1px solid color-mix(in srgb, {accent} 35%, transparent);
-  border-radius: {radius_card};
-  padding: 10px 14px;
+  max-width: 78%;
+  background: color-mix(in srgb, {text} 6%, transparent);
+  border: none;
+  border-radius: 14px;
+  padding: 8px 14px;
+  font-size: 13.5px;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }}
-.msg-assistant {{ align-self: stretch; max-width: 92%; display: flex; flex-direction: column; gap: 8px; }}
+.msg-assistant {{ display: flex; flex-direction: column; gap: 8px; }}
 .msg-assistant .bubble {{
-  background: {bg_card}; border: {border};
-  border-radius: {radius_card};
-  padding: 10px 14px;
+  background: transparent; border: none;
+  padding: 2px 0;
+  font-size: 14px;
+  line-height: 1.65;
   word-break: break-word;
 }}
 .msg-meta {{ display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: {text_tertiary}; padding: 0 2px; }}
-.msg-empty {{ margin: auto; text-align: center; color: {text_tertiary}; display: flex; flex-direction: column; gap: 8px; padding: 40px 0; }}
-.msg-empty .big {{ font-size: 15px; font-weight: 600; color: {text_secondary}; }}
+.msg-empty {{
+  margin: auto; text-align: center; color: {text_tertiary};
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 36px 0; align-items: center;
+}}
+.msg-empty .big {{ font-size: 20px; font-weight: 700; color: {text}; letter-spacing: -0.2px; }}
+.starter-grid {{
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 8px; max-width: 400px; width: 100%;
+}}
+.starter-card {{
+  text-align: left; padding: 6px 8px; border-radius: 7px;
+  background: transparent; border: none;
+  font-size: 12.5px; color: {text_secondary}; cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}}
+.starter-card:hover {{
+  background: transparent; color: {text};
+  border: none;
+}}
 
 /* markdown content */
 .bubble.md p {{ margin: 0 0 8px; }}
@@ -292,34 +523,27 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 .bubble.md a {{ color: {accent}; }}
 
 /* collapsible panels */
-.collapsible {{ border: {border}; border-radius: {radius_ctrl}; background: {bg_sidebar}; overflow: hidden; }}
-.collapsible > .collapsible-header {{
-  display: flex; align-items: center; gap: 8px;
-  width: 100%; text-align: left;
+.collapsible, .reasoning-panel, .tool-card {{ border: none; background: transparent; border-radius: 0; overflow: visible; }}
+.collapsible > .collapsible-header, .tool-card .tool-head {{
+  height: 24px; min-height: 24px; width: auto;
+  display: inline-flex; align-items: center; gap: 6px;
   background: transparent; border: none;
-  padding: 7px 12px; font-size: 12px; font-weight: 600; color: {text_secondary};
+  padding: 0; font-size: 12px; color: {text_tertiary};
   cursor: pointer;
 }}
-.collapsible > .collapsible-header:hover {{ background: {bg_hover}; color: {text}; }}
-.collapsible > .collapsible-body {{ padding: 8px 12px 10px; border-top: {border}; }}
+.collapsible > .collapsible-header:hover, .tool-card .tool-head:hover {{ background: transparent; color: {text_secondary}; }}
+.collapsible > .collapsible-body, .tool-card .tool-body {{ border-top: none; padding: 4px 0 6px 12px; }}
 .reasoning-panel .collapsible-body {{ font-size: 12.5px; color: {text_secondary}; white-space: pre-wrap; max-height: 260px; overflow-y: auto; }}
 
 /* tool groups */
 .tool-group {{ display: flex; flex-direction: column; gap: 6px; }}
-.tool-card {{ border: {border}; border-radius: {radius_ctrl}; background: {bg_sidebar}; }}
-.tool-card .tool-head {{
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; cursor: pointer; font-size: 12px;
-}}
-.tool-card .tool-head:hover {{ background: {bg_hover}; }}
 .tool-card .tool-name {{ font-family: {font_mono}; font-size: 11.5px; font-weight: 600; }}
-.tool-card .tool-args {{ flex: 1; color: {text_tertiary}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: {font_mono}; font-size: 11px; }}
-.tool-card .tool-body {{ padding: 6px 10px 10px; border-top: {border}; }}
+.tool-card .tool-args {{ color: {text_tertiary}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: {font_mono}; font-size: 11px; }}
+.tool-status {{ font-size: 11px; color: {text_tertiary}; }}
 .tool-output {{
   font-family: {font_mono}; font-size: 11.5px;
-  background: {bg_app}; border: {border};
-  border-radius: {radius_ctrl};
-  padding: 8px 10px; max-height: 240px; overflow: auto;
+  background: transparent; border: none;
+  padding: 4px 0; max-height: 240px; overflow: auto;
   white-space: pre-wrap; word-break: break-word; color: {text_secondary};
 }}
 .coder-group {{ border: 1px solid color-mix(in srgb, {accent} 35%, transparent); border-radius: {radius_card}; background: {bg_card}; overflow: hidden; }}
@@ -345,7 +569,7 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 
 /* ---------------- permission & question cards ---------------- */
 .permission-card, .question-card {{
-  flex: none; margin: 0 22px 10px;
+  flex: none; max-width: 800px; width: calc(100% - 40px); margin: 0 auto 12px;
   border: 1px solid color-mix(in srgb, {accent} 45%, transparent);
   border-radius: {radius_card};
   background: {bg_card};
@@ -371,28 +595,154 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 .qc-option.selected {{ border-color: {accent}; background: color-mix(in srgb, {accent} 12%, transparent); }}
 .qc-note input {{ width: 100%; }}
 
-/* ---------------- composer ---------------- */
+/* ---------------- floating composer card ---------------- */
 .composer {{
-  flex: none; padding: 10px 22px 16px;
-  border-top: {border};
-  background: {bg_sidebar};
+  position: relative; flex: none; max-width: 800px; width: calc(100% - 40px);
+  margin: 0 auto 18px; padding: 12px 14px 10px;
+  background: color-mix(in srgb, {text} 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, {text} 7%, transparent);
+  border-radius: 16px; box-shadow: none;
   display: flex; flex-direction: column; gap: 8px;
 }}
-.composer-row-top {{ display: flex; gap: 8px; align-items: flex-end; }}
+.composer:focus-within {{
+  border: 1px solid color-mix(in srgb, {text} 12%, transparent);
+  background: color-mix(in srgb, {text} 4.5%, transparent);
+}}
 .composer textarea {{
-  flex: 1; resize: none; min-height: 46px; max-height: 180px;
-  padding: 10px 12px; border-radius: {radius_ctrl};
-  line-height: 1.45;
+  flex: 1; background: transparent; border: none; box-shadow: none;
+  padding: 4px 2px; min-height: 44px; max-height: 180px;
+  font-size: 14px; line-height: 1.5; resize: none; width: 100%;
 }}
-.composer-quickbar {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }}
-.composer-quickbar .chip {{
-  font-size: 11px; padding: 3px 9px; border-radius: 999px;
-  background: {bg_hover}; border: {border}; color: {text_secondary}; cursor: pointer;
+.composer textarea:focus-visible {{ box-shadow: none; }}
+.composer-row-bottom {{
+  position: relative; display: flex; gap: 8px; align-items: center;
+  min-height: 30px; flex-wrap: nowrap;
 }}
-.composer-quickbar .chip:hover {{ color: {accent}; border-color: {accent}; }}
-.composer-files {{ display: flex; gap: 6px; flex-wrap: wrap; }}
-.composer-row-bottom {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
-.composer-row-bottom select {{ font-size: 12px; }}
+.composer-row-top {{
+  display: flex; gap: 8px; align-items: center;
+}}
+.composer-row-top input {{
+  flex: 1; min-width: 0;
+}}
+.composer-row-top > button {{
+  flex: none; white-space: nowrap;
+}}
+.composer-plus-btn {{
+  width: 26px; height: 26px; padding: 0; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: {text_secondary}; background: transparent; flex: none;
+}}
+.composer-plus-btn:hover {{
+  color: {text}; background: color-mix(in srgb, {text} 6%, transparent);
+}}
+.popover-backdrop {{
+  position: fixed; inset: 0; z-index: 45;
+  background: transparent;
+}}
+.composer-context-menu {{
+  position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 60;
+  width: 210px; padding: 6px;
+  background: {bg_card}; border: {border}; border-radius: 12px; box-shadow: {shadow};
+  display: flex; flex-direction: column; gap: 2px;
+}}
+.ccm-header {{
+  font-size: 11.5px; font-weight: 500; color: {text_tertiary};
+  padding: 4px 10px 6px;
+  display: flex; align-items: center; justify-content: space-between;
+}}
+.ccm-header button {{ padding: 0; font-size: 11.5px; color: {text_secondary}; }}
+.ccm-search {{
+  width: 100%; height: 28px; padding: 0 10px; margin-bottom: 4px;
+  font-size: 12.5px; color: {text};
+  background: color-mix(in srgb, {text} 5%, transparent); border-radius: 6px;
+}}
+.ccm-list {{
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 200px; overflow-y: auto; scrollbar-width: thin;
+}}
+.ccm-empty {{ padding: 8px 10px; font-size: 12px; color: {text_tertiary}; }}
+.ccm-item {{
+  width: 100%; min-height: 30px; padding: 0 10px; border-radius: 7px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; font-weight: 400; color: {text_secondary};
+  background: transparent; border: none; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.ccm-item:hover {{ background: {bg_hover}; color: {text}; }}
+.composer-dropdown {{
+  position: relative; display: inline-flex; align-items: center;
+}}
+.composer-dropdown.open {{
+  z-index: 55;
+}}
+.composer-select-btn {{
+  height: 26px; padding: 0 7px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 500; color: {text_secondary};
+  background: transparent; border: none; white-space: nowrap;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}}
+.composer-select-btn:hover, .composer-select-btn.open {{
+  color: {text}; background: color-mix(in srgb, {text} 6%, transparent);
+}}
+.composer-context-menu.align-right {{
+  left: auto; right: 0;
+}}
+.ccm-item.active {{
+  color: {text}; font-weight: 600;
+  background: color-mix(in srgb, {text} 6%, transparent);
+}}
+.ccm-item-label {{
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.ccm-divider {{
+  height: 1px; margin: 4px 6px;
+  background: color-mix(in srgb, {text} 8%, transparent);
+}}
+.ccm-submenu-row {{
+  position: relative;
+}}
+.composer-context-menu.model-menu {{
+  width: 280px;
+}}
+.ccm-list.model-list {{
+  max-height: min(320px, calc(100vh - 180px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}}
+.ccm-list::-webkit-scrollbar {{
+  width: 5px;
+}}
+.ccm-list::-webkit-scrollbar-thumb {{
+  background: color-mix(in srgb, {text} 18%, transparent);
+  border-radius: 999px;
+}}
+.ccm-model-name {{
+  color: {text}; font-weight: 500;
+}}
+.ccm-model-effort {{
+  margin-left: 8px; font-size: 12px; font-weight: 400; color: {text_tertiary};
+}}
+.ccm-row-chevron {{
+  display: inline-flex; align-items: center; color: {text_tertiary}; opacity: 0.75;
+}}
+.composer-flyout-right {{
+  position: fixed; z-index: 65;
+  padding-left: 6px;
+}}
+.composer-flyout-card {{
+  width: 150px; padding: 6px;
+  background: {bg_card}; border: {border}; border-radius: 12px; box-shadow: {shadow};
+  display: flex; flex-direction: column; gap: 2px;
+}}
+.composer-send-btn {{
+  width: 30px; height: 30px; min-width: 30px; min-height: 30px; padding: 0;
+  border-radius: 50%; background: {accent}; color: {accent_text}; border: none;
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+}}
+.composer-send-btn:hover:not(:disabled) {{ background: {accent}; filter: brightness(1.08); }}
+.composer-send-btn:disabled {{ opacity: 0.35; cursor: default; }}
 .composer-spacer {{ flex: 1; }}
 .composer-hint {{ font-size: 11px; color: {text_tertiary}; }}
 
@@ -414,7 +764,7 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 
 /* ---------------- right panel ---------------- */
 .right-panel-tabs {{
-  display: flex; border-bottom: {border}; flex: none;
+  height: 44px; display: flex; align-items: stretch; border-bottom: none; flex: none;
 }}
 .right-panel-tabs button {{
   flex: 1; border: none; border-radius: 0;
@@ -422,12 +772,12 @@ label {{ color: {text_secondary}; font-size: 12px; }}
   font-size: 12px; color: {text_secondary};
   border-bottom: 2px solid transparent;
 }}
-.right-panel-tabs button:hover {{ background: {bg_hover}; }}
+.right-panel-tabs button:hover {{ background: transparent; color: {text}; }}
 .right-panel-tabs button.active {{ color: {accent}; border-bottom-color: {accent}; font-weight: 600; }}
 .right-panel-body {{ flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }}
-.panel-card {{ background: {bg_card}; border: {border}; border-radius: {radius_ctrl}; padding: 10px 12px; font-size: 12.5px; }}
+.panel-card {{ background: transparent; border: none; padding: 4px 0; font-size: 12.5px; display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow: hidden; }}
 .panel-card .mono {{ font-size: 11.5px; color: {text_secondary}; }}
-.panel-section-title {{ font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: {text_tertiary}; }}
+.panel-section-title {{ font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: {text_tertiary}; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }}
 .plan-task {{ display: flex; gap: 8px; align-items: flex-start; padding: 3px 0; }}
 .plan-task .task-status {{ font-size: 11px; color: {text_tertiary}; flex: none; width: 78px; }}
 .plan-task .task-text {{ flex: 1; }}
@@ -436,29 +786,34 @@ label {{ color: {text_secondary}; font-size: 12px; }}
 
 /* ---------------- settings & usage ---------------- */
 .page-header {{
-  padding: 14px 22px; border-bottom: {border};
-  background: {bg_sidebar};
+  height: 44px; min-height: 44px; max-height: 44px; padding: 0 18px;
+  border-bottom: none;
+  background: transparent;
   display: flex; align-items: center; gap: 10px;
+  flex: none;
 }}
 .page-header h2 {{ font-size: 16px; flex: 1; }}
 .settings-layout {{ flex: 1; display: flex; min-height: 0; }}
 .settings-nav {{
-  width: 180px; border-right: {border}; padding: 12px 8px;
+  width: 180px; border-right: none; padding: 12px 8px;
   display: flex; flex-direction: column; gap: 2px; flex: none;
 }}
 .settings-nav button {{
-  text-align: left; background: transparent; border: none;
-  padding: 8px 12px; border-radius: {radius_ctrl}; font-size: 12.5px; color: {text_secondary};
+  height: 28px; min-height: 28px; max-height: 28px;
+  padding: 0 10px;
+  display: flex; align-items: center; width: 100%; text-align: left;
+  background: transparent; border: none; font-size: 12.5px; color: {text_secondary};
+  white-space: nowrap;
 }}
-.settings-nav button:hover {{ background: {bg_hover}; color: {text}; }}
-.settings-nav button.active {{ background: {bg_hover}; color: {accent}; font-weight: 600; }}
+.settings-nav button:hover {{ background: transparent; color: {text}; }}
+.settings-nav button.active {{ background: transparent; color: {accent}; font-weight: 600; }}
 .settings-content {{ flex: 1; overflow-y: auto; padding: 18px 24px; display: flex; flex-direction: column; gap: 12px; scrollbar-width: thin; }}
 .usage-layout {{ flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 18px 24px; gap: 14px; overflow-y: auto; }}
 .usage-metrics {{ display: flex; gap: 12px; flex-wrap: wrap; }}
 .metric-card {{
   flex: 1; min-width: 150px;
-  background: {bg_card}; border: {border};
-  border-radius: {radius_card}; padding: 12px 16px;
+  background: transparent; border: none;
+  padding: 6px 4px;
   display: flex; flex-direction: column; gap: 4px;
 }}
 .metric-card .metric-value {{ font-size: 20px; font-weight: 700; }}
@@ -470,7 +825,9 @@ table.data-table th, table.data-table td {{
 }}
 table.data-table th {{ color: {text_tertiary}; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; position: sticky; top: 0; background: {bg_app}; }}
 table.data-table tr:hover td {{ background: {bg_hover}; }}
-.settings-row {{ display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: {border}; border-radius: {radius_ctrl}; background: {bg_card}; }}
+.settings-row {{ display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: none; border-radius: 7px; background: transparent; min-width: 0; }}
+.settings-row:hover {{ background: transparent; }}
+.settings-row > button {{ flex: none; white-space: nowrap; }}
 .settings-row .grow {{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }}
 .settings-empty {{ color: {text_tertiary}; text-align: center; padding: 30px 0; }}
 
@@ -494,11 +851,12 @@ table.data-table tr:hover td {{ background: {bg_hover}; }}
         border = border,
         radius_ctrl = radius_ctrl,
         radius_card = radius_card,
+        sidebar_brand_padding = sidebar_brand_padding,
         text = text,
         text_secondary = text_secondary,
         text_tertiary = text_tertiary,
         shadow = shadow,
-        focus_ring = focus_ring,
+        chat_canvas = chat_canvas,
     )
 }
 

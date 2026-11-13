@@ -125,6 +125,11 @@ pub struct UiStore {
     pub right_panel_tab: Signal<RightPanelTab>,
     pub status_toast: Signal<Option<String>>,
     pub prompt: Signal<String>,
+    /// Aggregate workspace diff of the current turn: `(diff, files_changed)`.
+    pub turn_diff: Signal<Option<(String, usize)>>,
+    /// Live `spawn_agent` / `spawn_agents` registrations not yet visible as
+    /// messages (Codex-style background agents).
+    pub spawned_agents: Signal<Vec<Value>>,
 }
 
 impl UiStore {
@@ -188,6 +193,8 @@ impl UiStore {
     pub fn select_run(&self, run_id: String) {
         let mut store = *self;
         store.active_run_id.set(Some(run_id.clone()));
+        store.turn_diff.set(None);
+        store.spawned_agents.set(Vec::new());
         spawn(async move {
             let state = core();
             // 1. Run + messages + plan + usage + pending requests.
@@ -310,6 +317,45 @@ impl UiStore {
                 {
                     store.plan.set(Some(plan));
                 }
+            }
+            "turn_diff_updated" => {
+                let diff = event.get("diff").and_then(Value::as_str).unwrap_or_default().to_string();
+                if !diff.is_empty() {
+                    let files_changed = event
+                        .get("filesChanged")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    store.turn_diff.set(Some((diff, files_changed)));
+                }
+            }
+            "context_compacted" => {
+                let before = event.get("messagesBefore").and_then(Value::as_u64).unwrap_or(0);
+                let after = event.get("messagesAfter").and_then(Value::as_u64).unwrap_or(0);
+                store.toast(format!("Context compacted ({before} → {after} messages)"));
+            }
+            "agent_spawned" => {
+                let agent_id = event.get("agentId").and_then(Value::as_str).unwrap_or_default().to_string();
+                let name = event.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+                let role = event.get("role").and_then(Value::as_str).unwrap_or("explorer").to_string();
+                if agent_id.is_empty() {
+                    return true;
+                }
+                let entry = serde_json::json!({
+                    "agentId": agent_id,
+                    "name": name,
+                    "role": role,
+                    "status": "running",
+                });
+                store.spawned_agents.with_mut(|agents| {
+                    if let Some(existing) = agents
+                        .iter_mut()
+                        .find(|agent| agent.get("agentId").and_then(Value::as_str) == Some(agent_id.as_str()))
+                    {
+                        *existing = entry;
+                    } else {
+                        agents.push(entry);
+                    }
+                });
             }
             "run_title_changed" => {
                 let title = event.get("title").and_then(Value::as_str).unwrap_or_default().to_string();

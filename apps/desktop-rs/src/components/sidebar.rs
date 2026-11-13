@@ -1,14 +1,222 @@
-//! Sidebar: brand header, run search, project tree with runs and the footer
-//! navigation between Chat / Usage Logs / Settings.
+//! Sidebar: draggable brand strip with a navigation toolbar, top controls,
+//! project tree with runs, a Conversations section for orphaned runs and the
+//! footer navigation between Chat / Usage / Customizations / Settings.
+
+use std::collections::HashSet;
 
 use super::*;
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 
+/// Days since 1970-01-01 via Howard Hinnant's `days_from_civil` (pure Rust,
+/// no chrono dependency).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Parses the leading `YYYY-MM-DDTHH:MM:SS` of an ISO timestamp into seconds
+/// since the Unix epoch (ignoring any fractional seconds / offset suffix).
+fn epoch_seconds(iso: &str) -> Option<i64> {
+    let b = iso.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |range: std::ops::Range<usize>| iso.get(range)?.parse::<i64>().ok();
+    let year = num(0..4)?;
+    let month = num(5..7)?;
+    let day = num(8..10)?;
+    let hour = num(11..13)?;
+    let minute = num(14..16)?;
+    let second = num(17..19)?;
+    let separators_ok = b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && b[13] == b':'
+        && b[16] == b':';
+    if !separators_ok {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Compact relative age of a timestamp: `"now"` (< 60s), `"5m"` (< 60m),
+/// `"3h"` (< 24h) or `"14d"` (days). Empty string when parsing fails.
+pub fn relative_age(iso: &str) -> String {
+    let Some(then) = epoch_seconds(iso) else {
+        return String::new();
+    };
+    let Some(now) = epoch_seconds(&locagens_core::util::now_iso()) else {
+        return String::new();
+    };
+    let elapsed = (now - then).max(0);
+    if elapsed < 60 {
+        "now".to_string()
+    } else if elapsed < 3600 {
+        format!("{}m", elapsed / 60)
+    } else if elapsed < 86400 {
+        format!("{}h", elapsed / 3600)
+    } else {
+        format!("{}d", elapsed / 86400)
+    }
+}
+
+/* ---------------- 15x15 monochrome outline icons ---------------- */
+
+fn icon_sidebar() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            rect { x: "3", y: "3", width: "18", height: "18", rx: "2.5" }
+            path { d: "M9.5 3v18" }
+        }
+    }
+}
+
+fn icon_arrow_left() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M19 12H5" }
+            path { d: "m12 19-7-7 7-7" }
+        }
+    }
+}
+
+fn icon_arrow_right() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M5 12h14" }
+            path { d: "m12 5 7 7-7 7" }
+        }
+    }
+}
+
+fn icon_search() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            circle { cx: "11", cy: "11", r: "7" }
+            path { d: "m21 21-4.3-4.3" }
+        }
+    }
+}
+
+fn icon_plus() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M5 12h14" }
+            path { d: "M12 5v14" }
+        }
+    }
+}
+
+fn icon_clock() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            circle { cx: "12", cy: "12", r: "9" }
+            path { d: "M12 7v5l3.5 2" }
+        }
+    }
+}
+
+fn icon_briefcase() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            rect { x: "3", y: "7", width: "18", height: "14", rx: "2.5" }
+            path { d: "M9 7V5.5A2.5 2.5 0 0 1 11.5 3h1A2.5 2.5 0 0 1 15 5.5V7" }
+            path { d: "M3 13h18" }
+        }
+    }
+}
+
+fn icon_filter() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M4 6h16" }
+            path { d: "M7 12h10" }
+            path { d: "M10 18h4" }
+        }
+    }
+}
+
+fn icon_folder_plus() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M12 10v6" }
+            path { d: "M9 13h6" }
+            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+        }
+    }
+}
+
+fn icon_folder(open: bool) -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            if open {
+                path { d: "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" }
+            } else {
+                path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+            }
+        }
+    }
+}
+
+fn icon_dots_vertical() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            circle { cx: "12", cy: "5", r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "12", cy: "12", r: "1.3", fill: "currentColor", stroke: "none" }
+            circle { cx: "12", cy: "19", r: "1.3", fill: "currentColor", stroke: "none" }
+        }
+    }
+}
+
+fn icon_gear() -> Element {
+    rsx! {
+        svg {
+            width: "15", height: "15", view_box: "0 0 24 24", fill: "none",
+            stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" }
+            circle { cx: "12", cy: "12", r: "3" }
+        }
+    }
+}
+
 #[component]
 pub fn Sidebar() -> Element {
     let store: UiStore = use_context();
     let mut show_add_modal = use_signal(|| false);
+    let mut open_run_menu: Signal<Option<String>> = use_signal(|| None);
+    let mut open_project_menu: Signal<Option<String>> = use_signal(|| None);
+    let mut search_open = use_signal(|| false);
+    let expanded_all_projects = use_signal(HashSet::<String>::new);
+    // Page the Back arrow came from, so Forward can return to it.
+    let mut forward_page: Signal<Option<crate::state_ui::AppPage>> = use_signal(|| None);
 
     // Filtered runs by the search query (title/task match).
     let query = store.search_query.read().to_lowercase();
@@ -26,44 +234,176 @@ pub fn Sidebar() -> Element {
     let projects = store.projects.read().clone();
     let selected_project = store.selected_project.read().clone();
     let active_run_id = store.active_run_id.read().clone();
+    // Collapsed workspace groups (by project path).
+    let collapsed_projects = use_signal(HashSet::<String>::new);
+
+    let page_now = store.page.read().clone();
+    let on_chat = page_now == crate::state_ui::AppPage::Chat;
+    let forward_target = *forward_page.read();
+    let forward_available = on_chat && forward_target.is_some();
 
     rsx! {
         aside {
             class: "sidebar",
-            div {
-                class: "sidebar-brand",
+            onclick: move |_| {
+                open_run_menu.set(None);
+                open_project_menu.set(None);
+            },
+            if open_run_menu.read().is_some() || open_project_menu.read().is_some() {
                 div {
-                    class: "brand-row",
-                    span { class: "brand-title", "Locagens" }
-                    span { class: "badge os-badge", "{os_label()}" }
-                }
-                div {
-                    class: "sidebar-actions",
-                    button {
-                        class: "primary",
-                        onclick: move |_| new_chat(&store),
-                        "+ New Chat"
-                    }
-                    button {
-                        onclick: move |_| show_add_modal.set(true),
-                        "Add Project"
-                    }
-                }
-            }
-            div {
-                class: "sidebar-search",
-                input {
-                    r#type: "search",
-                    placeholder: "Search conversations…",
-                    value: "{store.search_query.read()}",
-                    oninput: move |event| {
-                        let mut store = store;
-                        store.search_query.set(event.value());
+                    class: "popover-backdrop",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        open_run_menu.set(None);
+                        open_project_menu.set(None);
                     },
                 }
             }
             div {
+                class: "sidebar-brand",
+                // Draggable window titlebar strip (double-click to maximize).
+                onmousedown: move |_| {
+                    dioxus::desktop::use_window().drag();
+                },
+                ondoubleclick: move |_| {
+                    dioxus::desktop::use_window().toggle_maximized();
+                },
+                span { class: "brand-mark", "◆" }
+                span { class: "brand-title", "Locagens" }
+                div { class: "sidebar-toolbar",
+                    button {
+                        class: "toolbar-btn",
+                        title: "Toggle sidebar",
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| {
+                            if !on_chat {
+                                let mut store = store;
+                                store.page.set(crate::state_ui::AppPage::Chat);
+                            } else {
+                                let closing = *search_open.read();
+                                if closing {
+                                    let mut store = store;
+                                    store.search_query.set(String::new());
+                                }
+                                search_open.set(!closing);
+                            }
+                        },
+                        {icon_sidebar()}
+                    }
+                    button {
+                        class: "toolbar-btn",
+                        title: "Back",
+                        disabled: on_chat,
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| {
+                            if !on_chat {
+                                let mut store = store;
+                                forward_page.set(Some(store.page.read().clone()));
+                                store.page.set(crate::state_ui::AppPage::Chat);
+                            }
+                        },
+                        {icon_arrow_left()}
+                    }
+                    button {
+                        class: "toolbar-btn",
+                        title: "Forward",
+                        disabled: !forward_available,
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| {
+                            let mut store = store;
+                            if let Some(target) = forward_target {
+                                forward_page.set(None);
+                                store.page.set(target);
+                            }
+                        },
+                        {icon_arrow_right()}
+                    }
+                    button {
+                        class: "toolbar-btn",
+                        title: "Search conversations",
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| {
+                            let closing = *search_open.read();
+                            if closing {
+                                let mut store = store;
+                                store.search_query.set(String::new());
+                            }
+                            search_open.set(!closing);
+                        },
+                        {icon_search()}
+                    }
+                }
+            }
+            div {
+                class: "sidebar-top-controls",
+                button {
+                    class: "new-conv-btn",
+                    onclick: move |_| new_chat(&store),
+                    span { class: "sidebar-nav-icon", {icon_plus()} }
+                    span { "New Conversation" }
+                }
+                button {
+                    class: if *store.page.read() == crate::state_ui::AppPage::UsageLogs { "sidebar-nav-item active" } else { "sidebar-nav-item" },
+                    onclick: move |_| {
+                        let mut store = store;
+                        forward_page.set(None);
+                        store.page.set(crate::state_ui::AppPage::UsageLogs);
+                    },
+                    span { class: "sidebar-nav-icon", {icon_clock()} }
+                    span { "Usage" }
+                }
+                button {
+                    class: if matches!(*store.page.read(), crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills | crate::state_ui::SettingsTab::Plugins)) { "sidebar-nav-item active" } else { "sidebar-nav-item" },
+                    onclick: move |_| {
+                        let mut store = store;
+                        forward_page.set(None);
+                        store.page.set(crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills));
+                    },
+                    span { class: "sidebar-nav-icon", {icon_briefcase()} }
+                    span { "Customizations" }
+                }
+            }
+            div {
                 class: "sidebar-tree",
+                if *search_open.read() || !store.search_query.read().is_empty() {
+                    div { class: "sidebar-search",
+                        input {
+                            r#type: "text",
+                            placeholder: "Filter conversations…",
+                            value: "{store.search_query.read()}",
+                            oninput: move |event| {
+                                let mut store = store;
+                                store.search_query.set(event.value());
+                            },
+                        }
+                    }
+                }
+                div { class: "sidebar-section-header",
+                    span { "Projects" }
+                    div { class: "sidebar-section-actions",
+                        button {
+                            class: "subtle icon-btn",
+                            title: "Filter projects & conversations",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| {
+                                let closing = *search_open.read();
+                                if closing {
+                                    let mut store = store;
+                                    store.search_query.set(String::new());
+                                }
+                                search_open.set(!closing);
+                            },
+                            {icon_filter()}
+                        }
+                        button {
+                            class: "subtle icon-btn",
+                            title: "Add project folder",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| show_add_modal.set(true),
+                            {icon_folder_plus()}
+                        }
+                    }
+                }
                 for project in projects.iter() {
                     {
                         let runs: Vec<&Run> = filtered
@@ -72,36 +412,121 @@ pub fn Sidebar() -> Element {
                             .filter(|run| run.project_path == project.path)
                             .collect();
                         let is_selected = selected_project.as_deref() == Some(project.path.as_str());
-                        let project_row_class = if is_selected { "project-row selected" } else { "project-row" };
+                        let project_menu_open = open_project_menu.read().as_deref() == Some(project.path.as_str());
+                        let project_row_class = if is_selected {
+                            if project_menu_open { "project-row selected menu-open" } else { "project-row selected" }
+                        } else if project_menu_open {
+                            "project-row menu-open"
+                        } else {
+                            "project-row"
+                        };
                         let path = project.path.clone();
                         let path_select = path.clone();
                         let path_delete = path.clone();
+                        let path_toggle = path.clone();
+                        let path_menu = path.clone();
+                        let path_new = path.clone();
+                        let path_expand = path.clone();
+                        let is_collapsed = collapsed_projects.read().contains(&path);
+                        let runs_expanded = expanded_all_projects.read().contains(&path) || runs.len() <= 6;
+                        let run_count = runs.len();
                         rsx! {
                             div { class: "project-group",
                                 div {
                                     class: "{project_row_class}",
+                                    title: "{project.path}",
                                     onclick: move |_| {
                                         let mut store = store;
                                         store.selected_project.set(Some(path_select.clone()));
+                                        let mut collapsed = collapsed_projects;
+                                        if collapsed.contains(&path_toggle) {
+                                            collapsed.remove(&path_toggle);
+                                        } else {
+                                            collapsed.insert(path_toggle.clone());
+                                        }
                                     },
-                                    span { class: "project-name", title: "{project.path}", "{project.name}" }
+                                    span { class: "project-folder-icon", {icon_folder(!is_collapsed)} }
+                                    span { class: "project-name", "{project.name}" }
                                     button {
-                                        class: "subtle icon-btn",
-                                        title: "Remove project from Locagens",
-                                        onclick: move |_| {
-                                            delete_project(&store, &path_delete.clone());
+                                        class: "subtle icon-btn project-menu-btn",
+                                        title: "Project options",
+                                        onmousedown: move |event| event.stop_propagation(),
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            open_run_menu.set(None);
+                                            let current = open_project_menu.read().clone();
+                                            if current.as_deref() == Some(path_menu.as_str()) {
+                                                open_project_menu.set(None);
+                                            } else {
+                                                open_project_menu.set(Some(path_menu.clone()));
+                                            }
                                         },
-                                        "✕"
+                                        {icon_dots_vertical()}
+                                    }
+                                    button {
+                                        class: "subtle icon-btn project-new-btn",
+                                        title: "New conversation in project",
+                                        onmousedown: move |event| event.stop_propagation(),
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            let mut store = store;
+                                            store.selected_project.set(Some(path_new.clone()));
+                                            new_chat(&store);
+                                        },
+                                        {icon_plus()}
+                                    }
+                                    if project_menu_open {
+                                        div {
+                                            class: "row-context-menu",
+                                            onclick: move |event| event.stop_propagation(),
+                                            button {
+                                                class: "danger",
+                                                onclick: move |_| {
+                                                    open_project_menu.set(None);
+                                                    delete_project(&store, &path_delete.clone());
+                                                },
+                                                "Remove workspace"
+                                            }
+                                        }
                                     }
                                 }
-                                for run in runs.iter() {
-                                    { run_item(&store, run, active_run_id.as_deref()) }
+                                if !runs.is_empty() && !is_collapsed {
+                                    div { class: "project-runs",
+                                        if runs_expanded {
+                                            for run in runs.iter() {
+                                                { run_item(&store, run, active_run_id.as_deref(), open_run_menu, open_project_menu) }
+                                            }
+                                        } else {
+                                            for run in runs.iter().take(6) {
+                                                { run_item(&store, run, active_run_id.as_deref(), open_run_menu, open_project_menu) }
+                                            }
+                                            button {
+                                                class: "see-all-btn",
+                                                onclick: move |event| {
+                                                    event.stop_propagation();
+                                                    let mut expanded = expanded_all_projects;
+                                                    expanded.insert(path_expand.clone());
+                                                },
+                                                "See all ({run_count})"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                // Runs whose project is not (or no longer) registered.
+                // Orphaned runs (project not registered) in their own section.
+                div { class: "sidebar-section-header",
+                    span { "Conversations" }
+                    button {
+                        class: "subtle icon-btn",
+                        title: "New conversation",
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| new_chat(&store),
+                        {icon_plus()}
+                    }
+                }
                 {
                     let known: Vec<String> = projects.iter().map(|project| project.path.clone()).collect();
                     let orphaned: Vec<&Run> = filtered
@@ -109,48 +534,29 @@ pub fn Sidebar() -> Element {
                         .copied()
                         .filter(|run| !known.contains(&run.project_path))
                         .collect();
-                    if !orphaned.is_empty() {
-                        rsx! {
-                            div { class: "project-group",
-                                div { class: "project-row", span { class: "project-name", "Other conversations" } }
-                                for run in orphaned.iter() {
-                                    { run_item(&store, run, active_run_id.as_deref()) }
-                                }
-                            }
+                    rsx! {
+                        for run in orphaned.iter() {
+                            { run_item(&store, run, active_run_id.as_deref(), open_run_menu, open_project_menu) }
                         }
-                    } else {
-                        rsx! {}
                     }
                 }
                 if filtered.is_empty() {
-                    div { class: "settings-empty", "No conversations yet — start a New Chat." }
+                    div { class: "settings-empty", "No conversations yet — start a New Conversation." }
                 }
             }
             div {
                 class: "sidebar-footer",
                 button {
-                    class: if *store.page.read() == crate::state_ui::AppPage::Chat { "active" } else { "" },
+                    class: if matches!(*store.page.read(), crate::state_ui::AppPage::Settings(_))
+                        && !matches!(*store.page.read(), crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Skills | crate::state_ui::SettingsTab::Plugins))
+                    { "sidebar-nav-item active" } else { "sidebar-nav-item" },
                     onclick: move |_| {
                         let mut store = store;
-                        store.page.set(crate::state_ui::AppPage::Chat);
-                    },
-                    "Chat"
-                }
-                button {
-                    class: if *store.page.read() == crate::state_ui::AppPage::UsageLogs { "active" } else { "" },
-                    onclick: move |_| {
-                        let mut store = store;
-                        store.page.set(crate::state_ui::AppPage::UsageLogs);
-                    },
-                    "Usage Logs"
-                }
-                button {
-                    class: if matches!(*store.page.read(), crate::state_ui::AppPage::Settings(_)) { "active" } else { "" },
-                    onclick: move |_| {
-                        let mut store = store;
+                        forward_page.set(None);
                         store.page.set(crate::state_ui::AppPage::Settings(crate::state_ui::SettingsTab::Providers));
                     },
-                    "Settings"
+                    span { class: "sidebar-nav-icon", {icon_gear()} }
+                    span { "Settings" }
                 }
             }
         }
@@ -160,32 +566,76 @@ pub fn Sidebar() -> Element {
     }
 }
 
-/// One run row: status dot, title, model badge and a hover delete button.
-fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>) -> Element {
+/// One run row: title, status dot, relative age and a hover-only options menu
+/// button. The age and the action button occupy the same 22px slot so the row
+/// never shifts on hover.
+fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_run_menu: Signal<Option<String>>, mut open_project_menu: Signal<Option<String>>) -> Element {
     let store = *store;
     let run_id = run.id.clone();
     let run_id_select = run_id.clone();
+    let run_id_fork = run_id.clone();
+    let run_id_delete = run_id.clone();
+    let run_id_menu = run_id.clone();
     let run_title = run.title.clone();
     let model = run.model.clone();
     let status = run.status.clone();
+    let is_live = status == "generating" || status == "created";
+    let age_source = if run.updated_at.is_empty() { run.created_at.clone() } else { run.updated_at.clone() };
+    let age = relative_age(&age_source);
     let is_active = active_run_id == Some(run.id.as_str());
-    let item_class = if is_active { "run-item active" } else { "run-item" };
+    let menu_open = open_run_menu.read().as_deref() == Some(run.id.as_str());
+    let item_class = match (is_active, menu_open) {
+        (true, true) => "run-item active menu-open",
+        (true, false) => "run-item active",
+        (false, true) => "run-item menu-open",
+        (false, false) => "run-item",
+    };
     rsx! {
         div {
             class: "{item_class}",
+            title: "{run_title} · {model}",
             onclick: move |_| store.select_run(run_id_select.clone()),
-            span { class: "status-dot {status}", title: "{status_label(&status)}" }
             span { class: "run-title", "{run_title}" }
-            span { class: "run-model", "{model}" }
+            if is_live {
+                span { class: "status-dot generating", title: "{status_label(&status)}" }
+            }
+            span { class: "run-age", "{age}" }
             button {
-                class: "subtle icon-btn run-delete",
-                title: "Delete conversation",
+                class: "subtle icon-btn run-action",
+                title: "Conversation options",
+                onmousedown: move |event| event.stop_propagation(),
                 onclick: move |event| {
                     event.stop_propagation();
-                    let run_id_delete = run_id.clone();
-                    delete_run(&store, &run_id_delete);
+                    open_project_menu.set(None);
+                    let current = open_run_menu.read().clone();
+                    if current.as_deref() == Some(run_id_menu.as_str()) {
+                        open_run_menu.set(None);
+                    } else {
+                        open_run_menu.set(Some(run_id_menu.clone()));
+                    }
                 },
-                "🗑"
+                {icon_dots_vertical()}
+            }
+            if menu_open {
+                div {
+                    class: "row-context-menu",
+                    onclick: move |event| event.stop_propagation(),
+                    button {
+                        onclick: move |_| {
+                            open_run_menu.set(None);
+                            fork_run_action(&store, &run_id_fork.clone());
+                        },
+                        "Fork"
+                    }
+                    button {
+                        class: "danger",
+                        onclick: move |_| {
+                            open_run_menu.set(None);
+                            delete_run(&store, &run_id_delete.clone());
+                        },
+                        "Delete"
+                    }
+                }
             }
         }
     }
@@ -276,6 +726,8 @@ fn new_chat(store: &UiStore) {
     store.run_usage.set(None);
     store.pending_permission.set(None);
     store.pending_question.set(None);
+    store.turn_diff.set(None);
+    store.spawned_agents.set(Vec::new());
     store.page.set(crate::state_ui::AppPage::Chat);
 }
 
@@ -301,6 +753,23 @@ fn delete_project(store: &UiStore, path: &str) {
     });
 }
 
+/// Forks a run into an independent copy and selects it.
+fn fork_run_action(store: &UiStore, run_id: &str) {
+    let store = *store;
+    let run_id = run_id.to_string();
+    spawn(async move {
+        let state = crate::state_ui::core();
+        match locagens_core::api::runs::fork_run(&state, &run_id, None).await {
+            Ok(forked) => {
+                store.refresh_runs();
+                store.select_run(forked.id.clone());
+                store.toast("Conversation forked".to_string());
+            }
+            Err(err) => store.toast(format!("Fork failed: {err}")),
+        }
+    });
+}
+
 /// Deletes a run (direct DB call; the facade does not expose a wrapper).
 fn delete_run(store: &UiStore, run_id: &str) {
     let mut store = *store;
@@ -316,20 +785,9 @@ fn delete_run(store: &UiStore, run_id: &str) {
             store.run_usage.set(None);
             store.pending_permission.set(None);
             store.pending_question.set(None);
+            store.turn_diff.set(None);
+            store.spawned_agents.set(Vec::new());
         }
         store.refresh_runs();
     });
-}
-
-/// OS badge text shown next to the brand.
-pub fn os_label() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Windows"
-    } else if cfg!(target_os = "macos") {
-        "macOS"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else {
-        "Desktop"
-    }
 }

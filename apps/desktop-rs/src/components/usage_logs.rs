@@ -45,6 +45,13 @@ pub fn UsageLogsPage() -> Element {
     rsx! {
         div {
             class: "page-header",
+            // Draggable window titlebar strip (double-click to maximize).
+            onmousedown: move |_| {
+                dioxus::desktop::use_window().drag();
+            },
+            ondoubleclick: move |_| {
+                dioxus::desktop::use_window().toggle_maximized();
+            },
             h2 { "Usage Logs" }
             input {
                 r#type: "search",
@@ -57,6 +64,8 @@ pub fn UsageLogsPage() -> Element {
             }
             button {
                 class: "subtle icon-btn",
+                // Clicks on the button must not start a window drag.
+                onmousedown: move |e| e.stop_propagation(),
                 onclick: move |_| {
                     let mut store = store;
                     store.page.set(crate::state_ui::AppPage::Chat);

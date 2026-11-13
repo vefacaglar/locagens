@@ -119,8 +119,9 @@ pub fn MessageThread() -> Element {
             if is_empty {
                 div {
                     class: "msg-empty",
-                    div { class: "big", "Locagens" }
-                    div { "Describe a task for the workspace agent — pick a project, provider and mode below." }
+                    div { class: "big", "What should we build?" }
+                    div { "Pick a workspace and ask the agent to explore, plan, or make changes." }
+                    { starter_cards(&store) }
                 }
             }
             for group in groups.iter() {
@@ -150,6 +151,11 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
             div {
                 class: "msg-assistant",
                 key: "{message.id}",
+                div {
+                    class: "msg-meta",
+                    span { class: "status-dot done" }
+                    span { "{message.model.clone().unwrap_or_else(|| \"assistant\".to_string())}" }
+                }
                 if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
                     ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
                 }
@@ -175,11 +181,41 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
     }
 }
 
+/// Hero empty state: headline, subtitle and clickable starter cards that
+/// pre-fill the composer prompt.
+fn starter_cards(store: &UiStore) -> Element {
+    let starters = [
+        ("Explore codebase architecture", "Map the main modules, entry points and how data flows through the project."),
+        ("Review uncommitted git changes", "Run `git status` / `git diff` and review the pending changes for issues."),
+        ("Run and fix failing tests", "Run the test suite, diagnose failures and fix them."),
+        ("Draft a step-by-step plan", "Turn my task into an ordered, checkable plan before making changes."),
+    ];
+    rsx! {
+        div {
+            class: "starter-grid",
+            for (index, (title, prompt)) in starters.iter().enumerate() {
+                {
+                    let prompt = prompt.to_string();
+                    let mut store = *store;
+                    rsx! {
+                        button {
+                            key: "starter-{index}",
+                            class: "starter-card",
+                            onclick: move |_| store.prompt.set(prompt.clone()),
+                            "{title}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Collapsible reasoning panel shown above the assistant answer.
 #[component]
 fn ReasoningPanel(reasoning: String) -> Element {
     let open = use_signal(|| false);
-    let arrow = if *open.read() { "▲" } else { "▼" };
+    let arrow = if *open.read() { "▾" } else { "▸" };
     rsx! {
         div {
             class: "collapsible reasoning-panel",
@@ -190,9 +226,8 @@ fn ReasoningPanel(reasoning: String) -> Element {
                     let is_open = *open.read();
                     open.set(!is_open);
                 },
-                "🧠 Reasoning"
-                span { class: "badge", "{reasoning.split_whitespace().count()} words" }
-                span { style: "margin-left:auto", "{arrow}" }
+                span { "{arrow}" }
+                span { "Thought · {reasoning.split_whitespace().count()} words" }
             }
             if *open.read() {
                 div {
@@ -247,12 +282,10 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
                     let is_open = *open.read();
                     open.set(!is_open);
                 },
+                span { if *open.read() { "▾" } else { "▸" } }
                 span { class: "tool-name", "{call.name}" }
                 span { class: "tool-args", "{args_summary}" }
-                span {
-                    class: if done { "badge ok" } else { "badge run" },
-                    "{status_text}"
-                }
+                span { class: "tool-status", "{status_text}" }
             }
             if *open.read() {
                 div {
