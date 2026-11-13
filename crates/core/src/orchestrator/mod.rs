@@ -19,6 +19,7 @@ pub mod apply_patch;
 pub mod command_safety;
 pub mod compact;
 pub mod env_context;
+mod hook_calls;
 pub mod llm;
 pub mod review;
 pub mod tools;
@@ -541,7 +542,7 @@ fn agents_md_block(project_path: &str) -> String {
         return String::new();
     }
     let cwd = PathBuf::from(project_path);
-    let (docs, sources) = agents_md::load_agents_md(&cwd, &cwd);
+    let (docs, sources) = agents_md::load_agents_md_with(&cwd, &cwd, &crate::config_runtime::doc_options());
     if docs.trim().is_empty() {
         return String::new();
     }
@@ -633,6 +634,7 @@ impl AgentLoop {
     /// Runs the loop until the model produces a final answer.
     async fn run(&mut self, max_rounds: usize) -> Result<String, AgentError> {
         let mut last_assistant_content = String::new();
+        let mut stop_attempts = 0u32;
         for round in 1..=max_rounds {
             self.check_cancel()?;
             // Codex-style auto compaction: when the estimated input tokens
@@ -749,9 +751,9 @@ impl AgentLoop {
             }
 
             if tool_calls.is_empty() {
-                // Final answer. Main agent runs the Stop hook once.
-                if self.agent_role.is_none() {
-                    self.run_stop_hook().await;
+                // Final answer. The main agent's Stop hook may ask it to continue.
+                if self.agent_role.is_none() && self.stop_hook_continues(&message.content, &mut stop_attempts).await {
+                    continue;
                 }
                 return Ok(message.content.clone());
             }
@@ -879,19 +881,10 @@ impl AgentLoop {
         if let Some(context) = outcome.context_joined() {
             result.push_str(&format!("\n[hook context]: {context}"));
         }
-        result
-    }
-
-    /// Runs the `Stop` hook once when the main agent produces its final
-    /// answer.
-    async fn run_stop_hook(&self) {
-        let payload = self.hook_payload("Stop", json!({}));
-        let outcome = crate::services::hooks::run_hook_event("Stop", &self.project_path, &payload).await;
         if outcome.blocked {
-            if let Some(reason) = outcome.reason {
-                tracing::debug!("Stop hook requested continuation: {reason}");
-            }
+            result.push_str(&format!("\n[hook feedback]: {}", outcome.reason.unwrap_or_else(|| "blocked".into())));
         }
+        result
     }
 
     /// Executes one tool call, routing interactive/delegation tools to the
@@ -1149,7 +1142,7 @@ impl AgentLoop {
             sandbox: Some(locagens_execpolicy::sandbox::SandboxSpec {
                 mode: locagens_protocol::from_run_mode(&self.mode).1,
                 project_path: self.project_path.clone(),
-                allow_network: self.mode == "auto",
+                allow_network: self.mode == "auto" || crate::config_runtime::sandbox_network_access(),
             }),
         };
         let info = self
@@ -1246,7 +1239,7 @@ impl AgentLoop {
     /// Manual context compaction (`compact_context` tool).
     async fn compact_context_tool(&mut self) -> Result<String, AgentError> {
         let before = self.history.len();
-        self.run_compaction().await?;
+        self.run_compaction("manual").await?;
         Ok(format!(
             "Context compacted: {before} messages → {} messages. Older conversation was replaced by a summary block.",
             self.history.len()
@@ -1259,10 +1252,13 @@ impl AgentLoop {
         if !compact::should_auto_compact(&self.history) {
             return Ok(());
         }
-        self.run_compaction().await
+        self.run_compaction("auto").await
     }
 
-    async fn run_compaction(&mut self) -> Result<(), AgentError> {
+    async fn run_compaction(&mut self, trigger: &str) -> Result<(), AgentError> {
+        if self.pre_compact_blocks(trigger).await {
+            return Ok(());
+        }
         let Some((system, transcript)) = compact::summarization_request(&self.history, compact::DEFAULT_KEEP_LAST_MESSAGES)
         else {
             return Ok(());
@@ -1308,6 +1304,7 @@ impl AgentLoop {
             "messagesAfter": self.history.len(),
             "summary": outcome.content,
         }));
+        self.post_compact_hook(trigger).await;
         Ok(())
     }
 
@@ -1621,6 +1618,7 @@ impl AgentLoop {
         }
 
         // Pause the run until the user answers via POST /api/runs/:id/answer.
+        self.notification_hook("elicitation_dialog", "Locagens is waiting for your answer").await;
         self.state.db.patch_run(&self.run_id, |run| run.status = "awaiting_input".into());
         self.handle.emit(json!({ "type": "status_changed", "status": "awaiting_input" }));
         self.handle.emit(json!({
@@ -1791,6 +1789,12 @@ impl AgentLoop {
             }
         });
         let preview = tools::build_preview(&self.project_path, name, args);
+        match self.permission_hook(call_id, name, args).await {
+            hook_calls::PermissionVerdict::Allow => return self.execute_with_turn_diff(name, args).await,
+            hook_calls::PermissionVerdict::Deny(reason) => return Ok(format!("Denied by PermissionRequest hook: {reason}")),
+            hook_calls::PermissionVerdict::Ask => {}
+        }
+        self.notification_hook("permission_prompt", &format!("Locagens needs permission to run {name}")).await;
         self.state.db.patch_run(&self.run_id, |run| run.status = "awaiting_permission".into());
         self.handle.emit(json!({ "type": "status_changed", "status": "awaiting_permission" }));
         self.handle.emit(json!({
@@ -2136,12 +2140,13 @@ async fn run_sub_agent_inner(
         turn_diff,
         agent_inbox,
     };
-    Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS))
-        .await
-        .map_err(|err| match err {
-            AgentError::Cancelled => "cancelled".to_string(),
-            AgentError::Failed(err) => err,
-        })
+    sub.subagent_start_hook().await;
+    let result = Box::pin(sub.run(SUB_AGENT_MAX_ROUNDS)).await;
+    sub.subagent_stop_hook(&result).await;
+    result.map_err(|err| match err {
+        AgentError::Cancelled => "cancelled".to_string(),
+        AgentError::Failed(err) => err,
+    })
 }
 
 // ----------------------------------------------------------------------
@@ -2190,6 +2195,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
                 "session_id": run_id,
                 "cwd": run_full.project_path,
                 "hook_event_name": "SessionStart",
+                "source": if history.len() > 1 { "resume" } else { "startup" },
                 "model": run_full.model,
                 "permission_mode": run_full.mode,
             }),
@@ -2247,6 +2253,7 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         .find(|message| message.role == "user")
         .map(|message| message.content)
         .unwrap_or_else(|| run_full.task.clone());
+    let prompt_block = agent.user_prompt_hook(&latest_user_prompt).await;
     let mentioned =
         crate::services::skills::resolve_mentioned_skills(&run_full.project_path, &latest_user_prompt);
     let mut skill_budget: usize = 16 * 1024;
@@ -2291,7 +2298,11 @@ async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>, orchestrator: A
         .await;
     }
 
-    let result = agent.run(MAX_ROUNDS).await;
+    let result = match prompt_block {
+        Some(reason) => Err(AgentError::Failed(format!("Blocked by UserPromptSubmit hook: {reason}"))),
+        None => agent.run(MAX_ROUNDS).await,
+    };
+    hook_calls::session_end_hook(&run_full.project_path, &run_id, &result).await;
 
     // Land the terminal state unless the route already recorded it (cancel).
     let current = state.db.get_run_full(&run_id);

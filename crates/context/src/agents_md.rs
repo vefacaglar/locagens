@@ -63,20 +63,50 @@ pub fn search_dirs(cwd: &Path, project_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Discovery knobs (`project_doc_max_bytes` / `project_doc_fallback_filenames`).
+#[derive(Debug, Clone)]
+pub struct DocOptions {
+    pub max_bytes: usize,
+    /// Extra candidate names tried after the built-in ones.
+    pub fallback_filenames: Vec<String>,
+}
+
+impl Default for DocOptions {
+    fn default() -> Self {
+        Self { max_bytes: PROJECT_DOC_MAX_BYTES, fallback_filenames: Vec::new() }
+    }
+}
+
 /// Discover and concatenate all `AGENTS.md`-family docs between the project
 /// root and the working directory, honoring the byte budget. Returns
 /// `(concatenated docs, source paths)`.
 pub fn load_agents_md(cwd: &Path, project_root: &Path) -> (String, Vec<PathBuf>) {
+    load_agents_md_with(cwd, project_root, &DocOptions::default())
+}
+
+/// [`load_agents_md`] with an explicit byte budget and fallback filenames.
+/// A zero budget disables project docs entirely.
+pub fn load_agents_md_with(
+    cwd: &Path,
+    project_root: &Path,
+    options: &DocOptions,
+) -> (String, Vec<PathBuf>) {
     let root = find_git_root(cwd, project_root).unwrap_or_else(|| project_root.to_path_buf());
     let mut sources = Vec::new();
     let mut parts: Vec<String> = Vec::new();
-    let mut remaining = PROJECT_DOC_MAX_BYTES;
+    let mut remaining = options.max_bytes;
+    let names: Vec<&str> = CANDIDATE_FILENAMES
+        .iter()
+        .copied()
+        .chain(options.fallback_filenames.iter().map(String::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .collect();
 
     for directory in search_dirs(cwd, &root) {
         if remaining == 0 {
             break;
         }
-        for name in CANDIDATE_FILENAMES {
+        for name in &names {
             let candidate = directory.join(name);
             if !candidate.is_file() {
                 continue;
@@ -87,7 +117,11 @@ pub fn load_agents_md(cwd: &Path, project_root: &Path) -> (String, Vec<PathBuf>)
                 }
                 let mut text = content;
                 if text.len() > remaining {
-                    text.truncate(remaining);
+                    let mut cut = remaining;
+                    while cut > 0 && !text.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    text.truncate(cut);
                 }
                 remaining = remaining.saturating_sub(text.len());
                 parts.push(text);
@@ -164,5 +198,21 @@ mod tests {
         let (docs, sources) = load_agents_md(&ws.path(), &ws.path());
         assert!(docs.is_empty());
         assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn options_set_budget_and_fallback_filenames() {
+        let ws = temp_ws("opts");
+        std::fs::write(ws.path().join("TEAM.md"), "team notes here").unwrap();
+        let (docs, _) = load_agents_md(ws.path(), ws.path());
+        assert!(docs.is_empty(), "TEAM.md is not a default candidate");
+
+        let options = DocOptions { max_bytes: 4, fallback_filenames: vec!["TEAM.md".into()] };
+        let (docs, sources) = load_agents_md_with(ws.path(), ws.path(), &options);
+        assert_eq!(docs, "team");
+        assert_eq!(sources.len(), 1);
+
+        let disabled = DocOptions { max_bytes: 0, ..options };
+        assert!(load_agents_md_with(ws.path(), ws.path(), &disabled).0.is_empty());
     }
 }

@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod cli;
+pub mod config_runtime;
 pub mod db;
 pub mod orchestrator;
 pub mod paths;
@@ -61,6 +62,7 @@ pub fn build_core() -> anyhow::Result<Core> {
             data_root.display()
         )
     })?;
+    config_runtime::init_from_disk();
     let default_project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     Ok(Core {
         db: Arc::new(database),

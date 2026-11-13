@@ -3,6 +3,7 @@
 //! and CLI can share them.
 
 pub mod command_safety;
+pub mod env_policy;
 pub mod processes;
 pub mod rules;
 pub mod sandbox;

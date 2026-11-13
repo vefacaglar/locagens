@@ -945,8 +945,18 @@ fn build_responses_body(
 
     if let Some(effort) = endpoint.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
         if endpoint.reasoning_supported {
-            body.insert("reasoning".into(), json!({ "effort": effort }));
+            let mut reasoning = json!({ "effort": effort });
+            // `model_reasoning_summary` (config.toml): auto|concise|detailed|none.
+            let config = crate::config_runtime::current();
+            if let Some(summary) = config.model_reasoning_summary.as_deref().filter(|s| !s.is_empty() && *s != "none") {
+                reasoning["summary"] = json!(summary);
+            }
+            body.insert("reasoning".into(), reasoning);
         }
+    }
+    // `model_verbosity` (config.toml): low|medium|high.
+    if let Some(verbosity) = crate::config_runtime::current().model_verbosity.as_deref().filter(|v| !v.is_empty()) {
+        body.insert("text".into(), json!({ "verbosity": verbosity }));
     }
     // ChatGPT sign-in tokens reject `max_output_tokens`; the prompt-cache
     // fields and `configuration_update` items pi omits are never built here.
