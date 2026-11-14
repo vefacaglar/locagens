@@ -126,6 +126,22 @@ pub(super) fn sub_agent_system_prompt(role: &str, title: &str, task: &str, proje
         "You are a {role} sub-agent (\"{title}\") spawned inside the Locagens orchestrator.\n\
 Workspace root: {project_path}\n\n{capability}\n\n\
 Your assigned task:\n{task}\n\n\
-Work independently and completely; do not ask the user questions. When done, reply with a concise final summary of what you did and any important outcomes — it is returned to the coordinating agent as your task result. You may later receive follow-up tasks or messages; treat them as continuing this same job.\n"
+Work independently and completely; do not ask the user questions. When done, reply with a concise final summary of what you did and any important outcomes — it is returned to the coordinating agent as your task result. You may later receive follow-up tasks or messages; treat them as continuing this same job.\n{agents_md}",
+        agents_md = agents_md_block(project_path),
     )
+}
+
+#[cfg(test)]
+mod sub_agent_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn sub_agents_get_the_project_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "Use tabs, never spaces.").unwrap();
+        let path = dir.path().display().to_string();
+        let prompt = sub_agent_system_prompt("explorer", "scan", "look around", &path, true);
+        assert!(prompt.contains("Use tabs, never spaces."), "{prompt}");
+        assert!(prompt.contains("## Project instructions"));
+    }
 }

@@ -112,8 +112,10 @@ pub fn load_agents_md_with(
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&candidate) {
+                // An empty doc counts as missing: try the next name, so an
+                // empty AGENTS.md does not hide CLAUDE.md.
                 if content.trim().is_empty() {
-                    break;
+                    continue;
                 }
                 let mut text = content;
                 locagens_protocol::text::truncate_at_char_boundary(&mut text, remaining);
@@ -164,6 +166,17 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(sources[0].ends_with("AGENTS.override.md"));
         assert!(sources[1].ends_with("CLAUDE.md"));
+    }
+
+    #[test]
+    fn empty_agents_md_falls_back_to_claude_md() {
+        let ws = temp_ws("fallback");
+        std::fs::write(ws.path().join("AGENTS.md"), "  
+").unwrap();
+        std::fs::write(ws.path().join("CLAUDE.md"), "claude rules").unwrap();
+        let (docs, sources) = load_agents_md(ws.path(), ws.path());
+        assert_eq!(docs, "claude rules");
+        assert!(sources[0].ends_with("CLAUDE.md"));
     }
 
     #[test]
