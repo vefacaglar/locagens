@@ -19,7 +19,9 @@ pub fn check_sandbox_metadata(project_path: &Path) -> Result<(), String> {
 /// failure) becomes the error message.
 pub async fn git(project_path: &Path, args: &[&str]) -> Result<String, String> {
     check_sandbox_metadata(project_path)?;
-    let output = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::util::hide_console_window(command.as_std_mut());
+    let output = command
         .args(args)
         .current_dir(project_path)
         .output()
@@ -46,6 +48,7 @@ pub async fn git_bytes(
     use tokio::io::AsyncWriteExt;
     check_sandbox_metadata(project_path)?;
     let mut command = tokio::process::Command::new("git");
+    crate::util::hide_console_window(command.as_std_mut());
     command
         .args(args)
         .current_dir(project_path)

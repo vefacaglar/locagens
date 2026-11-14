@@ -573,6 +573,9 @@ impl ProcessManager {
             // The child leads its own process group so tree kills work.
             cmd.process_group(0);
         }
+        // No console window of its own under the GUI-subsystem desktop app.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
         cmd.current_dir(&project_path)
             .env("FORCE_COLOR", "1")
             .stdin(if options.stdin_pipe {

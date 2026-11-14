@@ -152,7 +152,9 @@ fn list_files(project_path: &Path) -> Vec<String> {
     // Metadata a sandboxed command swapped is repaired first, so git never
     // reads a planted config (the repair itself is reported by the tools).
     let _ = crate::services::git::check_sandbox_metadata(project_path);
-    if let Ok(output) = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    crate::util::hide_console_window(&mut command);
+    if let Ok(output) = command
         .args(["ls-files", "-co", "--exclude-standard"])
         .current_dir(project_path)
         .output()

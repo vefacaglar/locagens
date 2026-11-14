@@ -333,6 +333,7 @@ async fn run_hook_command(
     let input = serde_json::to_vec(payload).map_err(|err| err.to_string())?;
 
     let mut cmd = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+    crate::util::hide_console_window(cmd.as_std_mut());
     #[cfg(windows)]
     {
         // `cmd` does not understand Rust's backslash-quote escaping, so the
