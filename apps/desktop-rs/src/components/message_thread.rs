@@ -121,13 +121,39 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
                         Some(ToolCallView { id, name, arguments, response })
                     })
                     .collect();
-                groups.push(Group::Assistant { message: message.clone(), tool_calls });
+                push_assistant(&mut groups, message.clone(), tool_calls);
                 index += 1;
             }
             _ => index += 1,
         }
     }
     groups
+}
+
+/// Adds an assistant turn, folding back-to-back tool-only turns (no answer
+/// text) into the previous one, so a run of calls shows as one activity row
+/// instead of "Used 1 tool / Used 4 tools / Used 1 tool". Their reasoning is
+/// joined into the one collapsed thought.
+fn push_assistant(groups: &mut Vec<Group>, message: RunMessage, tool_calls: Vec<ToolCallView>) {
+    if message.content.trim().is_empty() && !tool_calls.is_empty() {
+        if let Some(Group::Assistant { message: previous, tool_calls: previous_calls }) = groups.last_mut() {
+            if previous.content.trim().is_empty() && !previous_calls.is_empty() && previous.model == message.model {
+                previous_calls.extend(tool_calls);
+                let reasoning = message.reasoning_content.unwrap_or_default();
+                if !reasoning.trim().is_empty() {
+                    let joined = match previous.reasoning_content.take().filter(|text| !text.trim().is_empty()) {
+                        Some(earlier) => format!("{earlier}
+
+{reasoning}"),
+                        None => reasoning,
+                    };
+                    previous.reasoning_content = Some(joined);
+                }
+                return;
+            }
+        }
+    }
+    groups.push(Group::Assistant { message, tool_calls });
 }
 
 /// Whether each top-level group shows the model label (UX-025): only the
@@ -932,6 +958,26 @@ mod patch_progress_tests {
             Group::Assistant { message: message("assistant", Some("m2")), tool_calls: vec![] },
         ];
         assert_eq!(model_label_flags(&groups), vec![false, true, false, true, false, false]);
+    }
+
+    #[test]
+    fn back_to_back_tool_turns_fold_into_one_activity_row() {
+        let turn = |id: &str, call: &str, content: &str| RunMessage {
+            id: id.into(),
+            content: content.into(),
+            raw_response: Some(serde_json::json!([{ "id": call, "function": { "name": "read_file", "arguments": "{}" } }]).to_string()),
+            ..message("assistant", Some("m1"))
+        };
+        let messages = vec![message("user", None), turn("t1", "a", ""), turn("t2", "b", ""), turn("t3", "c", "Done.")];
+        let groups = build_groups(&messages);
+        assert_eq!(groups.len(), 3);
+        match &groups[1] {
+            Group::Assistant { message, tool_calls } => {
+                assert_eq!(message.id, "t1");
+                assert_eq!(tool_calls.iter().map(|call| call.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+            }
+            _ => panic!("expected the folded assistant group"),
+        }
     }
 
     #[test]

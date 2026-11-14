@@ -50,8 +50,11 @@ for (const kind of ['input', 'keyup', 'click', 'focus', 'select']) document.addE
 /// Reports images pasted into the composer as `{ mime, data }` (base64, no
 /// `data:` prefix). An image-only paste is cancelled so no text is inserted;
 /// the clipboard files are read synchronously, the encoding is async.
+// A remounted composer replaces the previous listener (whose channel is
+// gone) instead of adding a second one that would duplicate images.
 const PASTE_SCRIPT: &str = r#"
-document.addEventListener('paste', (e) => {
+if (window.lcgnPaste) document.removeEventListener('paste', window.lcgnPaste, true);
+window.lcgnPaste = (e) => {
   const t = e.target;
   if (!t || !t.matches || !t.matches('.composer textarea') || !e.clipboardData) return;
   const items = Array.from(e.clipboardData.items || []);
@@ -66,7 +69,8 @@ document.addEventListener('paste', (e) => {
     };
     reader.readAsDataURL(file);
   }
-}, true);
+};
+document.addEventListener('paste', window.lcgnPaste, true);
 "#;
 
 /// Puts the caret at UTF-16 offset `at` once the new value has rendered.

@@ -65,8 +65,7 @@ pub fn RightPanel() -> Element {
         }
         div {
             class: "right-panel-body",
-            EnvironmentSection {}
-            ContextSection {}
+            SummaryCard {}
             for tab in RightPanelTab::ALL {
                 InspectorSection {
                     key: "{tab.label_key()}",
@@ -102,7 +101,8 @@ fn EmptyState(icon: Element, title: String, hint: Option<String>) -> Element {
 #[component]
 fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
     let store: UiStore = use_context();
-    let initially_open = matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents)
+    // Plan and Agents start open only when they have something to show.
+    let initially_open = (count.is_some() && matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents))
         || *store.right_panel_tab.peek() == tab;
     let mut open = use_signal(|| initially_open);
     // "Review changes" / `/diff` select a tab: open its section.
@@ -161,107 +161,231 @@ fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
     }
 }
 
-/// Project folder, git branch and execution mode of the current conversation.
+/// Added and removed lines of a unified diff (file headers excluded).
+pub fn diff_line_counts(diff: &str) -> (usize, usize) {
+    diff.lines().fold((0, 0), |(added, removed), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (added + 1, removed)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
+}
+
+/// Files the main agent read or edited in this conversation, in first-use
+/// order (the `path` argument of its file tools).
+pub fn source_files(messages: &[locagens_core::db::RunMessage]) -> Vec<String> {
+    const FILE_TOOLS: &[&str] = &["read_file", "write_file", "edit_file", "view_image"];
+    let mut files: Vec<String> = Vec::new();
+    for message in messages.iter().filter(|m| m.role == "assistant" && m.agent_role.is_none()) {
+        let calls = message
+            .raw_response
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+            .unwrap_or_default();
+        for call in calls {
+            let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            if !FILE_TOOLS.contains(&name) {
+                continue;
+            }
+            let path = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|args| serde_json::from_str::<Value>(args).ok())
+                .and_then(|args| args.get("path").and_then(Value::as_str).map(str::to_string));
+            if let Some(path) = path.filter(|path| !path.is_empty() && !files.contains(path)) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Role and derived state of every sub-agent of the conversation.
+fn agent_states(store: &UiStore) -> Vec<(String, &'static str)> {
+    let messages = store.messages.read();
+    let run_live = super::run_active(store.active_run.read().as_ref());
+    let mut agents: Vec<(String, String)> = Vec::new();
+    for agent in store.spawned_agents.read().iter() {
+        if let Some(name) = agent.get("name").and_then(Value::as_str) {
+            let role = agent.get("role").and_then(Value::as_str).unwrap_or("explorer");
+            agents.push((name.to_string(), role.to_string()));
+        }
+    }
+    for message in messages.iter() {
+        if let Some(role) = message.agent_role.clone() {
+            let name = message.agent_name.clone().unwrap_or_else(|| role.clone());
+            if !agents.iter().any(|(known, _)| *known == name) {
+                agents.push((name, role));
+            }
+        }
+    }
+    agents.into_iter().map(|(name, role)| (role, agent_status(&messages, &name, run_live))).collect()
+}
+
+const SOURCES_PREVIEW: usize = 4;
+
+/// Codex-style summary card at the top of the inspector: project, branch
+/// and mode; changed lines; sub-agents; context fill; files used. Rows open
+/// the matching section below.
 #[component]
-fn EnvironmentSection() -> Element {
+fn SummaryCard() -> Element {
     let store: UiStore = use_context();
+    let mut show_all_sources = use_signal(|| false);
     let project_path = inspector_project_path(&store);
     let branch = use_resource(move || async move {
         let path = inspector_project_path(&store)?;
-        let state = core();
-        locagens_core::api::projects::git_status(&state, &path)
+        locagens_core::api::projects::git_status(&core(), &path)
             .await
             .ok()
             .filter(|status| status.is_git)
             .and_then(|status| status.branch)
     });
+    let branch = branch.read().clone().flatten();
     let folder = project_path
         .as_deref()
         .and_then(|path| std::path::Path::new(path).file_name())
-        .map(|name| name.to_string_lossy().to_string());
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| store.t("inspector.no_project").to_string());
     let selected_mode = store.selected_mode.read().clone();
     let mode = store.t(mode_key(&selected_mode));
-    let mode_class = if selected_mode == "auto" { "grow warn-text" } else { "grow" };
-    let branch = branch.read().clone().flatten();
+    let mode_class = if selected_mode == "auto" { "summary-mode warn" } else { "summary-mode" };
+
+    let (added, removed) = store.turn_diff.read().as_ref().map(|(diff, _)| diff_line_counts(diff)).unwrap_or_default();
+    let agents = agent_states(&store);
+    let working = agents.iter().filter(|(_, status)| *status != "agents.finished").count();
+    let finished = agents.len() - working;
+    let agent_text = match (working, finished) {
+        (0, 0) => store.t("inspector.none").to_string(),
+        (0, done) => store.tf("inspector.n_finished", &[&done.to_string()]),
+        (busy, _) => store.tf("inspector.n_working", &[&busy.to_string()]),
+    };
+    let context = store
+        .active_run_id
+        .read()
+        .is_some()
+        .then(|| store.context_usage.read().clone())
+        .flatten()
+        .filter(|context| context.used_tokens > 0);
+    let sources = source_files(&store.messages.read());
+    let shown: Vec<String> = if *show_all_sources.read() { sources.clone() } else { sources.iter().take(SOURCES_PREVIEW).cloned().collect() };
+    let open_tab = move |tab: RightPanelTab| {
+        let mut store = store;
+        store.right_panel_tab.set(tab);
+    };
+
     rsx! {
-        section {
-            class: "inspector-section",
-            div { class: "section-label", "{store.t(\"inspector.environment\")}" }
+        div {
+            class: "summary-card",
             div {
-                class: "section-body",
-                if let Some(folder) = folder {
-                    div {
-                        class: "info-row",
-                        title: "{project_path.clone().unwrap_or_default()}",
-                        {icon_folder()}
-                        span { class: "grow", "{folder}" }
-                    }
-                }
+                class: "summary-head",
+                title: "{project_path.clone().unwrap_or_default()}",
+                span { class: "summary-project", "{folder}" }
                 if let Some(branch) = branch {
-                    div {
-                        class: "info-row",
-                        {icon_git_branch()}
-                        span { class: "grow mono", "{branch}" }
+                    span { class: "summary-branch", {icon_git_branch()} "{branch}" }
+                } else {
+                    span { class: "summary-branch" }
+                }
+                span { class: "{mode_class}", "{mode}" }
+            }
+            button {
+                class: "summary-row",
+                onclick: move |_| open_tab(RightPanelTab::Git),
+                span { class: "summary-label", "{store.t(\"inspector.changes\")}" }
+                if added + removed == 0 {
+                    span { class: "summary-muted", "{store.t(\"inspector.none\")}" }
+                } else {
+                    span { class: "summary-add", "+{added}" }
+                    span { class: "summary-del", "−{removed}" }
+                }
+            }
+            button {
+                class: "summary-row",
+                onclick: move |_| open_tab(RightPanelTab::Agents),
+                span { class: "summary-label", "{store.t(\"inspector.subagents\")}" }
+                span {
+                    class: "summary-agents",
+                    for (index, (role, status)) in agents.iter().take(6).enumerate() {
+                        span {
+                            key: "{index}",
+                            class: if *status == "agents.finished" { "agent-dot" } else { "agent-dot live" },
+                            title: "{role_label(&store, role)} · {store.t(status)}",
+                            if role == "worker" { {icon_wrench()} } else { {icon_search()} }
+                        }
                     }
                 }
+                span { class: "summary-muted", "{agent_text}" }
+            }
+            if let Some(context) = context {
                 div {
-                    class: "info-row",
-                    {icon_shield()}
-                    span { class: "{mode_class}", "{mode}" }
+                    class: "summary-row static",
+                    span { class: "summary-label", "{store.t(\"inspector.context\")}" }
+                    if let Some(percent) = context.percent {
+                        div {
+                            class: "meter summary-meter",
+                            role: "progressbar",
+                            "aria-valuemin": "0",
+                            "aria-valuemax": "100",
+                            "aria-valuenow": "{percent}",
+                            "aria-label": "{store.t(\"inspector.window_used\")}",
+                            div {
+                                class: if percent >= 90 { "meter-fill danger" } else if percent >= 75 { "meter-fill warn" } else { "meter-fill" },
+                                style: "width: {percent}%",
+                            }
+                        }
+                        span { class: "summary-muted", "{percent}%" }
+                    } else {
+                        span { class: "summary-muted", "{crate::state_ui::fmt_tokens(context.used_tokens)}" }
+                    }
+                }
+            }
+            div {
+                class: "summary-sources",
+                div {
+                    class: "summary-row static",
+                    span { class: "summary-label", "{store.t(\"inspector.sources\")}" }
+                    if !sources.is_empty() {
+                        span { class: "summary-muted", "{sources.len()}" }
+                    }
+                }
+                if sources.is_empty() {
+                    div { class: "summary-hint", "{store.t(\"inspector.no_sources\")}" }
+                }
+                for path in shown.iter() {
+                    div {
+                        key: "{path}",
+                        class: "source-row",
+                        title: "{path}",
+                        span { class: "source-name", "{source_name(path)}" }
+                        span { class: "source-dir", "{source_dir(path)}" }
+                    }
+                }
+                if sources.len() > SOURCES_PREVIEW {
+                    button {
+                        class: "summary-more",
+                        onclick: move |_| {
+                            let next = !*show_all_sources.read();
+                            show_all_sources.set(next);
+                        },
+                        if *show_all_sources.read() { "{store.t(\"inspector.show_less\")}" } else { "{store.t(\"inspector.show_all\")}" }
+                    }
                 }
             }
         }
     }
 }
 
-/// Context-window fill of the active run: tokens after the main agent's
-/// latest model call against the model's window (`api::runs::context_usage`,
-/// refreshed on every `usage_recorded` event).
-#[component]
-fn ContextSection() -> Element {
-    let store: UiStore = use_context();
-    if store.active_run_id.read().is_none() {
-        return rsx! {};
-    }
-    let context = store.context_usage.read().clone().unwrap_or_default();
-    let used = crate::state_ui::fmt_tokens(context.used_tokens);
-    let amount = match context.context_window {
-        Some(window) => format!("{used} / {}", crate::state_ui::fmt_tokens(window)),
-        None => store.tf("header.tokens", &[&used]),
-    };
-    let meter_class = match context.percent {
-        Some(percent) if percent >= 90 => "meter-fill danger",
-        Some(percent) if percent >= 75 => "meter-fill warn",
-        _ => "meter-fill",
-    };
-    rsx! {
-        section {
-            class: "inspector-section",
-            div { class: "section-label", "{store.t(\"inspector.context\")}" }
-            div {
-                class: "section-body",
-                div {
-                    class: "info-row",
-                    span { class: "grow", "{store.t(\"inspector.window_used\")}" }
-                    span { class: "mono", "{amount}" }
-                    if let Some(percent) = context.percent {
-                        span { class: "mono muted", "{percent}%" }
-                    }
-                }
-                if let Some(percent) = context.percent {
-                    div {
-                        class: "meter",
-                        role: "progressbar",
-                        "aria-valuemin": "0",
-                        "aria-valuemax": "100",
-                        "aria-valuenow": "{percent}",
-                        "aria-label": "{store.t(\"inspector.window_used\")}",
-                        div { class: "{meter_class}", style: "width: {percent}%" }
-                    }
-                }
-            }
-        }
-    }
+/// File name of a workspace path.
+fn source_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Parent folder of a workspace path ("" at the root).
+fn source_dir(path: &str) -> &str {
+    let name = source_name(path);
+    path[..path.len() - name.len()].trim_end_matches(['/', '\\'])
 }
 
 /// The active plan: title, Markdown body and tracked tasks.
@@ -1145,5 +1269,31 @@ fn TerminalTab() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use locagens_core::db::RunMessage;
+
+    #[test]
+    fn diff_counts_skip_file_headers() {
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n+more\n ctx\n";
+        assert_eq!(diff_line_counts(diff), (2, 1));
+    }
+
+    #[test]
+    fn sources_are_unique_main_agent_file_paths() {
+        let call = |name: &str, path: &str| serde_json::json!({ "function": { "name": name, "arguments": serde_json::json!({ "path": path }).to_string() } });
+        let main = RunMessage {
+            role: "assistant".into(),
+            raw_response: Some(serde_json::json!([call("read_file", "src/a.rs"), call("run_command", "x"), call("edit_file", "src/a.rs"), call("write_file", "b.md")]).to_string()),
+            ..Default::default()
+        };
+        let child = RunMessage { agent_role: Some("explorer".into()), ..main.clone() };
+        assert_eq!(source_files(&[main, child]), ["src/a.rs", "b.md"]);
+        assert_eq!((source_name("src/a.rs"), source_dir("src/a.rs")), ("a.rs", "src"));
+        assert_eq!(source_dir("b.md"), "");
     }
 }

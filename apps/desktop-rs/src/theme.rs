@@ -718,7 +718,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
   transition: background 0.12s ease;
 }
 .tool-card .tool-head:hover { background: var(--hover); }
-.tool-card .tool-name { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--text); flex: none; }
+.tool-card .tool-name { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--text-2); flex: none; }
 .tool-card .tool-args { flex: 1; min-width: 0; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
 .tool-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); flex: none; }
 .tool-card .tool-body { border-top: 1px solid var(--border); padding: 8px 10px; }
@@ -879,6 +879,44 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .right-panel-head { padding: 0 var(--controls-w) 0 16px; border-bottom-color: transparent; }
 .head-title { font-size: 12px; font-weight: 500; color: var(--text-3); }
 .right-panel-body { flex: 1; overflow-y: auto; padding: 4px 8px 16px; display: flex; flex-direction: column; gap: 4px; }
+/* Codex-style floating summary card at the top of the inspector. */
+.summary-card {
+  margin: 4px 2px 8px; padding: 6px; border-radius: 14px;
+  background: var(--bg-elevated); border: 1px solid var(--border); box-shadow: var(--shadow-pop);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.summary-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px 8px; }
+.summary-project { flex: none; max-width: 55%; font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-branch { display: inline-flex; align-items: center; gap: 3px; min-width: 0; flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.summary-branch .icon { width: 12px; height: 12px; flex: none; }
+.summary-mode { flex: none; font-size: 11px; color: var(--text-3); padding: 1px 7px; border-radius: 999px; background: var(--hover); }
+.summary-mode.warn { color: var(--warn); }
+.summary-row {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-radius: 8px;
+  font-size: 12.5px; color: var(--text-2); text-align: left; width: 100%;
+}
+button.summary-row:hover { background: var(--hover); color: var(--text); }
+.summary-row.static { cursor: default; }
+.summary-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary-muted { flex: none; font-size: 12px; color: var(--text-3); }
+.summary-add { flex: none; font-family: var(--font-mono); font-size: 12px; color: var(--ok); }
+.summary-del { flex: none; font-family: var(--font-mono); font-size: 12px; color: var(--err); }
+.summary-agents { display: inline-flex; align-items: center; }
+.agent-dot {
+  width: 20px; height: 20px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-popover); border: 1px solid var(--border-strong); color: var(--text-3); margin-left: -5px;
+}
+.agent-dot:first-child { margin-left: 0; }
+.agent-dot .icon { width: 11px; height: 11px; }
+.agent-dot.live { color: var(--accent-hover); border-color: var(--accent-ring); }
+.summary-meter { width: 72px; flex: none; }
+.summary-sources { display: flex; flex-direction: column; gap: 1px; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+.summary-hint { padding: 0 8px 6px; font-size: 12px; color: var(--text-3); }
+.source-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 3px 8px; font-size: 12.5px; }
+.source-name { flex: none; max-width: 60%; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-dir { flex: 1; min-width: 0; font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.summary-more { align-self: flex-start; margin: 2px 4px 4px; padding: 3px 6px; border-radius: 6px; font-size: 12px; color: var(--text-3); }
+.summary-more:hover { background: var(--hover); color: var(--text-2); }
 .inspector-section { display: flex; flex-direction: column; padding: 4px 0; }
 .inspector-section + .inspector-section { border-top: 1px solid var(--border); }
 .section-label, .section-head {
