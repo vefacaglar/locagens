@@ -144,7 +144,13 @@ pub fn event_scope(active: Option<&str>, stream_run: &str) -> EventScope {
 pub fn applies_in_background(kind: &str) -> bool {
     matches!(
         kind,
-        "status_changed" | "run_title_changed" | "run_completed" | "run_failed" | "permission_requested" | "question_requested"
+        "status_changed"
+            | "run_title_changed"
+            | "run_completed"
+            | "run_failed"
+            | "permission_requested"
+            | "question_requested"
+            | "queued_messages_undelivered"
     )
 }
 
@@ -253,6 +259,15 @@ pub fn take_undelivered(queue: &mut Vec<QueuedMessage>, run_id: &str) -> Option<
     (!texts.is_empty()).then(|| texts.join("\n\n"))
 }
 
+/// The texts of a `queued_messages_undelivered` event (FR-010).
+pub fn undelivered_texts(event: &Value) -> Vec<String> {
+    event
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).map(str::to_string).filter(|text| !text.trim().is_empty()).collect())
+        .unwrap_or_default()
+}
+
 /// Full-window overlays opened from the keyboard layer (UX-019).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -342,6 +357,9 @@ pub struct UiStore {
     pub sidebar_open: Signal<bool>,
     /// Messages queued on generating runs, not yet picked up.
     pub queued: Signal<Vec<QueuedMessage>>,
+    /// Queued messages a background run could not deliver (FR-010); they go
+    /// back into the composer when that run is opened.
+    pub undelivered: Signal<Vec<QueuedMessage>>,
     /// Palette / shortcuts overlay.
     pub overlay: Signal<Overlay>,
     /// Whether the composer's model picker is open (`Ctrl+M`, `/model`).
@@ -403,6 +421,7 @@ pub fn use_ui_store() -> UiStore {
         prompt: use_signal(String::new),
         sidebar_open: use_signal(|| true),
         queued: use_signal(Vec::new),
+        undelivered: use_signal(Vec::new),
         overlay: use_signal(|| Overlay::None),
         model_picker_open: use_signal(|| false),
         prompt_history: use_signal(Vec::new),
@@ -656,6 +675,9 @@ impl UiStore {
                 }
                 store.adopt_run_selection(&run);
                 store.active_run.set(Some(run));
+            }
+            if let Some(text) = store.undelivered.with_mut(|list| take_undelivered(list, &run_id)) {
+                store.restore_to_composer(text);
             }
             store.messages.set(messages);
             store.plan.set(plan);
@@ -911,18 +933,39 @@ impl UiStore {
                 store.pending_question.set(None);
                 // UX-011: undelivered queued text goes back into the composer.
                 if let Some(text) = store.queued.with_mut(|queue| take_undelivered(queue, &run_id)) {
-                    store.prompt.with_mut(|prompt| {
-                        *prompt = if prompt.trim().is_empty() { text } else { format!("{text}\n\n{prompt}") };
-                    });
-                    store.toast(store.t("toast.queued_restored").to_string());
+                    store.restore_to_composer(text);
                 }
                 // A failure is shown as a block at the end of the thread
                 // (UX-008), read from the run's `error_message`.
+            }
+            "queued_messages_undelivered" => {
+                // FR-010: the core's list of queued messages the turn never
+                // delivered replaces the strip's guess.
+                let texts = undelivered_texts(&event);
+                store.queued.with_mut(|queue| queue.retain(|queued| queued.run_id != run_id));
+                if texts.is_empty() {
+                    return true;
+                }
+                if foreground {
+                    store.restore_to_composer(texts.join("\n\n"));
+                } else {
+                    let entries = texts.into_iter().map(|text| QueuedMessage { run_id: run_id.to_string(), text });
+                    store.undelivered.with_mut(|list| list.extend(entries));
+                }
             }
             // `round_started`, `run_started`, unknown event types — ignored.
             _ => {}
         }
         true
+    }
+
+    /// Puts undelivered queued text in front of the composer's draft.
+    fn restore_to_composer(&self, text: String) {
+        let mut store = *self;
+        store.prompt.with_mut(|prompt| {
+            *prompt = if prompt.trim().is_empty() { text } else { format!("{text}\n\n{prompt}") };
+        });
+        store.toast(store.t("toast.queued_restored").to_string());
     }
 
     /// Reloads the usage summary and context fill of `run_id` (dropped when
@@ -1215,6 +1258,13 @@ mod routing_tests {
         assert_eq!(toast_duration("short"), std::time::Duration::from_secs(4));
         assert!(toast_duration(&"x".repeat(200)) > std::time::Duration::from_secs(4));
         assert_eq!(toast_duration(&"x".repeat(5000)), std::time::Duration::from_secs(12));
+    }
+
+    #[test]
+    fn undelivered_event_lists_its_texts() {
+        let event = serde_json::json!({"type": "queued_messages_undelivered", "messages": ["one", " ", "two"]});
+        assert_eq!(undelivered_texts(&event), vec!["one".to_string(), "two".to_string()]);
+        assert!(undelivered_texts(&serde_json::json!({"type": "x"})).is_empty());
     }
 
     #[test]

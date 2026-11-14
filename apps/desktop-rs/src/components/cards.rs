@@ -191,6 +191,22 @@ fn PermissionCard(request: Value) -> Element {
             })
         });
 
+    // UX-014: why the card asks, and what a standing answer would cover.
+    let reason = preview.as_ref().and_then(|preview| preview.get("reason")).map(|reason| {
+        let code = reason.get("code").and_then(Value::as_str).unwrap_or_default();
+        match reason_key(code) {
+            Some(key) => store.t(key).to_string(),
+            None => reason.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
+        }
+    });
+    let one_time_only = preview.as_ref().and_then(|preview| preview.get("oneTimeOnly")).and_then(Value::as_bool).unwrap_or(false);
+    let grant_label = preview
+        .as_ref()
+        .and_then(|preview| preview.get("grantLabel"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
     let busy = use_signal(|| false);
     let mut menu_open = use_signal(|| false);
     let answer = move |decision: &'static str| {
@@ -230,6 +246,9 @@ fn PermissionCard(request: Value) -> Element {
             if let Some(asked_by) = asked_by {
                 div { class: "pc-agent", "{asked_by}" }
             }
+            if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+                div { class: "pc-reason", "{reason}" }
+            }
             div {
                 class: "pc-scroll",
                 if !detail.is_empty() {
@@ -253,6 +272,7 @@ fn PermissionCard(request: Value) -> Element {
                     },
                     "{store.t(\"perm.allow_once\")}"
                 }
+                if !one_time_only {
                 div {
                     class: "pc-menu-wrap",
                     button {
@@ -286,13 +306,20 @@ fn PermissionCard(request: Value) -> Element {
                                                 menu_open.set(false);
                                                 answer(decision);
                                             },
-                                            span { class: "ccm-item-label", "{store.t(label)}" }
+                                            span {
+                                                class: "ccm-item-label",
+                                                "{store.t(label)}"
+                                                if decision != "allow_run" && !grant_label.is_empty() {
+                                                    span { class: "pc-grant", "{grant_label}" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
                 }
                 button {
                     class: "danger",
@@ -303,6 +330,18 @@ fn PermissionCard(request: Value) -> Element {
                 span { class: "pc-keys", "{store.t(\"perm.keys\")}" }
             }
         }
+    }
+}
+
+/// i18n key of a permission reason code (UX-014); unknown codes fall back
+/// to the core's English sentence.
+pub fn reason_key(code: &str) -> Option<&'static str> {
+    match code {
+        "protected_path" => Some("perm.reason_protected_path"),
+        "dangerous_command" => Some("perm.reason_dangerous_command"),
+        "network" => Some("perm.reason_network"),
+        "mode" => Some("perm.reason_mode"),
+        _ => None,
     }
 }
 
@@ -513,6 +552,13 @@ fn QuestionCard(request: Value) -> Element {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reason_codes_translate_and_unknown_ones_fall_back() {
+        assert_eq!(reason_key("protected_path"), Some("perm.reason_protected_path"));
+        assert_eq!(reason_key("network"), Some("perm.reason_network"));
+        assert_eq!(reason_key("something_new"), None);
+    }
 
     #[test]
     fn titles_follow_the_action() {

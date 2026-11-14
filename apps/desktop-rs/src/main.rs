@@ -78,8 +78,26 @@ fn main() {
         // FR-034: the window never navigates away from the app; web links
         // (already filtered to http / https / mailto) open in the browser.
         .with_navigation_handler(|_| false)
+        // FR-022: the event loop ends (window closed, quit): stop the exec
+        // sessions of every run before the process exits.
+        .with_custom_event_handler(|event, _| {
+            if matches!(event, dioxus::desktop::tao::event::Event::LoopDestroyed) {
+                shutdown_core();
+            }
+        })
         .with_window(window);
     dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
+}
+
+/// Runs `api::runs::shutdown` on its own thread and runtime (the event loop
+/// thread may already be inside the app's runtime) and waits for it.
+fn shutdown_core() {
+    let worker = std::thread::spawn(|| {
+        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            runtime.block_on(locagens_core::api::runs::shutdown(&state_ui::core()));
+        }
+    });
+    let _ = worker.join();
 }
 
 /// Hides the webview's own context menu except in text fields and on a text
