@@ -128,7 +128,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "from": path_prop("Source relative path."),
                 "to": path_prop("Destination relative path.")
             }), &["from", "to"]),
-        def("search_files", "Search file contents across the workspace (skips .git/node_modules/target). Returns path:line matches with context.",
+        def("search_files", "Search file contents across the workspace (skips .git/node_modules/target and .gitignore'd files). Returns path:line matches with context.",
             json!({
                 "query": json!({ "type": "string", "description": "Text to search for (regular expression allowed)." }),
                 "path": json!({ "type": "string", "description": "Optional subdirectory to search within." }),
@@ -693,20 +693,24 @@ fn search_files(project: &Path, args: &Value) -> Result<String, String> {
 
     let mut matches: Vec<String> = Vec::new();
     let mut size = 0usize;
-    let walker = walkdir::WalkDir::new(&base)
-        .max_depth(MAX_SEARCH_DEPTH)
+    // `ignore` honours .gitignore / .ignore / global excludes (also outside a
+    // git repo); dot-directories are searched except the skip list.
+    let walker = ignore::WalkBuilder::new(&base)
+        .max_depth(Some(MAX_SEARCH_DEPTH))
         .follow_links(false)
-        .into_iter()
+        .hidden(false)
+        .require_git(false)
         .filter_entry(|entry| {
-            if entry.depth() == 0 || !entry.file_type().is_dir() {
+            if entry.depth() == 0 || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 return true;
             }
             let name = entry.file_name().to_string_lossy();
             !SEARCH_SKIP_DIRS.contains(&name.as_ref())
-        });
+        })
+        .build();
 
     for entry in walker.filter_map(|entry| entry.ok()) {
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
