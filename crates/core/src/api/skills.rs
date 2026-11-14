@@ -67,6 +67,17 @@ pub async fn get_skill(state: &AppState, name: &str, project_path: Option<&str>)
     }
 }
 
+/// The full `SKILL.md` text of one skill, for editing (the listed `body`
+/// lacks the frontmatter that `install_skill` requires).
+pub async fn skill_source(state: &AppState, name: &str, project_path: Option<&str>) -> ApiResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("Skill name is required"));
+    }
+    let project = resolve_project(state, project_path);
+    skill_service::source(name, project.as_deref()).ok_or_else(|| ApiError::not_found(format!("Skill \"{name}\" not found")))
+}
+
 /// Installs a SKILL.md into the user or project skills root.
 pub async fn install_skill(state: &AppState, input: InstallSkillInput) -> ApiResult<skill_service::SkillSummary> {
     let target = match input.target.as_deref() {

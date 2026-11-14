@@ -9,11 +9,13 @@ pub mod plugins;
 pub mod processes;
 pub mod projects;
 pub mod providers;
+pub mod queue;
 pub mod review;
 pub mod runs;
 pub mod security;
 pub mod skills;
 pub mod symbols;
+pub mod ui_state;
 
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 

@@ -196,6 +196,12 @@ pub async fn set_pi_auth(state: &AppState, input: &SetPiAuthInput) -> ApiResult<
         .map_err(|err| ApiError::bad_request(format!("Failed to update pi auth: {err}")))
 }
 
+/// Every provider the user can connect (built-ins first), with how it is
+/// authenticated now; statuses never carry key values.
+pub fn login_providers(state: &AppState) -> Vec<crate::pi_providers::LoginProvider> {
+    state.pi.login_providers()
+}
+
 /// Providers that support OAuth sign-in, with the flow each one uses.
 pub fn oauth_providers() -> Vec<OAuthProviderInfo> {
     locagens_config::oauth::oauth_providers().to_vec()

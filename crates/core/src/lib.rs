@@ -17,6 +17,7 @@ pub mod paths;
 pub mod pi_providers;
 pub mod services;
 pub mod state;
+pub mod tool_labels;
 pub mod util;
 
 /// Shared protocol types (review findings etc.) for the UIs.
