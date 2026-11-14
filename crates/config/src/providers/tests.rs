@@ -386,8 +386,9 @@ fn config_map_save_deletes_missing_providers() {
     assert_eq!(meta["providers"]["acme"]["displayName"], "Acme");
     assert_eq!(meta["providers"]["acme"]["modelSettings"]["m1"]["contextLimit"], 4096);
 
-    // The second map keeps only acme (with the preserve sentinel);
-    // anthropic and grox are missing, so they are deleted entirely.
+    // The second map keeps only acme (with the preserve sentinel). grox, a
+    // custom provider, is deleted entirely; anthropic only has a key (no
+    // custom config), so it stays: credentials go through `auth logout`.
     let mut entries = HashMap::new();
     entries.insert(
         "acme".to_string(),
@@ -400,7 +401,7 @@ fn config_map_save_deletes_missing_providers() {
 
     let auth = PiProviderManager::read_json(&agent.join("auth.json"));
     assert_eq!(auth["acme"]["key"], "sk-acme");
-    assert!(auth.get("anthropic").is_none());
+    assert_eq!(auth["anthropic"]["key"], "sk-ant");
     assert!(auth.get("grox").is_none());
     let models_doc = PiProviderManager::read_json(&agent.join("models.json"));
     assert!(models_doc["providers"].get("grox").is_none());
@@ -1280,6 +1281,48 @@ async fn a_fetched_model_list_replaces_stale_catalog_entries() {
     let again = manager.refresh_stale_model_lists(MODEL_LIST_MAX_AGE).await;
     assert!(again.iter().all(|(id, _)| id != "mylive"));
     assert_eq!(log.lock().unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
+#[test]
+fn saving_configs_never_drops_sign_ins_or_overwrites_a_broken_models_json() {
+    let (agent, support) = temp_dirs("save-safe");
+    std::fs::write(
+        agent.join("auth.json"),
+        json!({
+            "xai": { "type": "oauth", "access": "fake-access", "refresh": "fake-refresh", "expires": 1 },
+            "opencode-go": { "type": "api_key", "key": "sk-fake-go" },
+            "gone": { "type": "api_key", "key": "sk-fake-gone" }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "gone": { "baseUrl": "https://gone.example/v1" } } }).to_string(),
+    )
+    .unwrap();
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+
+    // Saving an empty map removes only the custom `gone` provider (entry + key).
+    manager.save_configs(&HashMap::new()).unwrap();
+    let auth: Value = serde_json::from_str(&std::fs::read_to_string(agent.join("auth.json")).unwrap()).unwrap();
+    assert!(auth.get("xai").is_some(), "the OAuth sign-in stays");
+    assert!(auth.get("opencode-go").is_some(), "a key without custom config stays");
+    assert!(auth.get("gone").is_none());
+
+    // A hand-broken models.json is reported, not replaced by `{}`.
+    std::fs::write(agent.join("models.json"), "{ not json").unwrap();
+    let mut entries = HashMap::new();
+    entries.insert(
+        "custom".to_string(),
+        SaveProviderConfigInput { base_url: Some("https://custom.example/v1".into()), ..Default::default() },
+    );
+    let err = manager.save_configs(&entries).unwrap_err().to_string();
+    assert!(err.contains("not valid JSON"), "{err}");
+    assert_eq!(std::fs::read_to_string(agent.join("models.json")).unwrap(), "{ not json");
 
     let _ = std::fs::remove_dir_all(agent);
     let _ = std::fs::remove_dir_all(support);
