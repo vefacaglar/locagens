@@ -9,26 +9,6 @@ const path = require("node:path");
 
 const REPO = "vefacaglar/locagens";
 
-const PLATFORMS = {
-  "darwin-arm64": "lcgn-darwin-arm64/bin/lcgn",
-  "darwin-x64": "lcgn-darwin-x64/bin/lcgn",
-  "win32-x64": "lcgn-win32-x64/bin/lcgn.exe",
-  "win32-arm64": "lcgn-win32-x64/bin/lcgn.exe",
-};
-
-function resolveOptionalBinary() {
-  const target = PLATFORMS[`${process.platform}-${process.arch}`];
-  if (!target) {
-    return null;
-  }
-  try {
-    const resolved = require.resolve(target);
-    return fs.existsSync(resolved) ? resolved : null;
-  } catch {
-    return null;
-  }
-}
-
 function downloadFile(url, destPath, redirectsLeft = 10) {
   return new Promise((resolve, reject) => {
     const req = https.get(
@@ -48,7 +28,9 @@ function downloadFile(url, destPath, redirectsLeft = 10) {
         }
         if (status !== 200) {
           res.resume();
-          reject(new Error(`Download failed (${status}) for ${url}`));
+          const err = new Error(`Download failed (${status}) for ${url}`);
+          err.statusCode = status;
+          reject(err);
           return;
         }
         const out = fs.createWriteStream(destPath);
@@ -102,9 +84,17 @@ async function ensureCachedBinary(version) {
   const tmpBin = path.join(cacheDir, `.lcgn-v${version}-${process.pid}.tmp`);
 
   try {
-    const url = `https://github.com/${REPO}/releases/download/v${version}/${archiveName}`;
+    const taggedUrl = `https://github.com/${REPO}/releases/download/v${version}/${archiveName}`;
+    const latestUrl = `https://github.com/${REPO}/releases/latest/download/${archiveName}`;
     console.error(`Downloading ${archiveName} (v${version})...`);
-    await downloadFile(url, archivePath);
+    try {
+      await downloadFile(taggedUrl, archivePath);
+    } catch (err) {
+      if (err.statusCode !== 404) {
+        throw err;
+      }
+      await downloadFile(latestUrl, archivePath);
+    }
 
     fs.mkdirSync(extractDir, { recursive: true });
     const tarArgs = isWin
@@ -134,12 +124,19 @@ async function ensureCachedBinary(version) {
 }
 
 async function main() {
-  let binPath = resolveOptionalBinary();
-  if (!binPath) {
-    const { version } = require("../package.json");
-    binPath = await ensureCachedBinary(version);
+  const { version } = require("../package.json");
+  if (process.argv[2] === "--install-only") {
+    try {
+      await ensureCachedBinary(version);
+    } catch (err) {
+      console.warn(
+        `Warning: could not pre-download lcgn (${err.message}). It will download on first run.`
+      );
+    }
+    process.exit(0);
   }
 
+  const binPath = await ensureCachedBinary(version);
   const result = spawnSync(binPath, process.argv.slice(2), { stdio: "inherit" });
   if (result.error) {
     console.error(`Failed to launch lcgn: ${result.error.message}`);

@@ -1,11 +1,11 @@
 {
   "name": "lcgn",
-  "version": "0.2.0",
+  "version": "1.0.1",
   "description": "Locagens CLI — local-first AI coding agent",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vefacaglar/locagens.git"
+    "url": "git+https://github.com/vefacaglar/locagens.git"
   },
   "bin": {
     "lcgn": "bin/lcgn.js"
@@ -13,12 +13,10 @@
   "files": [
     "bin/lcgn.js"
   ],
+  "scripts": {
+    "postinstall": "node bin/lcgn.js --install-only"
+  },
   "engines": {
     "node": ">=18"
-  },
-  "optionalDependencies": {
-    "lcgn-darwin-arm64": "0.2.0",
-    "lcgn-darwin-x64": "0.2.0",
-    "lcgn-win32-x64": "0.2.0"
   }
 }

@@ -19,9 +19,6 @@ npm_pkg="apps/cli/npm/package.json"
 if [ -f "$npm_pkg" ]; then
   awk -v v="$version" '
     /^  "version":[[:space:]]*"/ { sub(/:[[:space:]]*"[^"]+"/, ": \"" v "\"") }
-    /^  "optionalDependencies":[[:space:]]*\{/ { in_opt=1 }
-    in_opt && /^[[:space:]]*"[^"]+":[[:space:]]*"/ { sub(/:[[:space:]]*"[^"]+"/, ": \"" v "\"") }
-    in_opt && /\}/ { in_opt=0 }
     { print }
   ' "$npm_pkg" > "$npm_pkg.tmp"
   mv "$npm_pkg.tmp" "$npm_pkg"

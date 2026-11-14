@@ -34,24 +34,22 @@ and are not versioned per release. Versions are **not** workspace-inherited:
    (`.github/workflows/release-mac.yml`), which:
    - Sets the `version` of `apps/cli`, `apps/desktop-rs`, and
      `apps/cli/npm/package.json` from the tag (`.github/scripts/set-version.sh`),
-     so the binaries and npm packages carry the tag version even if step 1 was
+     so the binaries and npm package carry the tag version even if step 1 was
      skipped.
    - **macOS:** builds `aarch64` and `x86_64`, merges them into universal
      binaries, wraps the app as `Locagens.app` (icon from
      `apps/desktop-rs/assets/icon.png`, bundle id `com.locagens.app`), signs
-     it and `lcgn` (universal + per-arch CLI binaries) with the Developer ID
-     certificate (hardened runtime), notarizes and staples them, then builds,
-     signs, notarizes and staples `Locagens-macOS-universal.dmg`. `lcgn` ships
-     as `lcgn-macOS-universal.tar.gz`.
+     it and `lcgn` with the Developer ID certificate (hardened runtime),
+     notarizes and staples them, then builds, signs, notarizes and staples
+     `Locagens-macOS-universal.dmg`. `lcgn` ships as
+     `lcgn-macOS-universal.tar.gz`.
    - **Windows:** builds `locagens.exe` and `lcgn.exe` into
      `Locagens-Windows-x64.zip`, plus a CLI-only `lcgn-Windows-x64.zip`.
-   - **npm (`lcgn`):** stages `lcgn-darwin-arm64`, `lcgn-darwin-x64`,
-     `lcgn-win32-x64`, and the launcher package `lcgn` using
-     `.github/scripts/stage-npm.sh`, packs `.tgz` files as the `locagens-npm`
-     artifact, and publishes them to npm (`npm publish --access public`) on
-     tagged releases when `NPM_TOKEN` is set.
    - Uploads everything as workflow artifacts and publishes a GitHub Release
      with auto-generated notes.
+
+5. Once the GitHub Release is published, publish the `lcgn` npm launcher package
+   from a local terminal (see **npm distribution (`lcgn`)** below).
 
 When done, download the binaries from the GitHub Releases page.
 
@@ -124,24 +122,20 @@ npm install -g lcgn
 pnpm add -g lcgn
 ```
 
-The `lcgn` package uses `optionalDependencies` (`lcgn-darwin-arm64`,
-`lcgn-darwin-x64`, `lcgn-win32-x64`) so `npm` and `pnpm` only download the native
-binary for the user's OS/architecture without needing a `postinstall` script.
-If optional dependencies are skipped, the launcher in `apps/cli/npm/bin/lcgn.js`
-downloads the matching archive from GitHub Releases into `~/.locagens/bin/` on
-first run.
+`apps/cli/npm` is a single launcher package (`apps/cli/npm/bin/lcgn.js`) that
+downloads `lcgn-macOS-universal.tar.gz` (macOS) or `lcgn-Windows-x64.zip`
+(Windows) from the matching GitHub Release into `~/.locagens/bin/` during
+`postinstall` (or on first launch if the package manager skips `postinstall`).
 
-### Publishing secret
+### Publishing from local terminal
 
-Add a repository secret to enable automatic npm publishing on tagged releases:
+After the GitHub Release for a tag finishes uploading its binaries, publish the
+`lcgn` package locally (using interactive 2FA when prompted):
 
-| Secret | Content |
-| --- | --- |
-| `NPM_TOKEN` | npm Automation or Granular Access Token with publish permission (`lcgn`, `lcgn-darwin-arm64`, `lcgn-darwin-x64`, `lcgn-win32-x64`) |
-
-If `NPM_TOKEN` is not set, the `npm` job still packs the `.tgz` tarballs into
-the `locagens-npm` workflow artifact and emits a warning without failing the
-release workflow.
+```bash
+npm login
+npm publish apps/cli/npm --access public
+```
 
 ---
 
