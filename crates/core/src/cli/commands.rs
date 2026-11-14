@@ -19,6 +19,9 @@ use std::sync::Arc;
 /// Reasoning levels accepted by `/thinking` and `--thinking`.
 pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Names accepted by `/permissions <mode>`.
+pub const PERMISSION_MODES: [&str; 5] = ["chat", "plan", "build", "ask", "auto"];
+
 /// Shown when a state-changing command is refused during a run.
 pub const BUSY_NOTICE: &str = "Wait for the current run to finish (or press Esc to interrupt).";
 
@@ -135,6 +138,20 @@ pub async fn execute(
         }
         SlashCommand::Auto => set_mode(&mut result, session, "auto", "full access"),
         SlashCommand::Chat => set_mode(&mut result, session, "chat", "chat (no tools)"),
+        SlashCommand::Permissions(None) => {
+            result.notice(format!("Mode is {}. Set it with /permissions <{}>.", session.mode, PERMISSION_MODES.join("|")));
+        }
+        SlashCommand::Permissions(Some(name)) => match name.to_lowercase().as_str() {
+            "chat" => set_mode(&mut result, session, "chat", "chat (no tools)"),
+            "plan" => set_mode(&mut result, session, "plan", "plan (read-only)"),
+            "build" => {
+                let mode = if session.bypass { "auto" } else { "accept_edits" };
+                set_mode(&mut result, session, mode, "build");
+            }
+            "ask" => set_mode(&mut result, session, "ask_permissions", "ask permissions"),
+            "auto" | "full" => set_mode(&mut result, session, "auto", "full access"),
+            other => result.error(format!("Unknown mode \"{other}\". Use {}.", PERMISSION_MODES.join(", "))),
+        },
         SlashCommand::Thinking(None) => {
             result.notice(format!("Thinking is {}.", session.thinking.as_deref().unwrap_or("off")));
         }

@@ -35,7 +35,7 @@ pub const KEY_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Run control",
         &[
             ("Esc", "interrupt the run"),
-            ("Shift+Tab", "switch mode (Build, Plan)"),
+            ("Shift+Tab", "cycle mode (Build, Plan, Full Access)"),
             ("Up (running)", "edit the newest queued message"),
             ("Ctrl+C", "clear, interrupt, then quit"),
             ("Ctrl+D", "quit (empty composer)"),

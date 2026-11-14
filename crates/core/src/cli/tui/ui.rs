@@ -2,7 +2,7 @@
 //! the modal overlays.
 
 use super::theme;
-use super::app::{format_elapsed, App};
+use super::app::{compact_tokens, format_elapsed, App};
 use super::diff::diff_lines;
 use super::overlay::{Approval, ModelPicker, Overlay, QuestionFlow};
 use super::popup::{Popup, PopupKind};
@@ -200,6 +200,12 @@ fn status_line(app: &App) -> Line<'static> {
         Some(Overlay::Question(_)) => return waiting("⏸ Waiting for your answer"),
         Some(Overlay::ModelPicker(_)) => {
             return Line::from(Span::styled("Select a model", Style::default().fg(theme::accent())));
+        }
+        Some(Overlay::Effort(_)) => {
+            return Line::from(Span::styled("Select reasoning effort", Style::default().fg(theme::accent())));
+        }
+        Some(Overlay::Mode(_)) => {
+            return Line::from(Span::styled("Select permissions", Style::default().fg(theme::accent())));
         }
         Some(Overlay::Sessions(_)) => {
             return Line::from(Span::styled("Resume a session", Style::default().fg(theme::accent())));
@@ -405,23 +411,24 @@ fn footer_left(app: &App) -> Vec<Span<'static>> {
 
 fn footer_right(app: &App) -> Vec<Span<'static>> {
     let mut parts = Vec::new();
-    match app.usage.context_left {
-        Some(left) if left < 15 => parts.push(Span::styled(
-            format!("{left}% context left · /new starts fresh "),
+    match (app.usage.context, app.usage.context_used()) {
+        (_, Some(used)) if used > 85 => parts.push(Span::styled(
+            format!("{used}% context used · /new starts fresh "),
             Style::default().fg(theme::err()),
         )),
-        Some(left) => {
-            parts.push(Span::styled(format!("{}% context", left), dim()));
+        (Some((used, window)), _) => {
+            let (used, window) = (compact_tokens(used), compact_tokens(window));
+            parts.push(Span::styled(format!("{used}/{window} context"), dim()));
             if app.usage.cost > 0.0 {
                 parts.push(Span::styled(format!(" · {} ", format_cost(app.usage.cost)), dim()));
             } else {
                 parts.push(Span::raw(" "));
             }
         }
-        None if app.usage.cost > 0.0 => {
+        _ if app.usage.cost > 0.0 => {
             parts.push(Span::styled(format!("{} ", format_cost(app.usage.cost)), dim()));
         }
-        None => {}
+        _ => {}
     }
     parts
 }
@@ -508,6 +515,7 @@ fn draw_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         Some(Overlay::Approval(approval)) => draw_approval(f, approval, area),
         Some(Overlay::Question(flow)) => draw_question(f, flow, area),
         Some(Overlay::ModelPicker(picker)) => draw_model_picker(f, picker, area),
+        Some(Overlay::Effort(picker) | Overlay::Mode(picker)) => super::ui_overlays::draw_option_picker(f, picker, area),
         Some(Overlay::Help(help)) => super::ui_overlays::draw_help(f, help, area),
         Some(Overlay::Sessions(picker)) => super::ui_overlays::draw_sessions(f, picker, area),
         Some(Overlay::Login(flow)) => super::ui_overlays::draw_login(f, flow, area),
@@ -873,6 +881,42 @@ mod tests {
     }
 
     #[test]
+    fn smoke_renders_the_effort_picker() {
+        let mut app = app();
+        app.open_effort_picker();
+        let screen = render_both(&mut app, "effort picker");
+        assert!(screen.contains("Reasoning effort"), "{screen}");
+        assert!(screen.contains("xhigh"), "{screen}");
+        assert!(screen.contains("high  (current)"), "{screen}");
+        let small = render(&mut app, 50, 14);
+        assert!(small.contains("Reasoning effort") && small.contains("(current)"), "{small}");
+    }
+
+    #[test]
+    fn smoke_renders_the_mode_picker() {
+        let mut app = app();
+        app.open_mode_picker();
+        let screen = render_both(&mut app, "mode picker");
+        assert!(screen.contains("Ask permissions"), "{screen}");
+        assert!(screen.contains("Full Access"), "{screen}");
+        assert!(screen.contains("Build  (current)"), "{screen}");
+        let small = render(&mut app, 50, 14);
+        assert!(small.contains("Permissions") && small.contains("Full Access"), "{small}");
+    }
+
+    #[test]
+    fn footer_keeps_model_effort_and_mode_in_step() {
+        let mut app = app();
+        let footer = |app: &App| footer_left(app).iter().map(|s| s.content.to_string()).collect::<String>();
+        assert!(footer(&app).contains("acme/turbo-1 · high · Build"), "{}", footer(&app));
+        app.cycle_mode();
+        app.thinking = None;
+        assert!(footer(&app).contains("acme/turbo-1 · off · Plan"), "{}", footer(&app));
+        app.mode = "ask_permissions".into();
+        assert!(footer(&app).contains("· Ask"), "{}", footer(&app));
+    }
+
+    #[test]
     fn smoke_renders_the_help_overlay() {
         let mut app = app();
         app.overlay = Some(Overlay::Help(crate::cli::tui::help::HelpView::default()));
@@ -1003,12 +1047,12 @@ mod ux_tests {
     #[test]
     fn footer_shows_context_and_cost_and_warns_when_low() {
         let mut app = app("accept_edits");
-        app.usage = crate::cli::tui::app::UsageInfo { cost: 0.0123, context_left: Some(72) };
+        app.usage = crate::cli::tui::app::UsageInfo { cost: 0.0123, context: Some((6_400, 1_000_000)) };
         let right: String = footer_right(&app).iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(right, "72% context · $0.01 ");
-        app.usage.context_left = Some(12);
+        assert_eq!(right, "6.4k/1M context · $0.01 ");
+        app.usage.context = Some((112_000, 128_000));
         let right: String = footer_right(&app).iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(right, "12% context left · /new starts fresh ");
+        assert_eq!(right, "87% context used · /new starts fresh ");
     }
 
     #[test]

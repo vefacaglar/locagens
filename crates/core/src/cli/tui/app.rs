@@ -6,7 +6,7 @@
 
 use super::composer::{printable_char, Composer};
 use super::login::LoginAction;
-use super::overlay::{Approval, Overlay, QuestionAnswer, QuestionFlow};
+use super::overlay::{Approval, Overlay, OptionPicker, QuestionAnswer, QuestionFlow};
 use super::popup::{
     command_takes_no_args, completion_text, detect_trigger, file_items, review_items, slash_items, Popup,
     PopupKind,
@@ -93,17 +93,41 @@ enum Finish {
 #[derive(Default)]
 pub struct UsageInfo {
     pub cost: f64,
-    /// Percent of the model's context window still free.
-    pub context_left: Option<u8>,
+    /// `(used tokens, window)` of the last main-agent call.
+    pub context: Option<(i64, i64)>,
 }
 
-/// Percent of the context window left after `last_input` tokens.
-pub fn context_left_percent(last_input: i64, window: i64) -> u8 {
-    if window <= 0 {
-        return 100;
+impl UsageInfo {
+    /// Percent of the context window in use.
+    pub fn context_used(&self) -> Option<u8> {
+        self.context.map(|(used, window)| context_used_percent(used, window))
     }
-    let used = (last_input.max(0) * 100 / window).clamp(0, 100);
-    (100 - used) as u8
+}
+
+/// `999`, `6.4k`, `128k`, `1M`: a token count in few characters.
+pub fn compact_tokens(tokens: i64) -> String {
+    let tokens = tokens.max(0);
+    let scaled = |value: i64, unit: i64, suffix: &str| {
+        let tenths = value * 10 / unit;
+        if tenths < 100 && tenths % 10 != 0 {
+            format!("{}.{}{suffix}", tenths / 10, tenths % 10)
+        } else {
+            format!("{}{suffix}", tenths / 10)
+        }
+    };
+    match tokens {
+        0..=999 => tokens.to_string(),
+        1_000..=999_999 => scaled(tokens, 1_000, "k"),
+        _ => scaled(tokens, 1_000_000, "M"),
+    }
+}
+
+/// Percent of the context window filled by `used` tokens.
+pub fn context_used_percent(used: i64, window: i64) -> u8 {
+    if window <= 0 {
+        return 0;
+    }
+    (used.max(0) * 100 / window).clamp(0, 100) as u8
 }
 
 #[derive(Default)]
@@ -286,6 +310,7 @@ impl App {
             "plan" => "Plan",
             "chat" => "Chat",
             "auto" => "Full Access",
+            "ask_permissions" => "Ask",
             _ => "Build",
         }
     }
@@ -334,14 +359,44 @@ impl App {
     /// between Plan and Full Access.
     pub fn cycle_mode(&mut self) {
         let next = match self.mode.as_str() {
-            "plan" if self.bypass || self.auto_used => "auto",
-            "plan" => "accept_edits",
+            "plan" => "auto",
             "auto" if self.bypass => "plan",
             "auto" => "accept_edits",
-            _ if self.bypass => "plan",
             _ => "plan",
         };
         self.mode = next.to_string();
+        self.auto_used |= next == "auto";
+        self.flash(format!("Mode: {}", self.mode_label()));
+    }
+
+    /// `/thinking` without a level: pick one of the reasoning levels.
+    pub fn open_effort_picker(&mut self) {
+        let current = self.thinking.as_deref().unwrap_or("off");
+        let picker = OptionPicker::new("Reasoning effort", super::popup::thinking_choices(), current);
+        self.overlay = Some(Overlay::Effort(picker));
+        self.dirty = true;
+    }
+
+    /// `/permissions`: pick the mode. Values are `/permissions` arguments.
+    pub fn open_mode_picker(&mut self) {
+        let option = |value: &str, label: &str, detail: &str| super::popup::PopupItem {
+            value: value.into(),
+            label: label.into(),
+            detail: detail.into(),
+        };
+        let options = vec![
+            option("chat", "Chat", "talk only, no tools"),
+            option("plan", "Plan", "read-only exploration, no edits"),
+            option("build", "Build", "edits applied; commands ask unless known-safe"),
+            option("ask", "Ask permissions", "every edit and command asks first"),
+            option("auto", "Full Access", "no permission prompts; the model can run anything"),
+        ];
+        let current = match self.mode.as_str() {
+            "accept_edits" => "build",
+            "ask_permissions" => "ask",
+            other => other,
+        };
+        self.overlay = Some(Overlay::Mode(OptionPicker::new("Permissions", options, current)));
         self.dirty = true;
     }
 

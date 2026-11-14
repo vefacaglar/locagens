@@ -84,8 +84,8 @@ With a terminal on stdin and stdout, `lcgn` opens a Codex-style full-screen
 UI (alternate screen): header with project path and run title, a scrollable
 transcript (markdown, syntax-highlighted code, tool cells, diffs), a status
 line while a run is active, a multi-line composer and a footer with
-model, thinking level and mode on the left and context left and cost on
-the right. The composer border names the mode: Build (cyan, ` Message `),
+model, thinking level and mode on the left and context used (`6.4k/1M
+context`, red `NN% context used` above 85%) and cost on the right. The composer border names the mode: Build (cyan, ` Message `),
 Plan (blue, ` Plan · read-only `) and Full Access (red, ` Full Access · no
 permission prompts `). Setting changes (`/plan`, `/thinking`, `/model`) flash
 in the status line instead of adding a transcript line. Messages queued while a
@@ -110,8 +110,8 @@ Ctrl+R                     search earlier prompts of this folder (Enter uses one
 ?                          help overlay (empty composer)
 Ctrl+O                     show details: reasoning, full tool output
                            (up to 200 lines), full diffs
-Shift+Tab                  cycle Build -> Plan (-> Full Access once `--approve`
-                           or `/auto` was used) -> Build
+Shift+Tab                  cycle Build -> Plan -> Full Access -> Build
+                           (composer only, not while a popup is open)
 Up (run active, empty      pull the newest queued message back to edit it
   composer)
 Esc                        close popup, otherwise interrupt the active run
@@ -140,7 +140,12 @@ Slash commands (TUI and REPL):
 
 ```txt
 /model [provider/id]   show or switch models
-/thinking <level>      off|minimal|low|medium|high|xhigh|max
+/thinking [level]      off|minimal|low|medium|high|xhigh|max; without a level
+                       a picker opens (also after /model, for models with
+                       adjustable reasoning)
+/permissions [mode]    chat|plan|build|ask|auto; without a mode a picker
+                       lists Chat, Plan, Build, Ask permissions and Full
+                       Access (alias /mode; the TUI picker, REPL prints)
 /plan                  plan mode (read-only tools)
 /build                 build mode (edits applied directly)
 /auto                  full access (no permission prompts)

@@ -1,6 +1,7 @@
 //! Drawing of the help, session picker and `/login` overlays.
 
 use super::help::{command_rows, HelpView, KEY_GROUPS, TIPS};
+use super::overlay::OptionPicker;
 use super::login::{InputPurpose, LoginFlow, Stage};
 use super::sessions::SessionPicker;
 use super::theme;
@@ -26,6 +27,43 @@ fn frame(f: &mut Frame, rect: Rect, title: &str) -> Rect {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     inner
+}
+
+// ---- option picker (/thinking, /permissions) ------------------------------
+
+pub fn draw_option_picker(f: &mut Frame, picker: &OptionPicker, area: Rect) {
+    let width = area.width.saturating_sub(4).min(76);
+    let height = (picker.options.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
+    let inner = frame(f, centered(area, width, height), &format!(" {} ", picker.title));
+    let [list, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let rows = list.height as usize;
+    let first = picker.selected.saturating_sub(rows.saturating_sub(1));
+    let lines: Vec<Line<'static>> = picker
+        .options
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(index, option)| {
+            let selected = index == picker.selected;
+            let marker = if selected { "› " } else { "  " };
+            let style = if selected {
+                Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![Span::styled(format!("{marker}{}", option.label), style)];
+            if option.value == picker.current {
+                spans.push(Span::styled("  (current)", dim()));
+            }
+            if !option.detail.is_empty() {
+                spans.push(Span::styled(format!("  {}", option.detail), dim()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), list);
+    f.render_widget(Paragraph::new(Span::styled("↑↓ move · Enter select · Esc close", dim())), keys);
 }
 
 // ---- help ----------------------------------------------------------------

@@ -174,7 +174,7 @@ pub fn completion_text(kind: PopupKind, item: &PopupItem) -> String {
 /// Whether a slash command takes no arguments (so Enter can run it).
 pub fn command_takes_no_args(value: &str) -> bool {
     /// Optional argument, useful bare: Enter in the popup runs them.
-    const RUN_BARE: [&str; 2] = ["login", "copy"];
+    const RUN_BARE: [&str; 4] = ["login", "copy", "thinking", "permissions"];
     value.starts_with('/')
         && commands::find(value)
             .is_some_and(|command| command.args.is_empty() || RUN_BARE.contains(&command.name))

@@ -11,6 +11,10 @@ pub enum Overlay {
     Approval(Approval),
     Question(QuestionFlow),
     ModelPicker(ModelPicker),
+    /// Reasoning effort levels (`/thinking`).
+    Effort(OptionPicker),
+    /// Permission modes (`/permissions`).
+    Mode(OptionPicker),
     Help(super::help::HelpView),
     Sessions(super::sessions::SessionPicker),
     Login(super::login::LoginFlow),
@@ -117,6 +121,82 @@ mod model_picker_tests {
         picker.on_key(press(KeyCode::Up));
         assert_eq!(picker.selected, 2, "wraps to the end");
         assert_eq!(picker.on_key(press(KeyCode::Esc)), Some(PickerOutcome::Close));
+    }
+}
+
+// ---------------------------------------------------------------------
+// Option picker (`/thinking` and `/permissions` without an argument)
+// ---------------------------------------------------------------------
+
+/// A short fixed list; Enter picks the highlighted option.
+pub struct OptionPicker {
+    pub title: &'static str,
+    /// `value` is what gets applied, `label` and `detail` are shown.
+    pub options: Vec<super::popup::PopupItem>,
+    pub selected: usize,
+    /// Value in use, marked in the list.
+    pub current: String,
+}
+
+impl OptionPicker {
+    pub fn new(title: &'static str, options: Vec<super::popup::PopupItem>, current: &str) -> Self {
+        let selected = options.iter().position(|option| option.value == current).unwrap_or(0);
+        Self { title, options, selected, current: current.to_string() }
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) -> Option<PickerOutcome> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let count = self.options.len();
+        match key.code {
+            KeyCode::Esc => return Some(PickerOutcome::Close),
+            KeyCode::Char('c') if ctrl => return Some(PickerOutcome::Close),
+            KeyCode::Enter => {
+                return self.options.get(self.selected).map(|option| PickerOutcome::Pick(option.value.clone()));
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.checked_sub(1).unwrap_or(count.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Char('j') => self.selected = if self.selected + 1 >= count { 0 } else { self.selected + 1 },
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = count.saturating_sub(1),
+            _ => {}
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod option_picker_tests {
+    use super::*;
+    use crate::cli::tui::popup::PopupItem;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn picker() -> OptionPicker {
+        let options = ["low", "medium", "high"]
+            .map(|value| PopupItem { value: value.into(), label: value.into(), detail: String::new() })
+            .to_vec();
+        OptionPicker::new("Reasoning effort", options, "medium")
+    }
+
+    #[test]
+    fn starts_on_the_current_option_and_wraps() {
+        let mut picker = picker();
+        assert_eq!(picker.selected, 1);
+        picker.on_key(press(KeyCode::Down));
+        picker.on_key(press(KeyCode::Down));
+        assert_eq!(picker.selected, 0, "wraps to the top");
+        picker.on_key(press(KeyCode::Up));
+        assert_eq!(picker.selected, 2, "wraps to the bottom");
+    }
+
+    #[test]
+    fn enter_picks_and_escape_closes() {
+        let mut picker = picker();
+        picker.on_key(press(KeyCode::Down));
+        assert_eq!(picker.on_key(press(KeyCode::Enter)), Some(PickerOutcome::Pick("high".into())));
+        assert_eq!(picker.on_key(press(KeyCode::Esc)), Some(PickerOutcome::Close));
+        assert_eq!(picker.on_key(press(KeyCode::Char('x'))), None);
     }
 }
 

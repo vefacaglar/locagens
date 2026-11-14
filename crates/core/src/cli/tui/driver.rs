@@ -1,7 +1,7 @@
 //! Performs the UI's [`Action`]s against the core API: starting turns,
 //! answering prompts, cancelling, slash commands and file search.
 
-use super::app::{context_left_percent, Action, App, UsageInfo};
+use super::app::{Action, App, UsageInfo};
 use super::login::{LoginAction, LoginFlow, LoginRow, Stage, WaitInfo};
 use super::overlay::{ModelPicker, Overlay};
 use super::popup::PopupItem;
@@ -372,17 +372,17 @@ impl Driver {
             .iter()
             .rev()
             .find(|e| e.role() == crate::db::MAIN_AGENT_ROLE);
-        let context_left = last_main.and_then(|entry| {
+        let context = last_main.and_then(|entry| {
             let window = self
                 .state
                 .pi
                 .model_info(&entry.provider_id, &entry.model)?
                 .context_window?;
-            Some(context_left_percent(entry.input_tokens, window))
+            Some((entry.input_tokens + entry.output_tokens, window))
         });
         self.app.set_usage(UsageInfo {
             cost: totals.cost,
-            context_left,
+            context,
         });
     }
 
@@ -449,6 +449,8 @@ impl Driver {
             SlashCommand::Sessions => return self.open_session_picker(),
             SlashCommand::Login(provider) => return self.open_login(provider.as_deref()).await,
             SlashCommand::Copy(what) => return self.copy_last_answer(what.as_deref()),
+            SlashCommand::Thinking(None) => return self.app.open_effort_picker(),
+            SlashCommand::Permissions(None) => return self.app.open_mode_picker(),
             _ => {}
         }
         if command == SlashCommand::Model(None) {
@@ -471,8 +473,11 @@ impl Driver {
                 | SlashCommand::Auto
                 | SlashCommand::Chat
                 | SlashCommand::Thinking(_)
+                | SlashCommand::Permissions(_)
                 | SlashCommand::Model(Some(_))
         );
+        let switching_model = matches!(command, SlashCommand::Model(Some(_)));
+        let previous_model = self.app.model.as_ref().map(|model| model.label());
         let mut session = CommandSession {
             model: self.app.model.clone(),
             thinking: self.app.thinking.clone(),
@@ -507,11 +512,24 @@ impl Driver {
                 Output::Diff(diff) => self.app.push(CellKind::Diff { title: "Working tree diff".into(), diff }),
             }
         }
+        if switching_model && self.app.model.as_ref().map(|model| model.label()) != previous_model {
+            self.offer_effort_picker();
+        }
         if let Some(target) = result.review {
             self.start_review(&target).await;
         }
         if result.exit {
             self.quit().await;
+        }
+    }
+
+    /// After a model switch (Codex: model, then effort): models with
+    /// adjustable reasoning get the effort picker, others skip it.
+    fn offer_effort_picker(&mut self) {
+        let Some(model) = self.app.model.as_ref() else { return };
+        let adjustable = self.state.pi.model_info(&model.provider_id, &model.model).and_then(|info| info.reasoning);
+        if adjustable == Some(true) {
+            self.app.open_effort_picker();
         }
     }
 

@@ -372,28 +372,79 @@ fn scrolling_leaves_follow_mode_and_end_returns() {
 }
 
 #[test]
-fn ctrl_o_toggles_details_and_shift_tab_cycles_build_and_plan() {
+fn ctrl_o_toggles_details_and_shift_tab_cycles_build_plan_full_access() {
     let mut app = app();
     app.on_key(ctrl('o'));
     assert!(app.details);
     app.on_key(press(KeyCode::BackTab));
     assert_eq!(app.mode, "plan");
+    assert_eq!(app.flash_text(), Some("Mode: Plan"));
+    app.on_key(press(KeyCode::BackTab));
+    assert_eq!(app.mode, "auto");
+    assert_eq!(app.flash_text(), Some("Mode: Full Access"));
     app.on_key(press(KeyCode::BackTab));
     assert_eq!(app.mode, "accept_edits");
 }
 
 #[test]
-fn shift_tab_reaches_full_access_only_after_it_was_asked_for() {
+fn shift_tab_is_ignored_while_a_popup_or_overlay_is_open() {
     let mut app = app();
-    app.mode = "plan".into();
-    app.cycle_mode();
-    assert_eq!(app.mode, "accept_edits", "Full Access is not in the cycle by default");
-    app.auto_used = true;
-    app.mode = "plan".into();
-    app.cycle_mode();
-    assert_eq!(app.mode, "auto");
-    app.cycle_mode();
+    type_text(&mut app, "/pl");
+    assert!(app.popup.is_some());
+    app.on_key(press(KeyCode::BackTab));
     assert_eq!(app.mode, "accept_edits");
+    app.composer.clear();
+    app.popup = None;
+    app.open_mode_picker();
+    app.on_key(press(KeyCode::BackTab));
+    assert_eq!(app.mode, "accept_edits");
+}
+
+#[test]
+fn effort_picker_marks_the_current_level_and_applies_the_pick() {
+    let mut app = app();
+    app.thinking = Some("high".into());
+    app.open_effort_picker();
+    let Some(Overlay::Effort(picker)) = app.overlay.as_ref() else { panic!("no effort picker") };
+    assert_eq!(picker.options[picker.selected].value, "high");
+    app.on_key(press(KeyCode::Down));
+    let actions = app.on_key(press(KeyCode::Enter));
+    assert!(matches!(actions.as_slice(), [Action::Slash(t)] if t == "/thinking xhigh"));
+    assert!(app.overlay.is_none());
+    app.open_effort_picker();
+    assert!(app.on_key(press(KeyCode::Esc)).is_empty());
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn mode_picker_lists_five_modes_and_switches_through_permissions() {
+    let mut app = app();
+    app.open_mode_picker();
+    let Some(Overlay::Mode(picker)) = app.overlay.as_ref() else { panic!("no mode picker") };
+    let values: Vec<&str> = picker.options.iter().map(|o| o.value.as_str()).collect();
+    assert_eq!(values, ["chat", "plan", "build", "ask", "auto"]);
+    assert_eq!(picker.options[picker.selected].value, "build");
+    app.on_key(press(KeyCode::Down));
+    app.on_key(press(KeyCode::Down));
+    let actions = app.on_key(press(KeyCode::Enter));
+    assert!(matches!(actions.as_slice(), [Action::Slash(t)] if t == "/permissions auto"));
+}
+
+#[test]
+fn bare_thinking_and_permissions_run_from_the_slash_popup() {
+    let mut app = app();
+    type_text(&mut app, "/perm");
+    assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/permissions"));
+    type_text(&mut app, "/thinki");
+    assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/thinking"));
+}
+
+#[test]
+fn shift_tab_cycle_respects_approve_and_other_modes() {
+    let mut app = app();
+    app.mode = "ask_permissions".into();
+    app.cycle_mode();
+    assert_eq!(app.mode, "plan", "any other mode enters the cycle at Plan");
 
     let mut approved = App::new(PathBuf::from("C:/proj"), None, None, "auto".into(), true, None);
     approved.cycle_mode();
@@ -403,10 +454,16 @@ fn shift_tab_reaches_full_access_only_after_it_was_asked_for() {
 }
 
 #[test]
-fn context_left_is_derived_from_the_window() {
-    assert_eq!(context_left_percent(25_000, 100_000), 75);
-    assert_eq!(context_left_percent(500_000, 100_000), 0);
-    assert_eq!(context_left_percent(10, 0), 100);
+fn context_used_is_derived_from_the_window() {
+    assert_eq!(context_used_percent(25_000, 100_000), 25);
+    assert_eq!(context_used_percent(500_000, 100_000), 100);
+    assert_eq!(context_used_percent(10, 0), 0);
+}
+
+#[test]
+fn tokens_format_compactly() {
+    let shown: Vec<String> = [0, 999, 1_000, 6_400, 128_000, 999_999, 1_000_000, 1_500_000].map(compact_tokens).to_vec();
+    assert_eq!(shown, ["0", "999", "1k", "6.4k", "128k", "999k", "1M", "1.5M"]);
 }
 
 #[test]

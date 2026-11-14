@@ -1,6 +1,7 @@
 //! Mouse, paste and key handling, popups.
 
 use super::*;
+use crate::cli::tui::overlay::PickerOutcome;
 use crate::cli::tui::sessions::SessionOutcome;
 
 impl App {
@@ -111,7 +112,7 @@ impl App {
                 self.viewport.follow = true;
                 return Vec::new();
             }
-            KeyCode::BackTab => {
+            KeyCode::BackTab if self.popup.is_none() => {
                 self.cycle_mode();
                 return Vec::new();
             }
@@ -170,11 +171,33 @@ impl App {
                 None => Vec::new(),
             },
             Some(Overlay::ModelPicker(picker)) => match picker.on_key(key) {
-                Some(crate::cli::tui::overlay::PickerOutcome::Pick(model)) => {
+                Some(PickerOutcome::Pick(model)) => {
                     self.overlay = None;
                     vec![Action::Slash(format!("/model {model}"))]
                 }
-                Some(crate::cli::tui::overlay::PickerOutcome::Close) => {
+                Some(PickerOutcome::Close) => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
+            Some(Overlay::Effort(picker)) => match picker.on_key(key) {
+                Some(PickerOutcome::Pick(level)) => {
+                    self.overlay = None;
+                    vec![Action::Slash(format!("/thinking {level}"))]
+                }
+                Some(PickerOutcome::Close) => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
+            Some(Overlay::Mode(picker)) => match picker.on_key(key) {
+                Some(PickerOutcome::Pick(mode)) => {
+                    self.overlay = None;
+                    vec![Action::Slash(format!("/permissions {mode}"))]
+                }
+                Some(PickerOutcome::Close) => {
                     self.overlay = None;
                     Vec::new()
                 }
