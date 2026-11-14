@@ -78,7 +78,7 @@ fn header_location(app: &App) -> String {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
-        Span::styled(" lcgn ", Style::default().fg(Color::Black).bg(theme::accent())),
+        Span::styled(" lcgn ", theme::badge()),
         Span::styled(format!(" {}", header_location(app)), dim()),
         Span::raw("  "),
         Span::styled(app.display_title(), Style::default().add_modifier(Modifier::BOLD)),

@@ -23,6 +23,10 @@ pub struct Theme {
     pub user_bg: Option<Color>,
     /// `NO_COLOR`: no hues at all.
     pub plain: bool,
+    /// Light-background preset (syntax highlighting picks its palette from it).
+    pub light: bool,
+    /// Foreground of the header badge, drawn on the accent colour.
+    pub badge_fg: Color,
 }
 
 impl Theme {
@@ -37,6 +41,8 @@ impl Theme {
             agent: Color::Magenta,
             user_bg: Some(Color::Indexed(236)),
             plain: false,
+            light: false,
+            badge_fg: Color::Black,
         }
     }
 
@@ -51,6 +57,8 @@ impl Theme {
             agent: Color::Indexed(90),
             user_bg: Some(Color::Indexed(254)),
             plain: false,
+            light: true,
+            badge_fg: Color::White,
         }
     }
 
@@ -65,7 +73,13 @@ impl Theme {
             agent: Color::Reset,
             user_bg: None,
             plain: true,
+            light: false,
+            badge_fg: Color::Reset,
         }
+    }
+
+    pub const fn is_light(&self) -> bool {
+        self.light
     }
 
     /// Picks the preset: `NO_COLOR` wins, then the configured name, then
@@ -130,6 +144,17 @@ pub fn agent() -> Color {
     current().agent
 }
 
+/// The ` lcgn ` header badge: foreground on the accent colour; reverse video
+/// under `NO_COLOR`.
+pub fn badge() -> Style {
+    let theme = current();
+    if theme.plain {
+        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.badge_fg).bg(theme.accent)
+    }
+}
+
 /// Secondary text.
 pub fn dim() -> Style {
     let theme = current();
@@ -160,6 +185,14 @@ mod tests {
         let plain = Theme::plain();
         assert_eq!(plain.accent, Color::Reset);
         assert!(plain.user_bg.is_none());
+    }
+
+    #[test]
+    fn badge_follows_the_theme() {
+        assert_eq!(Theme::light().badge_fg, Color::White);
+        assert_eq!(Theme::dark().badge_fg, Color::Black);
+        assert_eq!(Theme::plain().badge_fg, Color::Reset);
+        assert!(Theme::light().is_light() && !Theme::dark().is_light() && !Theme::plain().is_light());
     }
 
     #[test]
