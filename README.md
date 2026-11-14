@@ -104,7 +104,7 @@ The UI offers three modes; the core also keeps `chat` and `ask_permissions`.
 
 | Mode | Codex policy | Behaviour |
 | --- | --- | --- |
-| Build (`accept_edits`) | on-request + workspace-write | file edits apply directly; commands and `fetch_url` prompt (known-safe commands excepted) |
+| Build (`accept_edits`) | on-request + workspace-write | file edits apply directly; commands, `fetch_url` and `web_search` prompt (known-safe commands excepted) |
 | Plan (`plan`) | on-request + read-only | read-only tools, `update_plan`, research and sub-agents; no mutations or commands |
 | Full Access (`auto`) | never + danger-full-access | no prompts, no sandbox |
 | `chat` | read-only | conversation with read-only tools |
@@ -113,8 +113,8 @@ The UI offers three modes; the core also keeps `chat` and `ask_permissions`.
 What prompts (`orchestrator::tools::needs_permission` plus the gate in the
 orchestrator), outside Full Access:
 
-- `run_command`, `exec_command`, `write_stdin` and `fetch_url` prompt in every
-  mode that offers them. In Build, **known-safe** commands (read-only ones
+- `run_command`, `exec_command`, `write_stdin`, `fetch_url` and `web_search`
+  prompt in every mode that offers them. In Build, **known-safe** commands (read-only ones
   such as `git status`, `rg`, `cargo check`) and commands an execpolicy
   `.rules` file allows run without a prompt, unless the call asks for
   `network_domains`. A `.rules` `forbidden` match blocks the command outright.
@@ -159,7 +159,7 @@ Files        read_file, write_file, edit_file, apply_patch, delete_file, move_fi
              create_directory, list_directory, search_files, view_image
 Commands     exec_command (+ write_stdin for running sessions), run_command,
              host_executable
-Network      fetch_url
+Network      fetch_url, web_search (Tavily / Brave Search / Exa key, else DuckDuckGo)
 Agents       spawn_agent, send_message, followup_task, wait_agent, interrupt_agent,
              close_agent, list_agents (persistent named agents, max 4 live),
              spawn_agents (one-shot parallel batch)

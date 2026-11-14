@@ -137,6 +137,7 @@ fn sign_in_methods(provider: &LoginProvider) -> String {
     }
     match &provider.oauth_label {
         Some(label) => format!("{label}, or an API key"),
+        None if provider.web_search => "API key (web search)".to_string(),
         None => "API key".to_string(),
     }
 }

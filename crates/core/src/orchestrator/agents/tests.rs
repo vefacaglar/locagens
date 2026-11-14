@@ -677,9 +677,9 @@ async fn dispatch_refuses_tools_that_were_not_offered() {
     assert!(refused.contains("read-only agent"), "{refused}");
     assert!(!harness.project.join("x.txt").exists());
 
-    // Chat mode does not offer update_plan / fetch_url, so they never dispatch.
+    // Chat mode does not offer update_plan / fetch_url / web_search, so they never dispatch.
     let mut chat = harness.parent("chat");
-    for tool in ["update_plan", "fetch_url", "write_file", "exec_command"] {
+    for tool in ["update_plan", "fetch_url", "web_search", "write_file", "exec_command"] {
         let err = chat.dispatch_tool("c3", tool, &json!({})).await;
         assert!(matches!(err, Err(AgentError::Failed(ref e)) if e.contains("not available")), "{tool}: {err:?}");
     }
@@ -755,6 +755,43 @@ async fn dangerous_commands_prompt_even_with_allow_run() {
     let result = parent.gated_execute("c1", "run_command", &json!({ "command": "git push --force origin main" })).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap();
     assert!(result.contains("denied"), "{result}");
+}
+
+#[tokio::test]
+async fn web_search_prompts_like_fetch_url_outside_full_access() {
+    let harness = harness(echo_handler).await;
+    let plan = harness.parent("plan");
+    let mut events = harness.handle.events.subscribe();
+    let handle = harness.handle.clone();
+    let answer = tokio::spawn(async move {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event["type"] == "permission_requested" {
+                handle.permission.lock().await.sender.take().unwrap().send("deny".to_string()).unwrap();
+                return event;
+            }
+        }
+    });
+    let result = plan.gated_execute("c1", "web_search", &json!({ "query": "rust serde" })).await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap();
+    assert!(result.contains("denied"), "{result}");
+    let preview = &event["preview"];
+    assert_eq!(preview["action"], "web_search");
+    assert_eq!(preview["query"], "rust serde");
+    assert_eq!(preview["grantLabel"], "searching the web");
+
+    // Full Access and "Allow for Run" skip the prompt (an empty query fails
+    // in the tool itself, before any network).
+    let mut events = harness.handle.events.subscribe();
+    let auto = harness.parent("auto");
+    let err = auto.gated_execute("c2", "web_search", &json!({ "query": "" })).await.unwrap_err();
+    assert!(matches!(err, AgentError::Failed(ref e) if e.contains("query is empty")), "{err:?}");
+    harness.handle.allow_tool_for_run("web_search");
+    let err = plan.gated_execute("c3", "web_search", &json!({ "query": " " })).await.unwrap_err();
+    assert!(matches!(err, AgentError::Failed(ref e) if e.contains("query is empty")), "{err:?}");
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event["type"], "permission_requested", "{event}");
+    }
 }
 
 #[tokio::test]

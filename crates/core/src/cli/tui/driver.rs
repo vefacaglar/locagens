@@ -748,6 +748,9 @@ impl Driver {
     /// A provider is connected: reload the models and open the picker on it.
     async fn after_login(&mut self, provider: &str) {
         self.app.overlay = None;
+        if crate::pi_providers::is_search_provider(provider) {
+            return self.app.flash(format!("Connected {provider}: web_search uses it from now on."));
+        }
         self.load_model_choices().await;
         self.refresh_model_lists_in_background();
         let prefix = format!("{provider}/");

@@ -210,6 +210,15 @@ pub(super) fn builtin(id: &str) -> Option<&'static BuiltinProvider> {
     BUILTINS.iter().find(|provider| provider.id == id)
 }
 
+/// The environment variable a built-in model provider or a web search
+/// backend reads its key from (`None` when it has none).
+pub(super) fn own_env_var(id: &str) -> Option<&'static str> {
+    builtin(id)
+        .map(|provider| provider.env_var)
+        .or_else(|| super::search_provider(id).map(|provider| provider.env_var))
+        .filter(|var| !var.is_empty())
+}
+
 /// True when a provider talks the Anthropic Messages API.
 pub(super) fn is_anthropic(provider_id: &str, api: &str, base_url: &str) -> bool {
     api == "anthropic"
@@ -541,8 +550,9 @@ impl PiProviderManager {
     /// Provider ids to expose: everything the user configured, i.e. any
     /// `auth.json` entry, `models.json` / Codex `config.toml` provider, and
     /// built-ins whose own env var (or configured `envKey`) is set.
+    /// Web search keys (`tavily`, …) are never model providers.
     pub(super) fn provider_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.read_auth_map().keys().cloned().collect();
+        let mut ids: Vec<String> = self.read_auth_map().keys().filter(|id| !super::is_search_provider(id)).cloned().collect();
         if let Value::Object(providers) = self.read_models_json().get("providers").cloned().unwrap_or(Value::Null) {
             ids.extend(providers.keys().cloned());
         }
@@ -708,14 +718,17 @@ impl PiProviderManager {
                 ids.push(id);
             }
         }
+        // Web search backends last: they only take an API key.
+        ids.extend(super::SEARCH_PROVIDERS.iter().map(|provider| provider.id.to_string()));
         let auth = self.read_auth_map();
         ids.into_iter()
             .map(|id| LoginProvider {
                 name: self.display_name(&id),
                 oauth_label: oauth::oauth_provider_info(&id).map(|info| info.login_label.to_string()),
                 oauth_flow: oauth::oauth_provider_info(&id).map(|info| info.flow),
-                api_key_env: builtin(&id).map(|p| p.env_var).filter(|var| !var.is_empty()).map(str::to_string),
+                api_key_env: own_env_var(&id).map(str::to_string),
                 status: self.login_status(&id, auth.get(&id)),
+                web_search: super::is_search_provider(&id),
                 id,
             })
             .collect()
@@ -725,6 +738,7 @@ impl PiProviderManager {
         self.meta_entry(provider_id)
             .and_then(|entry| entry.get("displayName").and_then(Value::as_str).map(str::to_string))
             .or_else(|| builtin(provider_id).map(|p| p.name.to_string()))
+            .or_else(|| super::search_provider(provider_id).map(|p| p.name.to_string()))
             .unwrap_or_else(|| provider_id.to_string())
     }
 
@@ -736,8 +750,8 @@ impl PiProviderManager {
         let env_key = self
             .models_json_provider(provider_id)
             .and_then(|entry| entry.get("envKey").and_then(Value::as_str).map(str::to_string));
-        let builtin_var = builtin(provider_id).map(|p| p.env_var.to_string());
-        [builtin_var, env_key]
+        let own_var = own_env_var(provider_id).map(str::to_string);
+        [own_var, env_key]
             .into_iter()
             .flatten()
             .filter(|var| !var.is_empty())

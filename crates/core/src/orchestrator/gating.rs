@@ -461,6 +461,7 @@ pub(super) fn grant_label(tool: &str, args: &Value) -> String {
             host if host.is_empty() => "fetching this URL".to_string(),
             host => format!("fetching any page on {host}"),
         },
+        "web_search" => "searching the web".to_string(),
         "write_file" | "edit_file" | "apply_patch" | "delete_file" | "move_file" => {
             format!("every {tool} call in this project")
         }
@@ -498,6 +499,8 @@ mod prompt_reason_tests {
         let command = json!({ "command": "cargo test", "network_domains": ["crates.io"] });
         assert_eq!(grant_label("exec_command", &command), "exactly this command with network access to crates.io: cargo test");
         assert_eq!(grant_label("fetch_url", &json!({ "url": "https://Docs.rs/serde" })), "fetching any page on docs.rs");
+        assert_eq!(grant_label("web_search", &json!({ "query": "rust" })), "searching the web");
+        assert_eq!(grant_key("web_search", &json!({ "query": "rust" })), "");
         assert_eq!(grant_label("write_file", &json!({})), "every write_file call in this project");
         assert_eq!(grant_label("mcp__gh__search", &json!({})), "every call to the MCP tool mcp__gh__search");
     }

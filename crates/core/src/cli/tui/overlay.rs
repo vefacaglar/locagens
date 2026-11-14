@@ -258,6 +258,7 @@ impl Approval {
         let title = match action {
             "command" => "Run this command?".to_string(),
             "fetch" => "Fetch this URL?".to_string(),
+            "web_search" => "Search the web?".to_string(),
             "move" => "Move this file?".to_string(),
             "create" => "Create this file?".to_string(),
             "edit" => "Edit this file?".to_string(),
@@ -284,6 +285,7 @@ impl Approval {
                 }
             }
             "fetch" => details.push(format!("GET {}", str_field(&preview, "url"))),
+            "web_search" => details.push(format!("query: \"{}\"", str_field(&preview, "query"))),
             "move" => details.push(format!("{path} -> {}", str_field(&preview, "destPath"))),
             "create" | "edit" | "delete" | "mkdir" => details.push(path.to_string()),
             "patch" => details.extend(files.iter().map(|file| format!("  {file}"))),
@@ -738,6 +740,13 @@ mod approval_ux_tests {
         assert_eq!(approval.details, vec!["api.github.com:443"]);
         let other = Approval::from_event(&event(json!({"action": "mystery"})));
         assert!(other.details[0].starts_with("Arguments: "));
+    }
+
+    #[test]
+    fn web_search_shows_the_query() {
+        let approval = Approval::from_event(&event(json!({"action": "web_search", "query": "rust serde"})));
+        assert_eq!(approval.title, "Search the web?");
+        assert_eq!(approval.details, vec!["query: \"rust serde\""]);
     }
 
     #[test]

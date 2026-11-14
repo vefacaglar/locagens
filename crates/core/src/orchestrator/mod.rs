@@ -34,6 +34,7 @@ pub mod review;
 pub mod tool_search;
 pub mod tools;
 pub mod turn_diff_tracker;
+pub mod web_search;
 
 mod agent_loop;
 mod agent_round;
@@ -73,7 +74,7 @@ const STREAM_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_STATUSES: [&str; 3] = ["done", "failed", "cancelled"];
 
 /// Workspace/dangerous tools executed through the gated executor.
-const WORKSPACE_TOOLS: [&str; 10] = [
+const WORKSPACE_TOOLS: [&str; 11] = [
     "read_file",
     "write_file",
     "edit_file",
@@ -84,6 +85,7 @@ const WORKSPACE_TOOLS: [&str; 10] = [
     "search_files",
     "run_command",
     "fetch_url",
+    "web_search",
 ];
 
 /// Full (worker) sub-agent toolset: workspace + dangerous tools + the Codex
@@ -109,7 +111,7 @@ fn tool_names_for_mode(mode: &str) -> Vec<&'static str> {
         "plan" => {
             let mut names: Vec<&str> = chat_tools.to_vec();
             names.extend_from_slice(&[
-                "update_plan", "fetch_url", "spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent",
+                "update_plan", "fetch_url", "web_search", "spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent",
                 "close_agent", "list_agents", "spawn_agents",
             ]);
             names

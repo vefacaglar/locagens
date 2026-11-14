@@ -399,6 +399,7 @@ pub fn describe_tool(name: &str, arguments: &str) -> (String, String) {
             format!("{} -> {}", first(&["from", "path"]), first(&["to"])),
         ),
         "fetch_url" => ("Fetched".into(), first(&["url"])),
+        "web_search" => ("Searched the web".into(), crate::tool_labels::quoted_query(&args)),
         "spawn_agents" => ("Spawned agents".into(), String::new()),
         "spawn_agent" => ("Spawned agent".into(), first(&["task_name", "name"])),
         "wait_agent" | "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent"
@@ -578,5 +579,9 @@ mod tests {
             ("Moved".to_string(), "a -> b".to_string())
         );
         assert_eq!(describe_tool("mystery", "{}").0, "mystery");
+        assert_eq!(
+            describe_tool("web_search", r#"{"query":"rust serde"}"#),
+            ("Searched the web".to_string(), "\"rust serde\"".to_string())
+        );
     }
 }

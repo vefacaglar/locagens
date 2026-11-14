@@ -218,6 +218,7 @@ fn verb_key(key: &str) -> &'static str {
         "created_dir" => "verb.created_dir",
         "moved" => "verb.moved",
         "fetched" => "verb.fetched",
+        "searched_web" => "verb.searched_web",
         "spawned_agents" => "verb.spawned_agents",
         "spawned_agent" => "verb.spawned_agent",
         "waited_agents" => "verb.waited_agents",

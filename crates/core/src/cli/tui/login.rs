@@ -30,6 +30,7 @@ impl LoginRow {
             (_, true) => "no sign-in needed (local)".to_string(),
             // The label is the whole phrase ("Sign in with ChatGPT").
             (Some(label), _) => label.clone(),
+            (None, _) if provider.web_search => "API key (web search)".to_string(),
             (None, _) => "API key".to_string(),
         };
         let status = match &provider.status {
@@ -322,6 +323,7 @@ mod tests {
             oauth_flow: None,
             api_key_env: None,
             status: LoginStatus::SignedOut,
+            web_search: false,
         };
         assert_eq!(LoginRow::from_provider(&provider).method, "Sign in with ChatGPT");
     }

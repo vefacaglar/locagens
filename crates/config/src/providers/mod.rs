@@ -35,8 +35,10 @@ mod auth_store;
 mod model_catalog;
 mod model_fetch;
 mod model_refresh;
+pub mod search_providers;
 
 pub use model_refresh::MODEL_LIST_MAX_AGE;
+pub use search_providers::{is_search_provider, search_provider, SearchProvider, SEARCH_PROVIDERS};
 
 pub use model_catalog::model_reasoning_efforts;
 
@@ -255,6 +257,9 @@ pub struct LoginProvider {
     /// Built-in API-key environment variable; `None` for keyless providers.
     pub api_key_env: Option<String>,
     pub status: LoginStatus,
+    /// A `web_search` backend (Tavily, Brave Search, Exa), not a model
+    /// provider: storing its key adds no models.
+    pub web_search: bool,
 }
 
 pub struct PiProviderManager {

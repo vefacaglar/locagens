@@ -1,5 +1,5 @@
 use super::*;
-use super::model_catalog::{builtin};
+use super::model_catalog::own_env_var;
 
 /// Maps a fallback-chain `auth.json` entry onto a Locagens provider
 /// credential. Codex stores `{ "OPENAI_API_KEY": "sk-…", "tokens": … }` while
@@ -262,12 +262,11 @@ impl PiProviderManager {
             }
         }
 
-        // Environment fallback: only the built-in's own variable. A vendor key
-        // (`ANTHROPIC_API_KEY`, …) is never sent to another provider's baseUrl;
-        // other providers name their variable with `$VAR` or `envKey`.
-        builtin(provider_id)
-            .map(|builtin| builtin.env_var)
-            .filter(|var| !var.is_empty())
+        // Environment fallback: only the built-in's (or search backend's) own
+        // variable. A vendor key (`ANTHROPIC_API_KEY`, …) is never sent to
+        // another provider's baseUrl; other providers name their variable
+        // with `$VAR` or `envKey`.
+        own_env_var(provider_id)
             .and_then(|var| std::env::var(var).ok())
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
