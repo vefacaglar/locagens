@@ -32,14 +32,20 @@ and are not versioned per release. Versions are **not** workspace-inherited:
    ```
 4. GitHub Actions triggers **"Release (macOS & Windows binaries)"**
    (`.github/workflows/release-mac.yml`), which:
-   - Rewrites the first `version` line of `apps/cli/Cargo.toml` and
-     `apps/desktop-rs/Cargo.toml` from the tag, so the binaries carry the tag
+   - Sets the `version` of `apps/cli` and `apps/desktop-rs` from the tag
+     (`.github/scripts/set-version.sh`), so the binaries carry the tag
      version even if step 1 was skipped.
-   - Builds `locagens` (desktop) and `lcgn` (CLI) release binaries for
-     `aarch64-apple-darwin`, `x86_64-apple-darwin` and
-     `x86_64-pc-windows-msvc`.
-   - Uploads them as workflow artifacts.
-   - Creates a GitHub Release with the binaries and auto-generated notes.
+   - **macOS:** builds `aarch64` and `x86_64`, merges them into universal
+     binaries, wraps the app as `Locagens.app` (icon from
+     `apps/desktop-rs/assets/icon.png`, bundle id `com.locagens.app`), signs
+     it and `lcgn` with the Developer ID certificate (hardened runtime),
+     notarizes and staples them, then builds, signs, notarizes and staples
+     `Locagens-macOS-universal.dmg`. `lcgn` ships as
+     `lcgn-macOS-universal.tar.gz`.
+   - **Windows:** builds `locagens.exe` and `lcgn.exe` into
+     `Locagens-Windows-x64.zip`.
+   - Uploads everything as workflow artifacts and publishes a GitHub Release
+     with auto-generated notes.
 
 When done, download the binaries from the GitHub Releases page.
 
@@ -76,14 +82,22 @@ Binaries land in `target/release/` (`lcgn` / `lcgn.exe`, `locagens` /
 
 ## Code signing
 
-Not set up yet. macOS binaries are unsigned — Gatekeeper shows a warning on
-first launch. When we have an Apple Developer certificate, it will be added
-via repository secrets. Until then:
+macOS signing and notarization use these repository secrets:
 
-> "locagens" cannot be opened because the developer cannot be verified.
+| Secret | Content |
+| --- | --- |
+| `MAC_CERTIFICATE_P12_BASE64` | Developer ID Application certificate + key (`.p12`, base64) |
+| `MAC_CERTIFICATE_PASSWORD` | Export password of that `.p12` |
+| `APPLE_API_KEY_ID` | App Store Connect API key id |
+| `APPLE_API_ISSUER` | App Store Connect issuer id |
+| `APPLE_API_KEY_P8` | The API key file (`AuthKey_*.p8`) contents |
 
-Fix: right-click (or Control-click) the app → **Open** → **Open** in the
-dialog, or System Settings → Privacy & Security → **Open Anyway**.
+Without them the workflow still builds, unsigned, with a warning; Gatekeeper
+then asks on first launch (right-click → **Open**). Windows binaries are not
+signed (SmartScreen may warn on first launch).
+
+A push to `main` that changes the workflow builds everything (signing
+included) without publishing a release, to check the pipeline.
 
 ---
 
