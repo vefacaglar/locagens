@@ -572,6 +572,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("verb.fetched", "Fetched", "Getirildi"),
     ("verb.spawned_agents", "Spawned agents", "Ajanlar başlatıldı"),
     ("verb.spawned_agent", "Spawned agent", "Ajan başlatıldı"),
+    ("verb.waited_agents", "Waited for agents", "Ajanlar beklendi"),
     ("verb.loaded_skill", "Loaded skill", "Beceri yüklendi"),
     ("verb.asked", "Asked", "Soruldu"),
     ("verb.titled_chat", "Titled chat", "Oturum adlandırıldı"),

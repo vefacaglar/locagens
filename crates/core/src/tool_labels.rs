@@ -22,6 +22,7 @@ pub enum ToolVerb {
     Fetched,
     SpawnedAgents,
     SpawnedAgent,
+    WaitedForAgents,
     LoadedSkill,
     Asked,
     TitledChat,
@@ -49,6 +50,7 @@ impl ToolVerb {
             ToolVerb::Fetched => "fetched",
             ToolVerb::SpawnedAgents => "spawned_agents",
             ToolVerb::SpawnedAgent => "spawned_agent",
+            ToolVerb::WaitedForAgents => "waited_agents",
             ToolVerb::LoadedSkill => "loaded_skill",
             ToolVerb::Asked => "asked",
             ToolVerb::TitledChat => "titled_chat",
@@ -75,6 +77,7 @@ impl ToolVerb {
             ToolVerb::Fetched => "Fetched",
             ToolVerb::SpawnedAgents => "Spawned agents",
             ToolVerb::SpawnedAgent => "Spawned agent",
+            ToolVerb::WaitedForAgents => "Waited for agents",
             ToolVerb::LoadedSkill => "Loaded skill",
             ToolVerb::Asked => "Asked",
             ToolVerb::TitledChat => "Titled chat",
@@ -110,7 +113,8 @@ pub fn describe_tool(name: &str, args: &Value) -> (ToolVerb, String) {
         "set_chat_title" => (ToolVerb::TitledChat, first(&["title"])),
         "update_plan" => (ToolVerb::UpdatedPlan, first(&["title"])),
         "remember" => (ToolVerb::Remembered, String::new()),
-        "wait_agent" | "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent" | "list_agents" => {
+        "wait_agent" => (ToolVerb::WaitedForAgents, first(&["target"])),
+        "send_input" | "send_message" | "followup_task" | "interrupt_agent" | "close_agent" | "list_agents" => {
             (ToolVerb::Tool(name.to_string()), first(&["target", "agent_id", "id"]))
         }
         other => (ToolVerb::Tool(other.to_string()), first(&["path", "command", "url", "query", "name", "title"])),
@@ -161,8 +165,10 @@ mod tests {
         assert_eq!(describe_tool("run_command", &json!({"command": "cargo test"})), (ToolVerb::Ran, "cargo test".into()));
         assert_eq!(describe_tool("edit_file", &json!({"path": "src/a.rs"})), (ToolVerb::Edited, "src/a.rs".into()));
         assert_eq!(describe_tool("move_file", &json!({"from": "a", "to": "b"})).1, "a -> b");
-        let (verb, target) = describe_tool("wait_agent", &json!({"target": "scan"}));
-        assert_eq!((verb.key(), verb.english(), target.as_str()), (None, "wait agent".into(), "scan"));
+        let (verb, target) = describe_tool("wait_agent", &json!({"timeout_ms": 30000}));
+        assert_eq!((verb.key(), verb.english(), target.as_str()), (Some("waited_agents"), "Waited for agents".into(), ""));
+        let (verb, target) = describe_tool("close_agent", &json!({"target": "scan"}));
+        assert_eq!((verb.key(), verb.english(), target.as_str()), (None, "close agent".into(), "scan"));
         assert_eq!(ToolVerb::AppliedPatch.key(), Some("applied_patch"));
     }
 

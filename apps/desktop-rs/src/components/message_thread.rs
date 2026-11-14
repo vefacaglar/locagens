@@ -91,7 +91,13 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
                     break;
                 }
             }
-            let groups_inner = build_groups(&messages[start..index]);
+            // Grouped as plain messages: they all carry the agent role, and
+            // grouping them with it would recurse forever.
+            let inner: Vec<RunMessage> = messages[start..index]
+                .iter()
+                .map(|message| RunMessage { agent_role: None, agent_name: None, ..message.clone() })
+                .collect();
+            let groups_inner = build_groups(&inner);
             groups.push(Group::SubAgent { role, name, groups: groups_inner });
             continue;
         }
@@ -188,6 +194,7 @@ fn verb_key(key: &str) -> &'static str {
         "fetched" => "verb.fetched",
         "spawned_agents" => "verb.spawned_agents",
         "spawned_agent" => "verb.spawned_agent",
+        "waited_agents" => "verb.waited_agents",
         "loaded_skill" => "verb.loaded_skill",
         "asked" => "verb.asked",
         "titled_chat" => "verb.titled_chat",
@@ -870,6 +877,27 @@ mod patch_progress_tests {
 
     fn message(role: &str, model: Option<&str>) -> RunMessage {
         RunMessage { id: format!("{role}-{model:?}"), role: role.into(), model: model.map(str::to_string), ..Default::default() }
+    }
+
+    /// A sub-agent's messages once overflowed the stack (endless recursion).
+    #[test]
+    fn sub_agent_messages_group_without_recursing() {
+        let sub = |content: &str| RunMessage {
+            agent_role: Some("explorer".into()),
+            agent_name: Some("lister".into()),
+            content: content.into(),
+            ..message("assistant", Some("m1"))
+        };
+        let messages = vec![message("user", None), message("assistant", Some("m1")), sub("a"), sub("b"), message("assistant", Some("m1"))];
+        let groups = build_groups(&messages);
+        assert_eq!(groups.len(), 4);
+        match &groups[2] {
+            Group::SubAgent { role, name, groups } => {
+                assert_eq!((role.as_str(), name.as_str()), ("explorer", "lister"));
+                assert!(!groups.is_empty());
+            }
+            _ => panic!("expected the sub-agent group"),
+        }
     }
 
     #[test]
