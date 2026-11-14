@@ -107,7 +107,7 @@ pub(super) fn build_responses_body(
                 input.push(json!({
                     "type": "message",
                     "role": role,
-                    "content": message.content,
+                    "content": responses_content(message),
                 }));
             }
         }
@@ -201,4 +201,23 @@ pub async fn stream_openai_responses(
     }
 
     consume_response(response, endpoint, on_delta, on_tool_args, should_stop).await
+}
+
+/// A message's `content`: the plain string, or `input_text` + `input_image`
+/// parts when the message carries images.
+fn responses_content(message: &LlmMessage) -> Value {
+    if message.images.is_empty() {
+        return json!(message.content);
+    }
+    let mut parts = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({ "type": "input_text", "text": message.content }));
+    }
+    for image in &message.images {
+        parts.push(json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{}", image.mime, image.data),
+        }));
+    }
+    json!(parts)
 }

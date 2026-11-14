@@ -66,7 +66,7 @@ pub(super) fn openai_body(endpoint: &Endpoint, system: &str, messages: &[LlmMess
                 }
             }
             role => {
-                chat.push(json!({ "role": role, "content": message.content }));
+                chat.push(json!({ "role": role, "content": chat_content(message) }));
             }
         }
     }
@@ -106,4 +106,23 @@ pub(super) fn non_streaming_openai(body: &Value) -> Value {
         chunk["choices"] = json!([{ "delta": delta, "finish_reason": finish_reason }]);
     }
     chunk
+}
+
+/// A message's `content`: the plain string, or text + `image_url` parts when
+/// the message carries images.
+fn chat_content(message: &LlmMessage) -> Value {
+    if message.images.is_empty() {
+        return json!(message.content);
+    }
+    let mut parts = Vec::new();
+    if !message.content.is_empty() {
+        parts.push(json!({ "type": "text", "text": message.content }));
+    }
+    for image in &message.images {
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", image.mime, image.data) },
+        }));
+    }
+    json!(parts)
 }

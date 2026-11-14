@@ -132,6 +132,15 @@ pub struct Run {
     pub last_active_at: Option<String>,
 }
 
+/// An image pasted into a user message: its MIME type (`image/png`, ...) and
+/// the base64 bytes (no `data:` prefix).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageAttachment {
+    pub mime: String,
+    pub data: String,
+}
+
 /// One chat message of a run, persisted as a `message` / `message_update` rollout line
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -152,6 +161,9 @@ pub struct RunMessage {
     /// replayed to the provider on later rounds and turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_blocks: Option<Value>,
+    /// Images attached to a user message (pasted into the composer).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 /// The active plan of a run, persisted as `plan` rollout lines.

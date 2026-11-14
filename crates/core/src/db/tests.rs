@@ -859,3 +859,24 @@ fn usage_ids_stay_unique_without_reloading_shared_files() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn user_message_images_persist_and_old_messages_still_load() {
+    let root = temp_root("images");
+    let db = Db::open(&root).unwrap();
+    db.create_run(active_run("run-i"));
+    let mut message = msg("run-i", "u1", "user", "look");
+    message.images = vec![ImageAttachment { mime: "image/png".into(), data: "QUJD".into() }];
+    db.append_message(message.clone());
+    db.append_message(msg("run-i", "u2", "user", "plain"));
+    drop(db);
+    let reopened = Db::open(&root).unwrap();
+    let messages = reopened.list_messages("run-i");
+    assert_eq!(messages[0].images, message.images);
+    assert!(messages[1].images.is_empty());
+    // An old message without the field loads, and a text-only one omits it.
+    let old: RunMessage = serde_json::from_value(serde_json::json!({ "id": "m", "role": "user", "content": "x" })).unwrap();
+    assert!(old.images.is_empty());
+    assert!(serde_json::to_value(&old).unwrap().get("images").is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

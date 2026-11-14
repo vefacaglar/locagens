@@ -278,7 +278,21 @@ fn GroupRow(group: Group, depth: u8, show_model: bool, streaming_review: bool) -
                 class: "msg-user",
                 key: "{message.id}",
                 "data-mid": "{message.id}",
-                div { class: "bubble", "{message.content}" }
+                if !message.images.is_empty() {
+                    div {
+                        class: "msg-images",
+                        for (position, image) in message.images.iter().enumerate() {
+                            div {
+                                key: "{position}",
+                                class: "attach-thumb",
+                                img { src: "data:{image.mime};base64,{image.data}", alt: "" }
+                            }
+                        }
+                    }
+                }
+                if !message.content.is_empty() || message.images.is_empty() {
+                    div { class: "bubble", "{message.content}" }
+                }
                 if !message.content.is_empty() {
                     MessageFooter { text: message.content.clone(), created_at: message.created_at.clone(), reuse: depth == 0 }
                 }

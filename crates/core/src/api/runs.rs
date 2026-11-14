@@ -3,7 +3,7 @@
 //! `lcgn` CLI.
 
 use crate::api::{ApiError, ApiResult, EventRx, RunEvent};
-use crate::db::{Plan, Run, RunMessage, UsageLogEntry};
+use crate::db::{ImageAttachment, Plan, Run, RunMessage, UsageLogEntry};
 use crate::orchestrator::RunHandle;
 use crate::util::now_iso;
 use crate::AppState;
@@ -17,11 +17,43 @@ use tokio::sync::broadcast::error::RecvError;
 // Payloads
 // ----------------------------------------------------------------------
 
+/// Most images one message may carry.
+pub const MAX_IMAGES: usize = 5;
+/// Largest accepted base64 payload of one image (about 5 MB of image bytes).
+pub const MAX_IMAGE_BASE64_BYTES: usize = 7_000_000;
+
+/// A message needs text or an image; images must be `image/*` with base64
+/// data inside the size caps.
+fn validate_message_input(task: &str, images: &[ImageAttachment]) -> ApiResult<()> {
+    if task.trim().is_empty() && images.is_empty() {
+        return Err(ApiError::bad_request("Task is required."));
+    }
+    if images.len() > MAX_IMAGES {
+        return Err(ApiError::bad_request(format!("At most {MAX_IMAGES} images per message.")));
+    }
+    for image in images {
+        let supported = image.mime.strip_prefix("image/").is_some_and(|kind| !kind.is_empty() && !kind.contains(['/', ';', ' ']));
+        if !supported {
+            return Err(ApiError::bad_request(format!("Unsupported attachment type: {}.", image.mime)));
+        }
+        if image.data.is_empty() {
+            return Err(ApiError::bad_request("Image data is empty."));
+        }
+        if image.data.len() > MAX_IMAGE_BASE64_BYTES {
+            return Err(ApiError::bad_request("Image is too large (5 MB limit)."));
+        }
+    }
+    Ok(())
+}
+
 /// Input for `create_run`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRunPayload {
     pub task: String,
+    /// Images pasted with the message (at most [`MAX_IMAGES`]).
+    #[serde(default)]
+    pub images: Vec<ImageAttachment>,
     pub project_path: Option<String>,
     pub project_name: Option<String>,
     pub provider_id: String,
@@ -50,6 +82,9 @@ pub struct CreateRunPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ContinueRunPayload {
     pub task: String,
+    /// Images pasted with the message (at most [`MAX_IMAGES`]).
+    #[serde(default)]
+    pub images: Vec<ImageAttachment>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -291,9 +326,7 @@ pub async fn create_run(
     state: &AppState,
     payload: &CreateRunPayload,
 ) -> ApiResult<StartedRun> {
-    if payload.task.trim().is_empty() {
-        return Err(ApiError::bad_request("Task is required."));
-    }
+    validate_message_input(&payload.task, &payload.images)?;
     // Pick up config.toml edits made since the last run (QA-042).
     crate::config_runtime::reload_if_changed();
     if payload.provider_id.trim().is_empty() || payload.model.trim().is_empty() {
@@ -351,6 +384,7 @@ pub async fn create_run(
         run_id: run_id.clone(),
         role: "user".to_string(),
         content: payload.task.clone(),
+        images: payload.images.clone(),
         created_at: now_iso(),
         ..Default::default()
     };
@@ -384,9 +418,7 @@ pub async fn continue_run(
     let Some(existing) = state.db.get_run_full(run_id) else {
         return Err(ApiError::not_found("Run not found."));
     };
-    if payload.task.trim().is_empty() {
-        return Err(ApiError::bad_request("Task is required."));
-    }
+    validate_message_input(&payload.task, &payload.images)?;
     crate::config_runtime::reload_if_changed();
     // One drive per run (QA-022): a live drive in this process owns the run,
     // and so does another process that holds the run's owner lock (FR-017).
@@ -418,6 +450,7 @@ pub async fn continue_run(
         run_id: run_id.to_string(),
         role: "user".to_string(),
         content: payload.task.clone(),
+        images: payload.images.clone(),
         created_at: now_iso(),
         ..Default::default()
     };
@@ -1036,6 +1069,24 @@ pub async fn subscribe_run_events(state: &AppState, run_id: &str) -> EventRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png(data: &str) -> ImageAttachment {
+        ImageAttachment { mime: "image/png".into(), data: data.into() }
+    }
+
+    #[test]
+    fn message_input_needs_text_or_valid_images() {
+        assert!(validate_message_input("hi", &[]).is_ok());
+        assert!(validate_message_input("", &[png("QUJD")]).is_ok(), "an image alone is a message");
+        assert!(validate_message_input("  ", &[]).is_err());
+        let wrong_type = ImageAttachment { mime: "text/html".into(), data: "QUJD".into() };
+        assert!(validate_message_input("hi", &[wrong_type]).unwrap_err().message.contains("Unsupported"));
+        assert!(validate_message_input("hi", &[png("")]).is_err());
+        let too_many = vec![png("QUJD"); MAX_IMAGES + 1];
+        assert!(validate_message_input("hi", &too_many).is_err());
+        let huge = png(&"A".repeat(MAX_IMAGE_BASE64_BYTES + 1));
+        assert!(validate_message_input("hi", &[huge]).unwrap_err().message.contains("too large"));
+    }
 
     #[test]
     fn context_usage_percent_is_clamped_and_needs_a_window() {

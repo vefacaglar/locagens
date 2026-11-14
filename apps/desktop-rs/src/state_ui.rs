@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use crate::i18n::{self, Lang};
 use crate::prefs::{self, Appearance, ThemeChoice};
 use locagens_core::api::{self, EventRx};
-use locagens_core::db::{Plan, Project, Run, RunMessage};
+use locagens_core::db::{ImageAttachment, Plan, Project, Run, RunMessage};
 use locagens_core::pi_providers::ProviderMetadata;
 use serde_json::Value;
 use std::sync::Arc;
@@ -353,6 +353,8 @@ pub struct UiStore {
     /// Visible toasts, oldest first.
     pub toasts: Signal<Vec<ToastItem>>,
     pub prompt: Signal<String>,
+    /// Images pasted into the composer, sent with the next message.
+    pub pending_images: Signal<Vec<ImageAttachment>>,
     /// Whether the left sidebar is shown (`Ctrl+B`, the toolbar toggle).
     pub sidebar_open: Signal<bool>,
     /// Messages queued on generating runs, not yet picked up.
@@ -419,6 +421,7 @@ pub fn use_ui_store() -> UiStore {
         right_panel_tab: use_signal(|| RightPanelTab::Plan),
         toasts: use_signal(Vec::new),
         prompt: use_signal(String::new),
+        pending_images: use_signal(Vec::new),
         sidebar_open: use_signal(|| true),
         queued: use_signal(Vec::new),
         undelivered: use_signal(Vec::new),

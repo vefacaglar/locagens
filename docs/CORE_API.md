@@ -83,6 +83,10 @@ pub async fn subscribe_run_events(state, run_id) -> EventRx
 pub async fn resync_run(state, run_id) -> RunResync   // { run, messages, events }: rebuild after a lagged receiver
 ```
 
+`CreateRunPayload` / `ContinueRunPayload` take an optional `images: [ImageAttachment { mime, data }]`
+(`image/*` MIME, base64 data; at most 5 per message, ~5 MB each, else `BadRequest`). The user
+`RunMessage` stores them and every later turn replays them; a message may be images only.
+
 Run lifecycle rules:
 
 * **One drive per run.** Every turn gets a fresh `RunHandle`; `continue_run`

@@ -71,9 +71,10 @@ const IMAGE_TOKEN_ESTIMATE: usize = 1_600;
 /// Estimated tokens of a message's text; a `view_image` result counts its
 /// JSON without the base64 bytes plus [`IMAGE_TOKEN_ESTIMATE`] (FR-027).
 fn estimate_content_tokens(message: &LlmMessage) -> usize {
+    let attached = message.images.len() * IMAGE_TOKEN_ESTIMATE;
     match (message.role == "tool").then(|| super::llm::tool_image_text(&message.content)).flatten() {
         Some(text) => estimate_tokens(&text) + IMAGE_TOKEN_ESTIMATE,
-        None => estimate_tokens(&message.content),
+        None => estimate_tokens(&message.content) + attached,
     }
 }
 
@@ -165,6 +166,9 @@ pub fn summarization_chunks(history: &[LlmMessage], keep_last: usize) -> Option<
 /// with a visible marker.
 fn render_message(message: &LlmMessage) -> String {
     let mut body = super::llm::tool_image_text(&message.content).unwrap_or_else(|| message.content.clone());
+    for _ in &message.images {
+        body.push_str("\n[image]");
+    }
     if let Some(calls) = &message.tool_calls {
         body.push_str(&format!("\ntool_calls: {}", serde_json::to_string(calls).unwrap_or_default()));
     }
@@ -286,6 +290,15 @@ mod tests {
                 ..Default::default()
             })
             .collect()
+    }
+
+    #[test]
+    fn attached_images_cost_a_flat_estimate_and_render_as_a_placeholder() {
+        let image = crate::db::ImageAttachment { mime: "image/png".into(), data: "A".repeat(100_000) };
+        let message = LlmMessage { role: "user".into(), content: "hi".into(), images: vec![image], ..Default::default() };
+        assert_eq!(estimate_history_tokens(std::slice::from_ref(&message)), 1 + IMAGE_TOKEN_ESTIMATE);
+        let rendered = render_message(&message);
+        assert!(rendered.contains("[image]") && rendered.len() < 100);
     }
 
     #[test]
