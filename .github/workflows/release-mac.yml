@@ -40,7 +40,7 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -194,14 +194,14 @@ jobs:
           cp target/aarch64-apple-darwin/release/lcgn build/npm-bins/lcgn-darwin-arm64
           cp target/x86_64-apple-darwin/release/lcgn build/npm-bins/lcgn-darwin-x64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: locagens-macos
           path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-bins-macos
           path: build/npm-bins/
@@ -210,7 +210,7 @@ jobs:
 
       - name: Publish to the GitHub Release
         if: env.RELEASE_TAG != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
@@ -219,7 +219,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -238,14 +238,14 @@ jobs:
           Compress-Archive -Path target/release/lcgn.exe -DestinationPath dist/lcgn-Windows-x64.zip
           Copy-Item target/release/lcgn.exe build/npm-bins/lcgn-win32-x64.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: locagens-windows
           path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-bins-windows
           path: build/npm-bins/
@@ -254,7 +254,7 @@ jobs:
 
       - name: Publish to the GitHub Release
         if: env.RELEASE_TAG != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
@@ -264,22 +264,22 @@ jobs:
     needs: [macos, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Set version from tag
         run: bash .github/scripts/set-version.sh "$RELEASE_TAG"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-bins-macos
           path: build/npm-bins
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-bins-windows
           path: build/npm-bins
@@ -297,7 +297,7 @@ jobs:
             npm pack "./build/npm-packages/$pkg" --pack-destination dist-npm
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: locagens-npm
           path: dist-npm/
