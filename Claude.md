@@ -126,7 +126,7 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   guard that clears it. Grants are persisted only by the asking side. Network
   "Allow for Run" hosts live on the handle (current turn only).
 - Byte-budget string cuts use `locagens_protocol::text` (char-boundary safe).
-- `/undo` reverts only paths the turn changed (pre- vs post-turn tree),
+- `/undo` leaves an `event` message telling the model; it reverts only paths the turn changed (pre- vs post-turn tree),
   skips paths changed since, and saves a `<run_id>#undo` backup snapshot.
 - Other tools: `tool_search` (more than 8 MCP tools are deferred; matches are
   added to the next request), `get_context_remaining`, `host_executable`

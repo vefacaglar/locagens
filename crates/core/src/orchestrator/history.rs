@@ -49,6 +49,34 @@ pub fn sanitize(history: Vec<LlmMessage>) -> Vec<LlmMessage> {
     out
 }
 
+/// Folds every between-turns event note (role [`super::EVENT_ROLE`]) into
+/// the user message after it, as a `<turn_event>` block ahead of the user's
+/// text; a note with no user message after it becomes a user message.
+pub fn fold_events(history: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut out: Vec<LlmMessage> = Vec::with_capacity(history.len());
+    let mut notes: Vec<String> = Vec::new();
+    for mut message in history {
+        if message.role == super::EVENT_ROLE {
+            notes.push(format!("<turn_event>{}</turn_event>", message.content));
+            continue;
+        }
+        if message.role == "user" && !notes.is_empty() {
+            notes.push(std::mem::take(&mut message.content));
+            message.content = notes.join("
+
+");
+            notes.clear();
+        }
+        out.push(message);
+    }
+    if !notes.is_empty() {
+        out.push(LlmMessage { role: "user".into(), content: notes.join("
+
+"), ..Default::default() });
+    }
+    out
+}
+
 /// In-place [`sanitize`].
 pub fn sanitize_in_place(history: &mut Vec<LlmMessage>) {
     let taken = std::mem::take(history);
@@ -98,6 +126,20 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> LlmMessage {
         LlmMessage { role: role.into(), content: content.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn event_notes_fold_into_the_next_user_message() {
+        let history = vec![msg("user", "make a.txt"), msg("assistant", "done"), msg("event", "undone"), msg("user", "why?")];
+        let folded = fold_events(history);
+        let roles: Vec<&str> = folded.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        assert_eq!(folded[2].content, "<turn_event>undone</turn_event>
+
+why?");
+
+        let trailing = fold_events(vec![msg("assistant", "done"), msg("event", "undone")]);
+        assert_eq!(trailing.last().map(|m| (m.role.as_str(), m.content.as_str())), Some(("user", "<turn_event>undone</turn_event>")));
     }
 
     fn calls(ids: &[&str]) -> LlmMessage {

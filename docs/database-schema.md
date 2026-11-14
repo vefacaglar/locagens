@@ -217,7 +217,7 @@ carries the replacement message for an existing `id` (last write wins).
 |---|---|---|
 | `id` | `string` | Unique message identifier |
 | `runId` | `string` | Parent run |
-| `role` | `string` | `user`, `assistant`, `system`, `tool`, … |
+| `role` | `string` | `user`, `assistant`, `system`, `tool`, `event` (a note for the model, e.g. after `/undo`; not shown, folded into the next user turn), … |
 | `agentRole` | `string?` | Sub-role: `explorer`, `worker`, or `null` for the main agent |
 | `agentName` | `string?` | Sub-agent identity (display name) |
 | `providerId` / `providerDisplayName` / `model` | `string?` | Provider/model used for this message |

@@ -325,13 +325,18 @@ pub fn seed_history(messages: &[RunMessage]) -> Vec<llm::LlmMessage> {
             .unwrap_or(index + 1);
     }
     history.extend(messages[from..].iter().filter_map(project_message));
-    history::sanitize(history)
+    history::sanitize(history::fold_events(history))
 }
+
+/// Role of a persisted note for the model about something that happened
+/// between turns (an `/undo`). The UIs do not show it; the history folds
+/// it into the next user message ([`history::fold_events`]).
+pub const EVENT_ROLE: &str = "event";
 
 /// One persisted main-agent message as an LLM message (`None` for system
 /// and sub-agent messages).
 fn project_message(message: &RunMessage) -> Option<llm::LlmMessage> {
-    let replayed = matches!(message.role.as_str(), "user" | "assistant" | "tool");
+    let replayed = matches!(message.role.as_str(), "user" | "assistant" | "tool" | EVENT_ROLE);
     (replayed && message.agent_role.is_none()).then(|| to_llm_message(message))
 }
 

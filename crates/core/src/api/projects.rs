@@ -576,9 +576,36 @@ pub async fn undo_last_turn(
     if run_id.is_some_and(|id| state.orchestrator.handle(id).is_some()) {
         return Err(ApiError::conflict("The run is still working; wait for it to finish or cancel it before undoing."));
     }
-    undo_last_turn_for_path(&canonical, run_id)
+    let snapshot = undo_last_turn_for_path(&canonical, run_id)
         .await
-        .map_err(ApiError::internal)
+        .map_err(ApiError::internal)?;
+    if let (Some(run_id), Some(note)) = (run_id, undo_note(&snapshot)) {
+        // Tells the model on the next turn why its files are gone.
+        state.db.append_message(db::RunMessage {
+            id: format!("msg-{}", uuid::Uuid::new_v4()),
+            run_id: run_id.to_string(),
+            role: crate::orchestrator::EVENT_ROLE.to_string(),
+            content: note,
+            created_at: crate::util::now_iso(),
+            ..Default::default()
+        });
+    }
+    Ok(snapshot)
+}
+
+/// The note an undo leaves for the model, `None` when nothing was restored.
+fn undo_note(snapshot: &GitSnapshot) -> Option<String> {
+    if snapshot.restored.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "The user ran /undo: your previous turn's file changes were reverted. These paths are back to how they were before that turn (a file that turn created no longer exists): {}.",
+        snapshot.restored.join(", ")
+    );
+    if !snapshot.skipped.is_empty() {
+        note.push_str(&format!(" Left as they are, because they changed again since: {}.", snapshot.skipped.join(", ")));
+    }
+    Some(note)
 }
 
 // ----------------------------------------------------------------------
