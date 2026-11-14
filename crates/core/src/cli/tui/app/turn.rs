@@ -1,15 +1,19 @@
 //! Redraw tick and turn lifecycle (driver callbacks).
 
 use super::*;
+use crate::cli::tui::diff::file_stats;
 
 impl App {
     // ---- redraw tick -----------------------------------------------------
 
-    /// Called on every redraw tick; animates only while busy.
+    /// Called on every redraw tick; animates only while busy. With reduced
+    /// motion the status line is static and only the elapsed time moves,
+    /// about every five seconds.
     pub fn tick(&mut self) {
         if self.busy {
             self.spinner_ticks += 1;
-            if self.spinner_ticks >= SPINNER_TICKS {
+            let period = if self.reduced_motion { REDUCED_MOTION_TICKS } else { SPINNER_TICKS };
+            if self.spinner_ticks >= period {
                 self.spinner_ticks = 0;
                 self.spinner = self.spinner.wrapping_add(1);
                 self.dirty = true;
@@ -17,6 +21,10 @@ impl App {
         }
         if self.quit_armed_at.is_some() && !self.quit_armed() {
             self.quit_armed_at = None;
+            self.dirty = true;
+        }
+        if self.flash.is_some() && self.flash_text().is_none() {
+            self.flash = None;
             self.dirty = true;
         }
     }
@@ -33,42 +41,38 @@ impl App {
 
     /// Records a mid-run message the driver queued on the active run.
     pub fn note_queued(&mut self, display: &str, queued_content: &str) {
-        self.queued_texts.push_back(queued_content.to_string());
-        self.push(CellKind::User {
-            text: display.to_string(),
-            queued: true,
+        self.queued.push_back(Queued {
+            display: display.to_string(),
+            content: queued_content.to_string(),
         });
+        self.dirty = true;
+    }
+
+    /// What the user typed for each queued message, oldest first.
+    pub fn queued_displays(&self) -> Vec<&str> {
+        self.queued.iter().map(|q| q.display.as_str()).collect()
+    }
+
+    /// The run-side text of the newest queued message.
+    pub fn last_queued_content(&self) -> Option<&str> {
+        self.queued.back().map(|q| q.content.as_str())
+    }
+
+    /// The newest queued message was withdrawn from the run: put it back in
+    /// the composer for editing.
+    pub fn unqueue_last(&mut self) {
+        if let Some(queued) = self.queued.pop_back() {
+            self.composer.set_text(&queued.display);
+            self.flash("Editing the queued message.");
+        }
     }
 
     /// After a clean finish: the oldest message that was queued but never
     /// folded into the run, ready to be sent as a new turn.
     pub fn take_leftover_queued(&mut self) -> Option<String> {
-        let text = self.queued_texts.pop_front()?;
-        // The new turn's user event re-creates the cell, so drop the
-        // "queued" placeholder.
-        if let Some(index) = self
-            .cells
-            .iter()
-            .position(|c| matches!(c.kind(), CellKind::User { queued: true, .. }))
-        {
-            self.cells.remove(index);
-        }
-        Some(text)
-    }
-
-    pub(super) fn clear_first_queued_flag(&mut self) {
-        if let Some(cell) = self
-            .cells
-            .iter_mut()
-            .find(|c| matches!(c.kind(), CellKind::User { queued: true, .. }))
-        {
-            cell.update(|kind| {
-                if let CellKind::User { queued, .. } = kind {
-                    *queued = false;
-                }
-            });
-            self.dirty = true;
-        }
+        let queued = self.queued.pop_front()?;
+        self.dirty = true;
+        Some(queued.content)
     }
 
     pub(super) fn finish(&mut self, outcome: Finish) {
@@ -80,22 +84,34 @@ impl App {
         self.busy_since = None;
         self.patch_progress = None;
         self.overlay = None;
+        self.history_search = None;
         self.run_finished = true;
         if outcome != Finish::Completed {
             self.interrupt_pending_tools();
-            self.discard_queued();
+            self.restore_queued();
         }
-        if let Some((diff, files)) = self.turn_diff.take() {
-            let noun = if files == 1 { "file" } else { "files" };
-            self.push(CellKind::Diff {
-                title: format!("Changes: {files} {noun}"),
-                diff,
-            });
-        }
+        let diff = self.turn_diff.take().map(|(diff, _)| diff);
+        let stats = diff.as_deref().map(file_stats).unwrap_or_default();
         match outcome {
-            Finish::Completed => self.push(CellKind::Completed(format!("done · {elapsed}"))),
-            Finish::Cancelled => self.push_notice("Run cancelled."),
-            Finish::Failed => {}
+            Finish::Completed => self.push(CellKind::TurnSummary {
+                headline: elapsed,
+                ok: true,
+                stats,
+                diff,
+            }),
+            Finish::Cancelled | Finish::Failed => {
+                if !stats.is_empty() {
+                    self.push(CellKind::TurnSummary {
+                        headline: format!("stopped after {elapsed}"),
+                        ok: false,
+                        stats,
+                        diff,
+                    });
+                }
+                if outcome == Finish::Cancelled {
+                    self.push_notice("Run cancelled.");
+                }
+            }
         }
         self.dirty = true;
     }
@@ -115,25 +131,19 @@ impl App {
         }
     }
 
-    pub(super) fn discard_queued(&mut self) {
-        let count = self.queued_texts.len();
-        if count == 0 {
+    /// Undelivered queued messages go back into the composer instead of
+    /// being thrown away.
+    pub(super) fn restore_queued(&mut self) {
+        if self.queued.is_empty() {
             return;
         }
-        self.queued_texts.clear();
-        for cell in self.cells.iter_mut() {
-            cell.update(|kind| {
-                if let CellKind::User { queued, .. } = kind {
-                    *queued = false;
-                }
-            });
-        }
-        self.push_notice(format!("{count} queued message(s) were not delivered."));
+        let block = self.queued.drain(..).map(|q| q.display).collect::<Vec<_>>().join("\n\n");
+        self.composer.append_block(&block);
+        self.flash_for("Queued message restored to the composer.", Duration::from_secs(4));
     }
 
     /// The event channel closed without a terminal event.
     pub fn on_run_closed(&mut self) {
         self.finish(Finish::Failed);
     }
-
 }

@@ -34,9 +34,7 @@ impl App {
                 }
             }
             "context_compacted" => {
-                let before = event.get("messagesBefore").and_then(Value::as_u64).unwrap_or(0);
-                let after = event.get("messagesAfter").and_then(Value::as_u64).unwrap_or(0);
-                self.push_notice(format!("context compacted ({before} -> {after} messages)"));
+                self.push_notice("Older messages were summarized to free up context.");
             }
             "agent_spawned" => {
                 let name = event.get("name").and_then(Value::as_str).unwrap_or("agent");
@@ -54,6 +52,7 @@ impl App {
                     .and_then(Value::as_str)
                     .unwrap_or("Run failed.");
                 self.push_error(message.to_string());
+                self.push_notice("Send a message to continue · /undo reverts this turn's file changes");
                 self.finish(Finish::Failed);
             }
             _ => {}
@@ -233,9 +232,10 @@ impl App {
         if content.starts_with("<environment_context>") {
             return;
         }
-        if self.queued_texts.pop_front().is_some() {
-            self.clear_first_queued_flag();
-            return;
+        // A queued message was folded into the run: it leaves the strip and
+        // shows up in the transcript below.
+        if self.queued.pop_front().is_some() {
+            self.dirty = true;
         }
         let seen = !id.is_empty()
             && self
@@ -248,7 +248,6 @@ impl App {
                 None,
                 CellKind::User {
                     text: content.to_string(),
-                    queued: false,
                 },
             ));
         }

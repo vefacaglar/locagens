@@ -59,7 +59,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     spec("review", &[], "[target]", "code review: changes, a branch or a commit", ALL),
     spec("mcp", &[], "", "list MCP servers and status", CLI),
     spec("skills", &[], "", "list discovered skills", CLI),
-    spec("sessions", &[], "", "list sessions for this directory", CLI),
+    spec("resume", &["sessions"], "", "pick a session of this folder to continue", CLI),
+    spec("login", &[], "[provider]", "connect a provider (API key or sign-in)", CLI),
+    spec("logout", &[], "<provider>", "remove a provider's stored credentials", CLI),
+    spec("copy", &[], "[code]", "copy the last answer (or its last code block)", CLI),
     spec("usage", &[], "", "usage and cost of this session", CLI),
     spec("help", &[], "", "show the available commands", ALL),
     spec("exit", &["quit"], "", "leave lcgn", CLI),
@@ -116,7 +119,14 @@ pub enum SlashCommand {
     Review(String),
     Mcp,
     Skills,
+    /// `/resume` (alias `/sessions`).
     Sessions,
+    /// `/login [provider]`.
+    Login(Option<String>),
+    /// `/logout <provider>`.
+    Logout(Option<String>),
+    /// `/copy` or `/copy code`.
+    Copy(Option<String>),
     Usage,
     /// Not in the table; carries the lowercased head (`/nope`).
     Unknown(String),
@@ -157,7 +167,10 @@ impl SlashCommand {
             "review" => Self::Review(line[raw_head.len()..].trim().to_string()),
             "mcp" => Self::Mcp,
             "skills" => Self::Skills,
-            "sessions" => Self::Sessions,
+            "resume" => Self::Sessions,
+            "login" => Self::Login(first_arg),
+            "logout" => Self::Logout(first_arg),
+            "copy" => Self::Copy(first_arg),
             "usage" => Self::Usage,
             _ => Self::Unknown(head),
         })
@@ -181,7 +194,10 @@ impl SlashCommand {
             Self::Review(_) => "review",
             Self::Mcp => "mcp",
             Self::Skills => "skills",
-            Self::Sessions => "sessions",
+            Self::Sessions => "resume",
+            Self::Login(_) => "login",
+            Self::Logout(_) => "logout",
+            Self::Copy(_) => "copy",
             Self::Usage => "usage",
             Self::Unknown(_) => return None,
         };
@@ -262,8 +278,8 @@ mod tests {
         assert_eq!(names[0], "model");
         assert!(names.contains(&"mcp") && !names.contains(&"skills"));
         assert_eq!(matching("", Frontend::Cli).len(), COMMANDS.len());
-        let names: Vec<&str> = matching("ess", Frontend::Cli).iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["sessions"]);
+        let names: Vec<&str> = matching("sum", Frontend::Cli).iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["resume"]);
         assert!(matching("zzz", Frontend::Cli).is_empty());
         // The desktop never suggests CLI-only commands; a leading slash is fine.
         assert!(matching("m", Frontend::Desktop).is_empty());

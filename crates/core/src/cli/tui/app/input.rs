@@ -1,6 +1,7 @@
 //! Mouse, paste and key handling, popups.
 
 use super::*;
+use crate::cli::tui::sessions::SessionOutcome;
 
 impl App {
     // ---- scrolling -------------------------------------------------------
@@ -9,6 +10,16 @@ impl App {
         let delta = match mouse.kind {
             MouseEventKind::ScrollUp => -1isize,
             MouseEventKind::ScrollDown => 1,
+            MouseEventKind::Drag(_) => {
+                if !self.drag_hint_shown {
+                    self.drag_hint_shown = true;
+                    self.flash_for(
+                        "Hold Shift while dragging to select text · /copy copies the last answer",
+                        Duration::from_secs(6),
+                    );
+                }
+                return;
+            }
             _ => return,
         };
         if let Some(Overlay::Approval(approval)) = self.overlay.as_mut() {
@@ -26,7 +37,17 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        if let Some(Overlay::Login(flow)) = self.overlay.as_mut() {
+            flow.on_paste(text);
+            self.dirty = true;
+            return Vec::new();
+        }
         if self.overlay.is_some() {
+            return Vec::new();
+        }
+        if let Some(search) = self.history_search.as_mut() {
+            search.query.push_str(&text.replace(['\r', '\n'], " "));
+            search.selected = 0;
             return Vec::new();
         }
         self.composer.insert_str(text);
@@ -46,16 +67,36 @@ impl App {
         if self.overlay.is_some() {
             return self.on_overlay_key(key);
         }
+        if self.history_search.is_some() {
+            return self.on_history_search_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // AltGr text (Ctrl+Alt on Windows) must not trigger Ctrl shortcuts.
         if ctrl && printable_char(&key).is_some() {
             return self.on_edit_key(key);
         }
+        if printable_char(&key) == Some('?') && self.composer.is_empty() && self.popup.is_none() {
+            self.open_help();
+            return Vec::new();
+        }
+        if key.code == KeyCode::Up
+            && self.busy
+            && self.composer.is_empty()
+            && self.popup.is_none()
+            && !self.queued.is_empty()
+        {
+            return vec![Action::Withdraw];
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => return self.on_ctrl_c(),
             KeyCode::Char('d') if ctrl && self.composer.is_empty() => return vec![Action::Quit],
             KeyCode::Char('o') if ctrl => {
-                self.show_reasoning = !self.show_reasoning;
+                self.details = !self.details;
+                return Vec::new();
+            }
+            KeyCode::Char('r') if ctrl => {
+                self.history_search = Some(HistorySearch::default());
+                self.popup = None;
                 return Vec::new();
             }
             KeyCode::PageUp => {
@@ -71,8 +112,7 @@ impl App {
                 return Vec::new();
             }
             KeyCode::BackTab => {
-                let plan = self.mode != "plan";
-                self.set_build_mode(plan);
+                self.cycle_mode();
                 return Vec::new();
             }
             KeyCode::Esc => return self.on_escape(),
@@ -140,8 +180,66 @@ impl App {
                 }
                 None => Vec::new(),
             },
+            Some(Overlay::Help(help)) => {
+                if help.on_key(key) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Some(Overlay::Sessions(picker)) => match picker.on_key(key) {
+                Some(SessionOutcome::Open(id)) => {
+                    self.overlay = None;
+                    vec![Action::Resume(id)]
+                }
+                Some(SessionOutcome::Close) => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
+            Some(Overlay::Login(flow)) => match flow.on_key(key) {
+                Some(LoginAction::Close) => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                Some(action) => vec![Action::Login(action)],
+                None => Vec::new(),
+            },
             None => Vec::new(),
         }
+    }
+
+    /// Ctrl+R: type to filter earlier prompts, Enter uses the match.
+    pub(super) fn on_history_search_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(search) = self.history_search.as_mut() else {
+            return Vec::new();
+        };
+        let count = search.matches(self.composer.history()).len();
+        if let Some(ch) = printable_char(&key) {
+            search.query.push(ch);
+            search.selected = 0;
+            return Vec::new();
+        }
+        match key.code {
+            KeyCode::Esc => self.history_search = None,
+            KeyCode::Char('c') if ctrl => self.history_search = None,
+            KeyCode::Enter => {
+                let chosen = search.matches(self.composer.history()).get(search.selected).map(|p| (*p).clone());
+                self.history_search = None;
+                if let Some(prompt) = chosen {
+                    self.composer.set_text(&prompt);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('r') if count > 0 => search.selected = (search.selected + 1) % count,
+            KeyCode::Down if count > 0 => search.selected = (search.selected + count - 1) % count,
+            KeyCode::Backspace => {
+                search.query.pop();
+                search.selected = 0;
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     /// Popup navigation; `None` means the key should edit the composer.
@@ -267,6 +365,10 @@ impl App {
         self.popup_dismissed_for = None;
         let text = self.composer.take_submission();
         if text.is_empty() {
+            // First run without a provider: Enter opens the sign-in picker.
+            if self.no_providers && self.cells.is_empty() {
+                return vec![Action::Slash("/login".to_string())];
+            }
             return Vec::new();
         }
         if is_slash_command(&text) {

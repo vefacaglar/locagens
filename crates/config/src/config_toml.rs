@@ -136,6 +136,16 @@ pub struct HistoryConfig {
     pub persistence: Option<String>,
 }
 
+/// `[tui]`: `lcgn` terminal UI look and motion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// `dark` or `light`; unset follows `COLORFGBG`, else dark.
+    pub theme: Option<String>,
+    /// `false` turns off the spinner and shimmer (screen readers).
+    pub animations: Option<bool>,
+}
+
 /// `[projects."<path>"]` (Codex): per-folder settings. Only `trust_level`
 /// (`"trusted"` / `"untrusted"`) is used.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -185,6 +195,7 @@ impl std::fmt::Debug for Config {
             .field("notify", &self.notify)
             .field("hide_agent_reasoning", &self.hide_agent_reasoning)
             .field("history", &self.history)
+            .field("tui", &self.tui)
             .field("projects", &self.projects)
             .finish()
     }
@@ -224,6 +235,7 @@ pub struct Config {
     pub notify: Vec<String>,
     pub hide_agent_reasoning: Option<bool>,
     pub history: Option<HistoryConfig>,
+    pub tui: Option<TuiConfig>,
     /// Per-folder trust decisions, keyed by the canonical folder path.
     pub projects: BTreeMap<String, ProjectConfig>,
 }

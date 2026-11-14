@@ -247,6 +247,34 @@ impl Composer {
         true
     }
 
+    /// Older prompts first; seeded at start and extended by submissions.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Seeds the recall history (oldest first), e.g. from `history.jsonl`.
+    pub fn seed_history(&mut self, prompts: Vec<String>) {
+        self.history = prompts;
+        self.history_pos = None;
+    }
+
+    /// Replaces the text and puts the cursor at the end.
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+        self.cursor = self.text.len();
+        self.history_pos = None;
+    }
+
+    /// Appends `block` after the current text, separated by a blank line.
+    pub fn append_block(&mut self, block: &str) {
+        if !self.text.trim().is_empty() {
+            self.text.push_str("\n\n");
+        }
+        self.text.push_str(block);
+        self.cursor = self.text.len();
+        self.history_pos = None;
+    }
+
     /// Takes the trimmed text, records it in history and clears the editor.
     pub fn take_submission(&mut self) -> String {
         let submitted = self.text.trim().to_string();
@@ -365,6 +393,25 @@ impl Composer {
             end = from + offset + ch.len_utf8();
         }
         end
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn seeded_history_is_recalled_and_blocks_append_after_a_blank_line() {
+        let mut c = Composer::default();
+        c.seed_history(vec!["one".into(), "two".into()]);
+        assert!(c.history_prev());
+        assert_eq!(c.text(), "two");
+        c.set_text("draft");
+        c.append_block("restored");
+        assert_eq!(c.text(), "draft\n\nrestored");
+        c.set_text("");
+        c.append_block("first");
+        assert_eq!(c.text(), "first");
     }
 }
 
