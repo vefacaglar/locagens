@@ -5,8 +5,10 @@ name: Release (macOS & Windows binaries)
 #   universal `lcgn`. Signed with the Developer ID certificate and notarized
 #   when the signing secrets exist; otherwise built unsigned (with a warning).
 # - Windows: x86_64 `locagens.exe` + `lcgn.exe` in a zip.
-# Tags (`v*`) and a dispatch with `tag_name` also publish a GitHub Release;
-# a push that changes this workflow only builds (artifacts, no release).
+# Runs only on purpose: pushing a tag (`v*`) or "Run workflow" (dispatch).
+# Branch pushes never sign; ci.yml checks that they build and pass tests.
+# Tags and a dispatch with `tag_name` also publish a GitHub Release; a
+# dispatch without one only builds (artifacts, no release).
 # Notarization needs the Apple Developer agreements accepted (HTTP 403 otherwise).
 
 on:
@@ -14,10 +16,6 @@ on:
     tags:
       - 'v*'
       - '[0-9]*'
-    branches:
-      - main
-    paths:
-      - '.github/workflows/release-mac.yml'
   workflow_dispatch:
     inputs:
       tag_name:

@@ -96,8 +96,10 @@ Without them the workflow still builds, unsigned, with a warning; Gatekeeper
 then asks on first launch (right-click → **Open**). Windows binaries are not
 signed (SmartScreen may warn on first launch).
 
-A push to `main` that changes the workflow builds everything (signing
-included) without publishing a release, to check the pipeline.
+The release workflow never runs on branch pushes (those only run `ci.yml`:
+build, clippy, tests). To check the full pipeline without publishing, use
+Actions → "Release (macOS & Windows binaries)" → **Run workflow** with an
+empty tag: it builds, signs and notarizes, and keeps the files as artifacts.
 If Apple refuses notarization there (e.g. "A required agreement is missing
 or has expired" — accept the latest agreements in the Apple Developer account
 / App Store Connect → Agreements), the build-only run still delivers a signed,
