@@ -132,6 +132,11 @@ impl SlashCommand {
         let mut parts = line.split_whitespace();
         let raw_head = parts.next().unwrap_or("");
         let head = raw_head.to_lowercase();
+        // `/usr/bin/foo fails` is a path in ordinary text, not a command.
+        let name = &head[1..];
+        if !name.is_empty() && !name.chars().all(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
         let first_arg = parts.next().map(str::to_string);
         let Some(spec) = find(&head) else {
             return Some(Self::Unknown(head));
@@ -202,6 +207,8 @@ mod tests {
     #[test]
     fn parses_every_command_and_ignores_plain_text() {
         assert_eq!(SlashCommand::parse("hello"), None);
+        assert_eq!(SlashCommand::parse("/usr/bin/foo fails"), None, "a path is text");
+        assert_eq!(SlashCommand::parse("/bogus"), Some(SlashCommand::Unknown("/bogus".into())));
         assert_eq!(SlashCommand::parse("  /exit "), Some(SlashCommand::Exit));
         assert_eq!(SlashCommand::parse("/QUIT"), Some(SlashCommand::Exit));
         assert_eq!(SlashCommand::parse("/model"), Some(SlashCommand::Model(None)));

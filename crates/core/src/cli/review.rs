@@ -61,7 +61,7 @@ pub async fn run_review(
     json_mode: bool,
     active: Option<crate::cli::repl::ActiveRun>,
 ) -> (i32, Option<String>) {
-    if let Err(message) = ensure_authenticated(state, model) {
+    if let Err(message) = ensure_authenticated(state, model).await {
         eprintln!("lcgn: {message}");
         return (2, None);
     }

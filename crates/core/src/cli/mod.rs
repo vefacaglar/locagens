@@ -5,6 +5,7 @@ pub mod args;
 pub mod auth;
 pub mod commands;
 pub mod events;
+pub mod logging;
 pub mod mcp;
 pub mod models;
 pub mod prompt;
@@ -26,6 +27,11 @@ use std::sync::Arc;
 pub fn main_entry() -> i32 {
     enable_windows_vt();
     let cli = Cli::parse();
+    if let Err(message) = cli.validate() {
+        eprintln!("lcgn: {message}");
+        return 2;
+    }
+    logging::init();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -222,7 +228,7 @@ async fn run(mut cli: Cli) -> i32 {
         Some(id) => TurnTarget::Continue(id),
         None => TurnTarget::New,
     };
-    let stdin = args::read_piped_stdin();
+    let stdin = if cli.wants_stdin() { args::read_piped_stdin() } else { None };
     let task = match args::assemble_prompt(&cli.messages, &project, stdin.as_deref()) {
         Ok(task) => task,
         Err(message) => {

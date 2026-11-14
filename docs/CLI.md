@@ -28,7 +28,9 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
   (`cli/prompt.rs`): `@path` mentions of **existing files inside the project**
   are attached (max 256 KiB each); everything else, including `@alice`, a
   missing file or `@../outside`, stays plain text, and newlines are kept
-  verbatim. Piped (non-TTY) stdin is appended to the prompt, like `pi`.
+  verbatim. Piped (non-TTY) stdin is the prompt when no message is given;
+  with a message it is appended only when `--stdin` is passed (so an
+  inherited open pipe cannot hang `lcgn -p "..."`).
 - Text mode streams the main agent's answer to **stdout** and everything else
   (reasoning, tool lines like `✔ read_file src/main.rs`, sub-agent text tagged
   `[name]`, usage/cost) to **stderr** — so `lcgn -p "..." > out.txt` captures

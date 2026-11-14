@@ -21,13 +21,39 @@ pub async fn auth_command(state: &AppState, action: Option<AuthAction>) -> i32 {
             0
         }
         Some(AuthAction::Login { provider: Some(provider), api_key }) => {
-            login_with(state, provider.trim(), api_key.as_deref()).await
+            let provider = match resolve_provider_arg(pi, provider.trim()) {
+                Ok(provider) => provider,
+                Err(message) => {
+                    eprintln!("lcgn: {message}");
+                    return 2;
+                }
+            };
+            let api_key = match literal_or_stdin_key(api_key) {
+                Ok(key) => key,
+                Err(message) => {
+                    eprintln!("lcgn: {message}");
+                    return 2;
+                }
+            };
+            login_with(state, &provider, api_key.as_deref()).await
         }
         Some(AuthAction::Login { provider: None, api_key }) => match pick_provider(pi).await {
-            Some(provider) => login_with(state, &provider, api_key.as_deref()).await,
+            Some(provider) => match literal_or_stdin_key(api_key) {
+                Ok(key) => login_with(state, &provider, key.as_deref()).await,
+                Err(message) => {
+                    eprintln!("lcgn: {message}");
+                    2
+                }
+            },
             None => 2,
         },
-        Some(AuthAction::Logout { provider }) => logout(pi, &provider),
+        Some(AuthAction::Logout { provider }) => match resolve_provider_arg(pi, provider.trim()) {
+            Ok(provider) => logout(pi, &provider),
+            Err(message) => {
+                eprintln!("lcgn: {message}");
+                2
+            }
+        },
         Some(AuthAction::Check { provider, json }) => check(pi, provider.as_deref(), json),
     }
 }
@@ -66,6 +92,32 @@ async fn pick_provider(pi: &PiProviderManager) -> Option<String> {
         eprintln!("lcgn: no provider selected.");
     }
     provider
+}
+
+/// The provider argument of `login` / `logout`: a table number (as shown by
+/// `lcgn auth`) becomes its provider id, anything else is taken as the id.
+fn resolve_provider_arg(pi: &PiProviderManager, arg: &str) -> Result<String, String> {
+    if arg.parse::<usize>().is_err() {
+        return Ok(arg.to_string());
+    }
+    resolve_choice(&pi.login_providers(), arg).ok_or_else(|| format!("no provider number {arg}. Run `lcgn auth`."))
+}
+
+/// `--api-key -` reads the key from stdin; a literal key works but is visible
+/// in the process list, so say so.
+fn literal_or_stdin_key(api_key: Option<String>) -> Result<Option<String>, String> {
+    match api_key.as_deref().map(str::trim) {
+        Some("-") => {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).map_err(|err| format!("failed to read the key from stdin: {err}"))?;
+            Ok(Some(line.trim().to_string()))
+        }
+        Some(key) if !key.is_empty() => {
+            eprintln!("lcgn: note: --api-key is visible in the process list; prefer the prompt or `--api-key -` (stdin).");
+            Ok(api_key)
+        }
+        _ => Ok(api_key),
+    }
 }
 
 /// A 1-based table number or a provider id.

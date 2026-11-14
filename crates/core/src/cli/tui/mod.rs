@@ -77,9 +77,16 @@ fn restore_terminal() {
 
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
+    let ui_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        previous(info);
+        // A panic in a background task must not tear the screen down under
+        // the still-running UI: log it, restore only for the UI thread.
+        if std::thread::current().id() == ui_thread {
+            restore_terminal();
+            previous(info);
+        } else {
+            tracing::error!("panic in a background thread: {info}");
+        }
     }));
 }
 
@@ -194,7 +201,7 @@ fn normalize_key(mut key: KeyEvent, last_char_at: &mut Option<Instant>) -> KeyEv
     if cfg!(windows) && in_burst && key.code == KeyCode::Enter && key.modifiers.is_empty() {
         key.modifiers = KeyModifiers::SHIFT;
         *last_char_at = Some(now);
-    } else if matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+    } else if composer::printable_char(&key).is_some() {
         *last_char_at = Some(now);
     } else {
         *last_char_at = None;
