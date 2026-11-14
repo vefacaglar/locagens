@@ -141,9 +141,13 @@ jobs:
           set -e
           trap 'echo "::error::Signing step failed at: $BASH_COMMAND"' ERR
           codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" build/lcgn
+          codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" target/aarch64-apple-darwin/release/lcgn
+          codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" target/x86_64-apple-darwin/release/lcgn
           codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" build/Locagens.app
           codesign --verify --deep --strict --verbose=2 build/Locagens.app
           mkdir -p build/notarize && cp -R build/Locagens.app build/lcgn build/notarize/
+          cp target/aarch64-apple-darwin/release/lcgn build/notarize/lcgn-darwin-arm64
+          cp target/x86_64-apple-darwin/release/lcgn build/notarize/lcgn-darwin-x64
           ditto -c -k --keepParent build/notarize build/notarize.zip
           # A build-only run keeps going (signed, not notarized) when Apple
           # refuses; a release must be notarized.
@@ -184,10 +188,23 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
+      - name: Stage npm CLI binaries
+        run: |
+          mkdir -p build/npm-bins
+          cp target/aarch64-apple-darwin/release/lcgn build/npm-bins/lcgn-darwin-arm64
+          cp target/x86_64-apple-darwin/release/lcgn build/npm-bins/lcgn-darwin-x64
+
       - uses: actions/upload-artifact@v4
         with:
           name: locagens-macos
           path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-bins-macos
+          path: build/npm-bins/
           if-no-files-found: error
           retention-days: 14
 
@@ -213,16 +230,25 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p locagens-desktop -p locagens-cli
 
-      - name: Zip
+      - name: Zip and stage npm binary
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
+          New-Item -ItemType Directory -Force dist, build/npm-bins | Out-Null
           Compress-Archive -Path target/release/locagens.exe, target/release/lcgn.exe -DestinationPath dist/Locagens-Windows-x64.zip
+          Compress-Archive -Path target/release/lcgn.exe -DestinationPath dist/lcgn-Windows-x64.zip
+          Copy-Item target/release/lcgn.exe build/npm-bins/lcgn-win32-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: locagens-windows
           path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-bins-windows
+          path: build/npm-bins/
           if-no-files-found: error
           retention-days: 14
 
@@ -233,3 +259,53 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
           generate_release_notes: true
+
+  npm:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Set version from tag
+        run: bash .github/scripts/set-version.sh "$RELEASE_TAG"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-bins-macos
+          path: build/npm-bins
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-bins-windows
+          path: build/npm-bins
+
+      - name: Stage npm packages
+        run: |
+          version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' apps/cli/Cargo.toml | head -1)
+          echo "NPM_VERSION=$version" >> "$GITHUB_ENV"
+          bash .github/scripts/stage-npm.sh "$version" build/npm-bins build/npm-packages
+
+      - name: Pack npm tarballs
+        run: |
+          mkdir -p dist-npm
+          for pkg in lcgn-darwin-arm64 lcgn-darwin-x64 lcgn-win32-x64 lcgn; do
+            npm pack "./build/npm-packages/$pkg" --pack-destination dist-npm
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: locagens-npm
+          path: dist-npm/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish to npm
+        if: env.RELEASE_TAG != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash .github/scripts/stage-npm.sh "$NPM_VERSION" build/npm-bins build/npm-packages --publish

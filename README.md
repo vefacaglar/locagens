@@ -49,7 +49,15 @@ docs/                CORE_API.md, CLI.md, CONFIG.md, HOOKS.md, SANDBOX.md,
 
 ## Install
 
-Prebuilt binaries come from the latest
+**CLI via npm / pnpm** (macOS Terminal and Windows PowerShell / CMD; Node.js >= 18):
+
+```bash
+npm install -g lcgn
+# or
+pnpm add -g lcgn
+```
+
+Prebuilt binaries also come from the latest
 [GitHub Release](https://github.com/vefacaglar/locagens/releases/latest):
 the desktop app as a DMG (macOS) or zip (Windows), and the `lcgn` CLI.
 

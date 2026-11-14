@@ -15,5 +15,19 @@ for cargo_toml in apps/cli/Cargo.toml apps/desktop-rs/Cargo.toml; do
   mv "$cargo_toml.tmp" "$cargo_toml"
   echo "Set $cargo_toml to $version"
 done
+npm_pkg="apps/cli/npm/package.json"
+if [ -f "$npm_pkg" ]; then
+  awk -v v="$version" '
+    /^  "version":[[:space:]]*"/ { sub(/:[[:space:]]*"[^"]+"/, ": \"" v "\"") }
+    /^  "optionalDependencies":[[:space:]]*\{/ { in_opt=1 }
+    in_opt && /^[[:space:]]*"[^"]+":[[:space:]]*"/ { sub(/:[[:space:]]*"[^"]+"/, ": \"" v "\"") }
+    in_opt && /\}/ { in_opt=0 }
+    { print }
+  ' "$npm_pkg" > "$npm_pkg.tmp"
+  mv "$npm_pkg.tmp" "$npm_pkg"
+  echo "Set $npm_pkg to $version"
+fi
 # Keep Cargo.lock in step so `--locked` builds still pass.
-cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
+if command -v cargo >/dev/null 2>&1; then
+  cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace
+fi
