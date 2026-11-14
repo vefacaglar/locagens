@@ -47,7 +47,8 @@ impl CommandSpec {
 
 pub const COMMANDS: &[CommandSpec] = &[
     spec("model", &[], "[provider/id]", "show or switch models", ALL),
-    spec("thinking", &[], "<level>", "reasoning effort (off..max)", ALL),
+    spec("thinking", &[], "[level]", "reasoning effort (off..max)", ALL),
+    spec("permissions", &["mode"], "[mode]", "choose chat, plan, build, ask or full access", CLI),
     spec("plan", &[], "", "switch to plan mode (read-only)", ALL),
     spec("build", &[], "", "switch to build mode (edits applied)", ALL),
     spec("auto", &[], "", "switch to full access (no permission prompts)", ALL),
@@ -148,8 +149,10 @@ pub enum SlashCommand {
     Help,
     /// `/model` lists, `/model <id>` switches.
     Model(Option<String>),
-    /// `/thinking` shows, `/thinking <level>` sets.
+    /// `/thinking` opens the picker, `/thinking <level>` sets.
     Thinking(Option<String>),
+    /// `/permissions` (alias `/mode`) picks, `/permissions <mode>` sets.
+    Permissions(Option<String>),
     Plan,
     Build,
     Auto,
@@ -199,6 +202,7 @@ impl SlashCommand {
             "help" => Self::Help,
             "model" => Self::Model(first_arg),
             "thinking" => Self::Thinking(first_arg),
+            "permissions" => Self::Permissions(first_arg),
             "plan" => Self::Plan,
             "build" => Self::Build,
             "auto" => Self::Auto,
@@ -226,6 +230,7 @@ impl SlashCommand {
             Self::Help => "help",
             Self::Model(_) => "model",
             Self::Thinking(_) => "thinking",
+            Self::Permissions(_) => "permissions",
             Self::Plan => "plan",
             Self::Build => "build",
             Self::Auto => "auto",
@@ -274,6 +279,8 @@ mod tests {
         assert_eq!(SlashCommand::parse("/model p/m"), Some(SlashCommand::Model(Some("p/m".into()))));
         assert_eq!(SlashCommand::parse("/thinking HIGH"), Some(SlashCommand::Thinking(Some("HIGH".into()))));
         assert_eq!(SlashCommand::parse("/auto"), Some(SlashCommand::Auto));
+        assert_eq!(SlashCommand::parse("/mode"), Some(SlashCommand::Permissions(None)));
+        assert_eq!(SlashCommand::parse("/permissions ask"), Some(SlashCommand::Permissions(Some("ask".into()))));
         assert_eq!(SlashCommand::parse("/chat"), Some(SlashCommand::Chat));
         assert_eq!(SlashCommand::parse("/clear"), Some(SlashCommand::New));
         assert_eq!(SlashCommand::parse("/review base main"), Some(SlashCommand::Review("base main".into())));
@@ -322,9 +329,9 @@ mod tests {
         let cli: Vec<&str> = commands_for(Frontend::Cli).map(|c| c.name).collect();
         assert_eq!(cli.len(), COMMANDS.len(), "the CLI offers every command");
         let desktop: Vec<&str> = commands_for(Frontend::Desktop).map(|c| c.name).collect();
-        // Every command but the terminal-only `/exit`, `/login`, `/logout`
-        // and `/copy` has a desktop equivalent (UX-021).
-        assert_eq!(desktop.len(), COMMANDS.len() - 4);
+        // Every command but the terminal-only `/exit`, `/login`, `/logout`,
+        // `/copy` and `/permissions` has a desktop equivalent (UX-021).
+        assert_eq!(desktop.len(), COMMANDS.len() - 5);
         assert!(!desktop.contains(&"exit"));
         assert!(SlashCommand::Undo.supported_by(Frontend::Desktop));
         assert!(SlashCommand::Diff.supported_by(Frontend::Desktop));
