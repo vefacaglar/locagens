@@ -146,9 +146,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 build/Locagens.app
           mkdir -p build/notarize && cp -R build/Locagens.app build/lcgn build/notarize/
           ditto -c -k --keepParent build/notarize build/notarize.zip
-          bash .github/scripts/notarize.sh build/notarize.zip
-          xcrun stapler staple build/Locagens.app
-          spctl --assess --type execute --verbose=4 build/Locagens.app
+          # A build-only run keeps going (signed, not notarized) when Apple
+          # refuses; a release must be notarized.
+          if bash .github/scripts/notarize.sh build/notarize.zip; then
+            echo "NOTARIZED=true" >> "$GITHUB_ENV"
+            xcrun stapler staple build/Locagens.app
+            spctl --assess --type execute --verbose=4 build/Locagens.app
+          elif [ -z "$RELEASE_TAG" ]; then
+            echo "::warning::Not notarized (build-only run); the app is signed but Gatekeeper will ask on first launch."
+            echo "NOTARIZED=false" >> "$GITHUB_ENV"
+          else
+            exit 1
+          fi
 
       - name: DMG and CLI archive
         run: |
@@ -165,8 +174,10 @@ jobs:
           set -e
           trap 'echo "::error::DMG signing failed at: $BASH_COMMAND"' ERR
           codesign --force --timestamp --sign "$SIGN_IDENTITY" dist/Locagens-macOS-universal.dmg
-          bash .github/scripts/notarize.sh dist/Locagens-macOS-universal.dmg
-          xcrun stapler staple dist/Locagens-macOS-universal.dmg
+          if [ "$NOTARIZED" = "true" ]; then
+            bash .github/scripts/notarize.sh dist/Locagens-macOS-universal.dmg
+            xcrun stapler staple dist/Locagens-macOS-universal.dmg
+          fi
 
       - name: Clean up the signing keychain
         if: always() && steps.signing.outputs.enabled == 'true'

@@ -98,6 +98,10 @@ signed (SmartScreen may warn on first launch).
 
 A push to `main` that changes the workflow builds everything (signing
 included) without publishing a release, to check the pipeline.
+If Apple refuses notarization there (e.g. "A required agreement is missing
+or has expired" — accept the latest agreements in the Apple Developer account
+/ App Store Connect → Agreements), the build-only run still delivers a signed,
+not notarized DMG with a warning; a tagged release fails instead.
 
 ---
 
