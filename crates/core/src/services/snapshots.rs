@@ -49,6 +49,14 @@ pub struct GitSnapshot {
 /// replaces; undoing that snapshot redoes the undone turn.
 pub const UNDO_BACKUP_SUFFIX: &str = "#undo";
 
+/// Serialises read-modify-write cycles of `snapshots.json` within the
+/// process, so two runs in one project cannot lose each other's entries.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_store() -> std::sync::MutexGuard<'static, ()> {
+    STORE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// How many snapshots `snapshots.json` retains.
 const MAX_SNAPSHOTS: usize = 20;
 
@@ -190,6 +198,7 @@ pub async fn create_git_snapshot_for_path(
         skipped: Vec::new(),
     };
 
+    let _guard = lock_store();
     let mut snapshots = load_snapshots(project_path);
     snapshots.push(snapshot.clone());
     persist_snapshots(project_path, &snapshots)?;
@@ -205,7 +214,9 @@ async fn worktree_files(project_path: &Path) -> Result<Vec<String>, String> {
         .filter_map(|path| std::str::from_utf8(path).ok())
         .filter(|path| !path.is_empty() && !path.contains('\n') && !is_locagens_path(path))
         // Deleted-but-tracked files are listed by `-c`; only existing files count.
-        .filter(|path| project_path.join(path).is_file())
+        // Regular files only: a symlink would be stored (and undone) as a
+        // regular file, so symlinks are left out of snapshots and undo.
+        .filter(|path| is_regular_file(&project_path.join(path)))
         .map(str::to_string)
         .collect();
     files.sort();
@@ -214,21 +225,126 @@ async fn worktree_files(project_path: &Path) -> Result<Vec<String>, String> {
 }
 
 /// Hashes `files` exactly as they are on disk; `write` stores the blobs.
+/// Writing skips files whose size and mtime match the previous snapshot
+/// (`HashCache`), so only changed files are read again (FR-007).
 async fn hash_files(project_path: &Path, files: &[String], write: bool) -> Result<Vec<String>, String> {
     if files.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args = vec!["hash-object", "--no-filters", "--stdin-paths"];
+    let mut cache = if write { HashCache::load(project_path) } else { HashCache::default() };
+    let stats: Vec<Option<FileStat>> = files.iter().map(|file| FileStat::of(&project_path.join(file))).collect();
+    let mut shas: Vec<Option<String>> = files
+        .iter()
+        .zip(&stats)
+        .map(|(file, stat)| cache.lookup(file, stat.as_ref()))
+        .collect();
+    let missing: Vec<usize> = (0..files.len()).filter(|index| shas[*index].is_none()).collect();
+    if !missing.is_empty() {
+        let mut args = vec!["hash-object", "--no-filters", "--stdin-paths"];
+        if write {
+            args.insert(1, "-w");
+        }
+        let input = missing.iter().map(|index| files[*index].as_str()).collect::<Vec<_>>().join("\n").into_bytes();
+        let output = git_bytes(project_path, &args, &[], Some(input)).await?;
+        let hashed: Vec<String> = String::from_utf8_lossy(&output).lines().map(str::to_string).collect();
+        if hashed.len() != missing.len() {
+            return Err("git hash-object returned an unexpected number of hashes".to_string());
+        }
+        for (index, sha) in missing.into_iter().zip(hashed) {
+            if let (true, Some(stat)) = (write, stats[index].as_ref()) {
+                cache.insert(&files[index], stat, &sha);
+            }
+            shas[index] = Some(sha);
+        }
+    }
     if write {
-        args.insert(1, "-w");
+        cache.save(project_path);
     }
-    let input = files.join("\n").into_bytes();
-    let output = git_bytes(project_path, &args, &[], Some(input)).await?;
-    let shas: Vec<String> = String::from_utf8_lossy(&output).lines().map(str::to_string).collect();
-    if shas.len() != files.len() {
-        return Err("git hash-object returned an unexpected number of hashes".to_string());
+    Ok(shas.into_iter().flatten().collect())
+}
+
+/// Size and modification time of a file.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct FileStat {
+    size: u64,
+    mtime_ns: u128,
+}
+
+impl FileStat {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(Self { size: meta.len(), mtime_ns: mtime.as_nanos() })
     }
-    Ok(shas)
+
+    /// A file modified within the last two seconds may still change without
+    /// moving its mtime (coarse timestamps), so it is always rehashed.
+    fn is_settled(&self) -> bool {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        now.saturating_sub(self.mtime_ns) > 2_000_000_000
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct HashCacheEntry {
+    stat: FileStat,
+    sha: String,
+    /// Unix seconds when the blob was last written; stale entries are
+    /// rehashed so a blob git has since pruned is written again.
+    written_at: u64,
+}
+
+/// `path -> (stat, blob sha)` of blobs already written to the object store,
+/// kept next to `snapshots.json`.
+#[derive(Default, Serialize, Deserialize)]
+struct HashCache {
+    entries: std::collections::HashMap<String, HashCacheEntry>,
+}
+
+/// Cache entries older than this are not trusted (git prunes unreachable
+/// objects after two weeks).
+const HASH_CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+impl HashCache {
+    fn path(project_path: &Path) -> PathBuf {
+        snapshot_dir(project_path).join("hashcache.json")
+    }
+
+    fn load(project_path: &Path) -> Self {
+        std::fs::read_to_string(Self::path(project_path))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn lookup(&self, file: &str, stat: Option<&FileStat>) -> Option<String> {
+        let (entry, stat) = (self.entries.get(file)?, stat?);
+        let fresh = unix_secs().saturating_sub(entry.written_at) < HASH_CACHE_MAX_AGE_SECS;
+        (fresh && entry.stat == *stat && stat.is_settled()).then(|| entry.sha.clone())
+    }
+
+    fn insert(&mut self, file: &str, stat: &FileStat, sha: &str) {
+        self.entries.insert(
+            file.to_string(),
+            HashCacheEntry { stat: *stat, sha: sha.to_string(), written_at: unix_secs() },
+        );
+    }
+
+    /// Best effort; drops stale entries.
+    fn save(mut self, project_path: &Path) {
+        let now = unix_secs();
+        self.entries.retain(|_, entry| now.saturating_sub(entry.written_at) < HASH_CACHE_MAX_AGE_SECS);
+        let Ok(json) = serde_json::to_vec(&self) else { return };
+        let path = Self::path(project_path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json);
+    }
 }
 
 /// Writes a tree of the current worktree bytes using a throwaway index.
@@ -281,6 +397,7 @@ pub async fn record_turn_end_for_path(project_path: &Path, snapshot_id: &str) ->
     let tree = write_worktree_tree(project_path, &format!("{snapshot_id}-after")).await?;
     let head = git(project_path, &["rev-parse", "HEAD"]).await.unwrap_or_default().trim().to_string();
     save_index_copy(project_path, &format!("{snapshot_id}{AFTER_INDEX_SUFFIX}")).await;
+    let _guard = lock_store();
     let mut snapshots = load_snapshots(project_path);
     if let Some(snapshot) = snapshots.iter_mut().find(|snapshot| snapshot.id == snapshot_id) {
         snapshot.after_tree_sha = Some(tree);
@@ -330,6 +447,11 @@ fn prune_index_copies(project_path: &Path, kept: &[GitSnapshot]) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// True for a regular file (symlinks do not count).
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
 }
 
 /// True for paths inside the managed `.locagens` folder (never touched by
@@ -396,7 +518,7 @@ pub async fn undo_last_turn_for_path(
             paths
         }
     };
-    let existing: Vec<String> = touched.iter().filter(|path| project_path.join(path).is_file()).cloned().collect();
+    let existing: Vec<String> = touched.iter().filter(|path| is_regular_file(&project_path.join(path))).cloned().collect();
     let existing_shas = hash_files(project_path, &existing, false).await?;
     let current: std::collections::HashMap<&str, &str> =
         existing.iter().map(String::as_str).zip(existing_shas.iter().map(String::as_str)).collect();
@@ -449,6 +571,7 @@ pub async fn undo_last_turn_for_path(
     if let Some(backup) = backup {
         record_turn_end_for_path(project_path, &backup.id).await?;
     }
+    let _guard = lock_store();
     let mut snapshots = load_snapshots(project_path);
     snapshots.retain(|kept| kept.id != snapshot.id);
     persist_snapshots(project_path, &snapshots)?;
