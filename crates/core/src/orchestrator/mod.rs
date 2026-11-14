@@ -141,6 +141,9 @@ pub struct PermissionSlot {
     /// Id of the prompt that owns the slot (see [`RunHandle::ask_permission`]),
     /// so a late cleanup never clears a newer prompt.
     prompt_id: u64,
+    /// Sub-agent that asked (`None` for the main agent), for the card.
+    agent_role: Option<String>,
+    agent_name: Option<String>,
 }
 
 
