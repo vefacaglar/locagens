@@ -150,6 +150,17 @@ async fn run(mut cli: Cli) -> i32 {
     // Interactive TUI (or the plain REPL with --no-tui) when there is a TTY
     // and no -p / --mode json.
     let interactive = !cli.print && !json_mode && args::stdin_is_tty();
+    // Interactive sessions open with the model picked last (here or in the
+    // desktop app) unless one was given on the command line (UX-003).
+    if interactive && (cli.model.is_none() || cli.model_from_config) {
+        if let Some(last) = crate::api::ui_state::load_ui_state().model.filter(|model| model.contains('/')) {
+            if models::resolve_model(&state.pi, Some(&last), None).await.is_ok() {
+                cli.model = Some(last);
+                cli.provider = None;
+                cli.model_from_config = false;
+            }
+        }
+    }
     let model = if cli.model.is_some() || cli.provider.is_some() {
         match models::resolve_model(&state.pi, cli.model.as_deref(), cli.provider.as_deref()).await {
             Ok(model) => Some(model),

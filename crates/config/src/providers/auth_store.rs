@@ -83,6 +83,8 @@ pub(super) async fn run_credential_command(command: &str, cwd: &Path, timeout: s
         c.raw_arg(format!("/S /C \"{command}\""));
         // `cmd` looks up programs in its working directory first unless this is set.
         c.env("NoDefaultCurrentDirectoryInExePath", "1");
+        // No console window flashes up for the helper (FR-052).
+        c.creation_flags(0x0800_0000);
         c
     };
     #[cfg(not(windows))]

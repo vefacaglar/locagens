@@ -142,6 +142,8 @@ pub async fn execute(
             let level = level.to_lowercase();
             if THINKING_LEVELS.contains(&level.as_str()) {
                 session.thinking = (level != "off").then(|| level.clone());
+                // Shared with the desktop: the next start keeps this level.
+                let _ = crate::api::ui_state::remember_effort(&level);
                 result.notice(format!("Thinking set to {level}."));
             } else {
                 result.error(format!("Unknown thinking level \"{level}\"."));
@@ -264,6 +266,8 @@ async fn set_model(
         Ok(resolved) => match ensure_authenticated(state, &resolved).await {
             Ok(()) => {
                 result.notice(format!("Model set to {}.", resolved.label()));
+                // Shared with the desktop: the next start opens with this model.
+                let _ = crate::api::ui_state::remember_model(&resolved.provider_id, &resolved.model, None);
                 session.model = Some(resolved);
             }
             Err(message) => result.error(message),
