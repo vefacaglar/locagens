@@ -473,6 +473,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("git.staged", "Staged", "Stage'de"),
     ("git.working_tree", "working tree", "çalışma ağacı"),
     ("git.files_count", "{0} files", "{0} dosya"),
+    ("git.one_file", "1 file", "1 dosya"),
     ("git.unmodified", "{0} unmodified lines", "{0} değişmemiş satır"),
     ("git.show_more", "Show {0} more lines", "{0} satır daha göster"),
     ("git.more_actions", "More actions", "Diğer işlemler"),

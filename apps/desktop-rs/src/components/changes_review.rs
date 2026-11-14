@@ -207,7 +207,10 @@ pub fn ChangesTab() -> Element {
                 span { class: "rv-ref dim", "{store.t(\"git.working_tree\")}" }
                 span { class: "rv-spacer" }
                 if has_files {
-                    span { class: "rv-count", "{store.tf(\"git.files_count\", &[&file_list.len().to_string()])}" }
+                    span {
+                        class: "rv-count",
+                        if file_list.len() == 1 { "{store.t(\"git.one_file\")}" } else { "{store.tf(\"git.files_count\", &[&file_list.len().to_string()])}" }
+                    }
                     span { class: "diff-stat add", "+{added}" }
                     span { class: "diff-stat del", "−{removed}" }
                 }
