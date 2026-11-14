@@ -278,8 +278,8 @@ mod tests {
         assert_eq!(names[0], "model");
         assert!(names.contains(&"mcp") && !names.contains(&"skills"));
         assert_eq!(matching("", Frontend::Cli).len(), COMMANDS.len());
-        let names: Vec<&str> = matching("ess", Frontend::Cli).iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["sessions"]);
+        let names: Vec<&str> = matching("sum", Frontend::Cli).iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["resume"]);
         assert!(matching("zzz", Frontend::Cli).is_empty());
         // The desktop never suggests CLI-only commands; a leading slash is fine.
         assert!(matching("m", Frontend::Desktop).is_empty());

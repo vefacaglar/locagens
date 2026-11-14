@@ -34,7 +34,7 @@ pub type FileResults = (String, Vec<String>);
 
 /// Progress of an OAuth sign-in running on a background task.
 pub enum LoginEvent {
-    Started(Result<provider_api::OAuthLoginStart, String>),
+    Started(Result<Box<provider_api::OAuthLoginStart>, String>),
     Finished(Result<(), String>),
 }
 
@@ -653,7 +653,7 @@ impl Driver {
                     return;
                 }
             };
-            let _ = tx.send(LoginEvent::Started(Ok(start.clone())));
+            let _ = tx.send(LoginEvent::Started(Ok(Box::new(start.clone()))));
             let outcome = provider_api::finish_oauth_login(&state, &start).await.map_err(|err| err.to_string());
             let _ = tx.send(LoginEvent::Finished(outcome));
         }));
@@ -674,7 +674,7 @@ impl Driver {
                     paste: String::new(),
                     error: None,
                 };
-                self.login_start = Some(start);
+                self.login_start = Some(*start);
                 if let Some(Overlay::Login(flow)) = self.app.overlay.as_mut() {
                     flow.set_started(info);
                 }

@@ -516,7 +516,7 @@ fn draw_approval(f: &mut Frame, approval: &mut Approval, area: Rect) {
     let width = area.width.saturating_sub(4).min(110);
     let inner_width = width.saturating_sub(4) as usize;
     let body = approval_body(approval, inner_width.max(10));
-    let height = (body.len() as u16 + 6).max(9).min(area.height.saturating_sub(2).max(3));
+    let height = (body.len() as u16 + 8).max(10).min(area.height.saturating_sub(2).max(3));
     let rect = centered(area, width, height);
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -529,15 +529,15 @@ fn draw_approval(f: &mut Frame, approval: &mut Approval, area: Rect) {
     let [title, content, keys] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .areas(inner);
 
     f.render_widget(
-        Paragraph::new(Span::styled(
-            approval.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        Paragraph::new(vec![
+            Line::from(Span::styled(approval.title.clone(), Style::default().add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(approval.reason.clone().unwrap_or_default(), dim())),
+        ]),
         title,
     );
     let max_scroll = body.len().saturating_sub(content.height as usize);
@@ -548,7 +548,11 @@ fn draw_approval(f: &mut Frame, approval: &mut Approval, area: Rect) {
         .take(content.height as usize)
         .collect();
     f.render_widget(Paragraph::new(visible), content);
-    f.render_widget(Paragraph::new(approval_legend(approval)), keys);
+    let mut legend = vec![approval_legend(approval)];
+    if let (false, Some(label)) = (approval.one_time_only, &approval.grant_label) {
+        legend.push(Line::from(Span::styled(format!("p / a cover: {label}"), dim())));
+    }
+    f.render_widget(Paragraph::new(legend), keys);
 }
 
 /// The key legend of the approval overlay. Standing grants (project,
@@ -570,6 +574,16 @@ pub fn approval_legend(approval: &Approval) -> Line<'static> {
         _ => {}
     }
     let key = Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD);
+    if approval.one_time_only {
+        return Line::from(vec![
+            Span::styled("y", key),
+            Span::raw(" once  "),
+            Span::styled("d", key),
+            Span::raw(" deny  "),
+            Span::styled("↑↓", key),
+            Span::styled(" scroll", dim()),
+        ]);
+    }
     Line::from(vec![
         Span::styled("y", key),
         Span::raw(" once  "),
@@ -763,18 +777,17 @@ mod tests {
         let mut app = app();
         let screen = render(&mut app, 100, 24);
         assert!(screen.contains("acme/turbo-1"), "{screen}");
-        assert!(screen.contains("think:high"));
-        assert!(screen.contains("Build"));
-        assert!(screen.contains("#abcdef12"));
+        assert!(screen.contains("acme/turbo-1 · high · Build"), "{screen}");
+        assert!(!screen.contains("#abcdef12"), "the session hash is gone from the footer");
         assert!(screen.contains("C:/work/demo"));
-        assert!(screen.contains("Ask anything"));
+        assert!(screen.contains("? help"));
         assert!(screen.contains("Locagens"));
     }
 
     #[test]
     fn smoke_renders_transcript_messages_and_status() {
         let mut app = app();
-        app.push(CellKind::User { text: "refactor the parser".into(), queued: false });
+        app.push(CellKind::User { text: "refactor the parser".into() });
         app.on_run_event(&json!({"type": "message_updated", "message": {
             "id": "m1", "role": "assistant", "content": "Sure, **done**."}}));
         app.begin_turn();
@@ -836,5 +849,96 @@ mod tests {
             "preview": {"action": "command", "command": "ls"}}));
         let _ = render(&mut app, 20, 8);
         let _ = render(&mut app, 3, 3);
+    }
+}
+
+#[cfg(test)]
+mod ux_tests {
+    use super::*;
+    use crate::cli::tui::wrap::line_text;
+    use std::path::PathBuf;
+
+    fn app(mode: &str) -> App {
+        App::new(PathBuf::from("/p"), None, None, mode.into(), false, None)
+    }
+
+    #[test]
+    fn composer_frame_names_the_mode() {
+        let (title, color) = composer_frame(&app("accept_edits"));
+        assert_eq!((title.as_str(), color), (" Message ", theme::accent()));
+        let (title, color) = composer_frame(&app("plan"));
+        assert_eq!((title.as_str(), color), (" Plan · read-only ", theme::plan()));
+        let (title, color) = composer_frame(&app("auto"));
+        assert_eq!((title.as_str(), color), (" Full Access · no permission prompts ", theme::err()));
+        let mut busy = app("accept_edits");
+        busy.busy = true;
+        assert_eq!(composer_frame(&busy).1, theme::warn());
+        let mut busy_auto = app("auto");
+        busy_auto.busy = true;
+        assert_eq!(composer_frame(&busy_auto).1, theme::err(), "yellow only in Build");
+    }
+
+    #[test]
+    fn home_is_shortened_in_the_header() {
+        let home = std::path::Path::new("/home/me");
+        assert_eq!(shorten_home("/home/me/repos/app", Some(home)), "~/repos/app");
+        assert_eq!(shorten_home("/home/me", Some(home)), "~");
+        assert_eq!(shorten_home("/home/mex/app", Some(home)), "/home/mex/app");
+        assert_eq!(shorten_home("/srv/app", None), "/srv/app");
+    }
+
+    #[test]
+    fn approval_legend_announces_the_second_press() {
+        let event = serde_json::json!({"toolCall": {"function": {"name": "run_command"}}, "preview": {"action": "command", "command": "ls"}});
+        let mut approval = Approval::from_event(&event);
+        assert!(line_text(&approval_legend(&approval)).contains("a a always"));
+        assert!(line_text(&approval_legend(&approval)).contains("p p project"));
+        approval.pending_grant = Some("allow_always");
+        assert_eq!(line_text(&approval_legend(&approval)), "press a again to always allow (d to deny)");
+        approval.pending_grant = None;
+        approval.one_time_only = true;
+        assert!(!line_text(&approval_legend(&approval)).contains("always"));
+    }
+
+    #[test]
+    fn footer_shows_context_and_cost_and_warns_when_low() {
+        let mut app = app("accept_edits");
+        app.usage = crate::cli::tui::app::UsageInfo { cost: 0.0123, context_left: Some(72) };
+        let right: String = footer_right(&app).iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(right, "72% context · $0.01 ");
+        app.usage.context_left = Some(12);
+        let right: String = footer_right(&app).iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(right, "12% context left · /new starts fresh ");
+    }
+
+    #[test]
+    fn welcome_offers_login_without_a_provider_and_status_flashes() {
+        let mut app = app("accept_edits");
+        app.no_providers = true;
+        let text: String = welcome_lines(&app).iter().map(line_text).collect::<Vec<_>>().join("|");
+        assert!(text.contains("Press Enter to connect one, or type /login."));
+        app.flash("Mode set to plan");
+        assert_eq!(line_text(&status_line(&app)), "Mode set to plan");
+    }
+
+    #[test]
+    fn queue_strip_grows_with_messages() {
+        let mut app = app("accept_edits");
+        assert_eq!(queue_strip_rows(&app), 0);
+        app.note_queued("a", "a");
+        assert_eq!(queue_strip_rows(&app), 2);
+        for text in ["b", "c", "d"] {
+            app.note_queued(text, text);
+        }
+        assert_eq!(queue_strip_rows(&app), 5);
+    }
+
+    #[test]
+    fn reduced_motion_status_is_static() {
+        let mut app = app("accept_edits");
+        app.busy = true;
+        app.reduced_motion = true;
+        let line = line_text(&status_line(&app));
+        assert!(line.starts_with("… Working"), "{line}");
     }
 }

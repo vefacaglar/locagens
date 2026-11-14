@@ -222,8 +222,8 @@ mod tests {
 
     #[test]
     fn slash_filter_falls_back_to_substring() {
-        let names: Vec<&str> = filter_commands("ess").iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["sessions"]);
+        let names: Vec<&str> = filter_commands("sum").iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["resume"]);
         assert!(filter_commands("zzz").is_empty());
     }
 

@@ -137,6 +137,12 @@ pub struct Approval {
     pub armed_at: Instant,
     /// A standing grant (project / always) waits here for a second press.
     pub pending_grant: Option<&'static str>,
+    /// Why the prompt appeared (`preview.reason.text`).
+    pub reason: Option<String>,
+    /// Only "once" and "deny" apply (dangerous command, protected path).
+    pub one_time_only: bool,
+    /// What a standing grant would cover (`preview.grantLabel`).
+    pub grant_label: Option<String>,
 }
 
 /// How long a new approval prompt ignores grant keys.
@@ -216,6 +222,17 @@ impl Approval {
             scroll: 0,
             armed_at: Instant::now() + APPROVAL_ARM_DELAY,
             pending_grant: None,
+            reason: preview
+                .pointer("/reason/text")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+            one_time_only: preview.get("oneTimeOnly").and_then(Value::as_bool).unwrap_or(false),
+            grant_label: preview
+                .get("grantLabel")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -258,6 +275,7 @@ impl Approval {
             KeyCode::Char('d' | 'n') | KeyCode::Esc => Some("deny"),
             // Granting keys do nothing until the prompt has been visible a moment.
             KeyCode::Char('o' | 'y') if armed => Some("allow_once"),
+            KeyCode::Char('r' | 'p' | 'a') if self.one_time_only => None,
             KeyCode::Char('r') if armed => Some("allow_run"),
             KeyCode::Char('p') if armed => self.confirm_grant(pending, "allow_project"),
             KeyCode::Char('a') if armed => self.confirm_grant(pending, "allow_always"),
@@ -605,5 +623,56 @@ mod tests {
         let answer = flow.on_key(press(KeyCode::Esc)).expect("skipped");
         assert!(answer.selections.is_empty());
         assert_eq!(answer.notes.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod approval_ux_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(preview: Value) -> Value {
+        json!({"type": "permission_requested",
+            "toolCall": {"id": "c1", "function": {"name": "apply_patch", "arguments": "{}"}},
+            "preview": preview})
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn patch_shows_files_and_the_ready_diff() {
+        let approval = Approval::from_event(&event(json!({
+            "action": "patch", "files": ["src/a.rs", "b.rs"], "diff": "--- a/src/a.rs\n+++ b/src/a.rs\n+x\n"})));
+        assert_eq!(approval.title, "Apply this patch? (2 files)");
+        assert_eq!(approval.details, vec!["  src/a.rs", "  b.rs"]);
+        assert!(approval.diff.unwrap().contains("+x"));
+    }
+
+    #[test]
+    fn network_names_the_host_and_unknown_tools_label_arguments() {
+        let approval = Approval::from_event(&event(json!({
+            "action": "network", "url": "api.github.com:443", "networkDomains": ["api.github.com"]})));
+        assert_eq!(approval.title, "Allow network access to api.github.com?");
+        assert_eq!(approval.details, vec!["api.github.com:443"]);
+        let other = Approval::from_event(&event(json!({"action": "mystery"})));
+        assert!(other.details[0].starts_with("Arguments: "));
+    }
+
+    #[test]
+    fn reason_grant_label_and_one_time_only_come_from_the_preview() {
+        let mut approval = Approval::from_event(&event(json!({
+            "action": "command", "command": "rm -rf x",
+            "reason": {"code": "dangerous_command", "text": "This command can delete data."},
+            "oneTimeOnly": true, "grantLabel": "rm *"})));
+        approval.armed_at = Instant::now();
+        assert_eq!(approval.reason.as_deref(), Some("This command can delete data."));
+        assert_eq!(approval.grant_label.as_deref(), Some("rm *"));
+        for key in ['r', 'p', 'a'] {
+            assert_eq!(approval.on_key(press(KeyCode::Char(key))), None);
+            assert_eq!(approval.on_key(press(KeyCode::Char(key))), None, "no grant even when pressed twice");
+        }
+        assert_eq!(approval.on_key(press(KeyCode::Char('y'))), Some("allow_once"));
     }
 }

@@ -454,13 +454,41 @@ mod tests {
     }
 
     #[test]
-    fn user_cell_shows_prompt_and_queue_marker() {
-        let mut cell = Cell::new(CellKind::User {
-            text: "fix the bug".into(),
-            queued: true,
-        });
-        let out = texts(&mut cell, 40, false);
-        assert_eq!(out[0], "› fix the bug  (queued)");
+    fn user_cell_shows_prompt_on_a_full_width_band() {
+        let mut cell = Cell::new(CellKind::User { text: "fix the bug".into() });
+        let lines = cell.lines(40, false).to_vec();
+        assert_eq!(line_text(&lines[0]).trim_end(), "› fix the bug");
+        assert_eq!(line_text(&lines[0]).chars().count(), 41, "padded to the full width");
+        assert!(lines[0].spans.iter().all(|s| s.style.bg.is_some()));
+    }
+
+    #[test]
+    fn expanding_shows_more_output_and_failed_tools_show_fifteen_lines() {
+        let output = (1..=40).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n");
+        let make = |ok| {
+            Cell::new(CellKind::Tool {
+                call_id: "c".into(),
+                name: "run_command".into(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+                result: Some(ToolResult { ok, output: output.clone() }),
+                diff: None,
+            })
+        };
+        let ok_lines = texts(&mut make(true), 60, false);
+        assert!(ok_lines.iter().any(|l| l.contains("… +35 lines · Ctrl+O to expand")), "{ok_lines:?}");
+        let failed = texts(&mut make(false), 60, false);
+        assert!(failed.iter().any(|l| l.contains("line15")) && !failed.iter().any(|l| l.contains("line16")));
+        let expanded = texts(&mut make(true), 60, true);
+        assert!(expanded.iter().any(|l| l.contains("line40")));
+        assert!(!expanded.iter().any(|l| l.contains("Ctrl+O")));
+    }
+
+    #[test]
+    fn long_diffs_expand_with_ctrl_o() {
+        let diff: String = (0..60).map(|n| format!("+l{n}\n")).collect();
+        let mut cell = Cell::new(CellKind::Diff { title: "d".into(), diff });
+        assert!(texts(&mut cell, 60, false).iter().any(|l| l.contains("more diff lines · Ctrl+O to expand")));
+        assert!(texts(&mut cell, 60, true).iter().any(|l| l.contains("+l59")));
     }
 
     #[test]
