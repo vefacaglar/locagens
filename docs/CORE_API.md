@@ -344,6 +344,33 @@ pub async fn restart_process(state, id) -> ApiResult<ProcessInfo>
 pub async fn process_logs(state, id) -> ApiResult<ProcessLogs>
 ```
 
+### `api::terminal` — interactive shells (desktop Terminal tabs)
+
+The user's own shell (`pwsh.exe` if on PATH, else `powershell.exe`; `$SHELL`
+or `/bin/sh` on Unix) on a pty (`portable-pty`, ConPTY on Windows), parsed by
+`vt100` (5000 lines of scrollback). cwd is the project folder, the user's
+environment is kept, nothing is permission-gated (it is not an agent tool).
+Sessions live in a process-wide registry (`services::terminal`), survive the
+panel being hidden, and are killed by `close` / `close_all` (call on exit).
+These functions are synchronous.
+
+```rust
+pub fn open(project_dir: &str, cols: u16, rows: u16) -> ApiResult<String>   // session id
+pub fn list(project_dir: Option<&str>) -> Vec<TerminalInfo>                // {id, projectDir, title, exited}, oldest first
+pub fn write(id, bytes: &[u8]) -> ApiResult<()>                            // keys / paste; returns the view to the live screen
+pub fn resize(id, cols: u16, rows: u16) -> ApiResult<()>
+pub fn scroll(id, lines: i32)                                              // > 0 = into history
+pub fn snapshot(id) -> Option<TerminalScreen>                              // rows of styled TerminalSpans, cursor cell flagged
+pub fn version(id) -> Option<u64>                                          // bumps on output, resize, scroll, exit
+pub fn subscribe(id) -> Option<tokio::sync::watch::Receiver<u64>>          // `changed().await` instead of polling
+pub fn close(id) -> bool
+pub fn close_all()
+```
+
+The service answers the terminal queries shells send (DSR cursor position —
+ConPTY waits for it at startup — and DA1) and keeps the OSC window title for
+the tab label.
+
 ### `api::security` — sandbox status & setup
 
 ```rust

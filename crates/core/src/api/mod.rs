@@ -15,6 +15,7 @@ pub mod runs;
 pub mod security;
 pub mod skills;
 pub mod symbols;
+pub mod terminal;
 pub mod ui_state;
 
 pub use error::{ApiError, ApiErrorKind, ApiResult};

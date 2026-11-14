@@ -36,6 +36,8 @@ unicode-width = "0.2"
 fs2 = "0.4"
 rpassword = "7"
 toml = "0.8"
+portable-pty = "0.9"
+vt100 = "0.16"
 locagens-protocol = { path = "../protocol" }
 locagens-apply-patch = { path = "../apply-patch" }
 locagens-execpolicy = { path = "../execpolicy" }
