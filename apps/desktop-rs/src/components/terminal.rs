@@ -198,12 +198,13 @@ pub fn TerminalPanel(project: Option<String>) -> Element {
                     div {
                         class: "term-rows",
                         for (index, row) in current.rows.iter().enumerate() {
+                            // One HTML string per row: Dioxus does not reliably
+                            // patch changing span lists inside reused rows (a
+                            // moved highlight kept its old style).
                             div {
                                 key: "{index}",
                                 class: "term-row",
-                                for span in row.iter() {
-                                    {render_span(span)}
-                                }
+                                dangerous_inner_html: row_html(row),
                             }
                         }
                     }
@@ -416,11 +417,31 @@ fn trim_copied(text: &str) -> String {
     text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string()
 }
 
-fn render_span(span: &TerminalSpan) -> Element {
-    let (class, style) = span_style(span);
-    rsx! {
-        span { class: "{class}", style: "{style}", "{span.text}" }
+/// A screen row as escaped `<span>` markup.
+fn row_html(row: &[TerminalSpan]) -> String {
+    let mut html = String::new();
+    for span in row {
+        let (class, style) = span_style(span);
+        html.push_str("<span");
+        if !class.is_empty() {
+            html.push_str(&format!(" class=\"{class}\""));
+        }
+        if !style.is_empty() {
+            html.push_str(&format!(" style=\"{style}\""));
+        }
+        html.push('>');
+        for c in span.text.chars() {
+            match c {
+                '&' => html.push_str("&amp;"),
+                '<' => html.push_str("&lt;"),
+                '>' => html.push_str("&gt;"),
+                '"' => html.push_str("&quot;"),
+                _ => html.push(c),
+            }
+        }
+        html.push_str("</span>");
     }
+    html
 }
 
 /// CSS class and inline style of a span (colours via the `--term-*` palette).
@@ -641,6 +662,14 @@ const TERMINAL_CSS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_render_as_escaped_spans_with_their_style() {
+        let span = TerminalSpan { text: "<a & b>".into(), inverse: true, ..Default::default() };
+        let html = row_html(&[span]);
+        assert!(html.contains("&lt;a &amp; b&gt;"), "{html}");
+        assert!(html.contains("background:"), "{html}");
+    }
 
     #[test]
     fn keys_translate_to_xterm_bytes() {
