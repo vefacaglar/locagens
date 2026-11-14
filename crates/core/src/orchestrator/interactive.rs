@@ -59,6 +59,16 @@ impl AgentLoop {
 
         // Pause the run until the user answers (`api::runs::answer_question`).
         self.notification_hook("elicitation_dialog", "Locagens is waiting for your answer").await;
+        // The slot holds the sender before anyone hears of the question, so
+        // an immediate answer always finds it (FR-019).
+        let (sender, receiver) = oneshot::channel::<Value>();
+        let question_id = {
+            let mut slot = self.handle.question.lock().await;
+            slot.question_id += 1;
+            slot.pending = Some(questions.clone());
+            slot.sender = Some(sender);
+            slot.question_id
+        };
         self.state.db.patch_run(&self.run_id, |run| run.status = "awaiting_input".into());
         self.handle.emit(json!({ "type": "status_changed", "status": "awaiting_input" }));
         self.handle.emit(json!({
@@ -67,20 +77,18 @@ impl AgentLoop {
             "questions": questions,
         }));
 
-        let (sender, receiver) = oneshot::channel::<Value>();
-        {
-            let mut slot = self.handle.question.lock().await;
-            slot.pending = Some(questions.clone());
-            slot.sender = Some(sender);
-        }
+        // An interrupted sub-agent stops waiting too, not only run cancel (FR-071).
         let answer = tokio::select! {
             answer = receiver => answer.ok(),
-            _ = self.handle.cancelled() => None,
+            _ = self.stop_signal() => None,
         };
         {
+            // Clear only this question's slot, never a newer one.
             let mut slot = self.handle.question.lock().await;
-            slot.pending = None;
-            slot.sender = None;
+            if slot.question_id == question_id {
+                slot.pending = None;
+                slot.sender = None;
+            }
         }
         if answer.is_none() {
             return Err(AgentError::Cancelled);
@@ -177,6 +185,13 @@ pub(super) fn normalize_request_user_input(args: &Value) -> Value {
         .map(|items| {
             items
                 .iter()
+                // A bare string is the question text; anything else that is
+                // not an object is skipped instead of panicking (FR-016).
+                .filter_map(|question| match question {
+                    Value::String(text) => Some(json!({ "question": text })),
+                    Value::Object(_) => Some(question.clone()),
+                    _ => None,
+                })
                 .map(|question| {
                     let header = question
                         .get("header")
@@ -191,10 +206,11 @@ pub(super) fn normalize_request_user_input(args: &Value) -> Value {
                         }
                         _ => json!([{ "label": "Yes" }, { "label": "No" }]),
                     };
-                    let mut question = question.clone();
-                    let object = question.as_object_mut().unwrap();
-                    object.insert("header".into(), json!(header));
-                    object.insert("options".into(), options);
+                    let mut question = question;
+                    if let Some(object) = question.as_object_mut() {
+                        object.insert("header".into(), json!(header));
+                        object.insert("options".into(), options);
+                    }
                     question
                 })
                 .collect::<Vec<_>>()

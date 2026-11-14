@@ -34,6 +34,44 @@ fn history_seeding_pairs_tool_calls_with_responses() {
     assert_eq!(history[3].content, "final");
 }
 
+/// FR-001 / FR-002 / FR-067: a failed round's empty placeholder and a
+/// cancelled tool loop replay as a provider-valid history.
+#[test]
+fn history_seeding_repairs_failed_and_cancelled_rounds() {
+    let calls = r#"[{"id":"c1","function":{"name":"t","arguments":"{}"}},{"id":"c2","function":{"name":"t","arguments":"{}"}}]"#;
+    let messages = vec![
+        message("user", "first question", None, None),
+        message("assistant", "", None, None), // round failed before any delta
+        message("user", "second question", None, None),
+        message("assistant", "", Some(calls), None),
+        message("tool", "one", Some("c1"), None), // cancelled before c2 ran
+        message("tool", "stray", Some("c9"), None),
+        message("user", "third", None, None),
+    ];
+    let history = seed_history(&messages);
+    let shape: Vec<String> = history
+        .iter()
+        .map(|m| format!("{}:{}", m.role, m.tool_call_id.clone().unwrap_or_else(|| m.content.clone())))
+        .collect();
+    assert_eq!(shape, ["user:first question", "user:second question", "assistant:", "tool:c1", "tool:c2", "user:third"]);
+    assert_eq!(history[4].content, history::INTERRUPTED_TOOL_RESULT);
+}
+
+/// FR-005: a persisted compaction marker replaces the history before the
+/// first message it kept.
+#[test]
+fn history_seeding_honours_the_latest_compaction_marker() {
+    let mut messages: Vec<RunMessage> = (0..6).map(|i| message("user", &format!("u{i}"), None, None)).collect();
+    let kept = messages[4].id.clone();
+    let mut marker = message("system", &compact::summary_block("S"), None, None);
+    marker.raw_response = Some(compact::marker_raw(Some(&kept)));
+    messages.push(marker);
+    messages.push(message("user", "after", None, None));
+    let history = seed_history(&messages);
+    let contents: Vec<&str> = history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents, [compact::summary_block("S").as_str(), "u4", "u5", "after"]);
+}
+
 #[test]
 fn standing_grants_match_scope_tool_command_and_domains() {
     let rule = PermissionRule {
@@ -177,7 +215,8 @@ fn cost_computation_uses_per_million_pricing() {
         provider_cost: None,
     };
     let cost = cost_of(&usage, Some(&info));
-    assert!((cost - (3.0 + 1.5 + 0.15)).abs() < 1e-9);
+    // Only the 500k uncached input tokens are billed at the input rate.
+    assert!((cost - (1.5 + 1.5 + 0.15)).abs() < 1e-9);
     assert_eq!(cost_of(&usage, None), 0.0);
 }
 
@@ -226,6 +265,24 @@ fn request_user_input_normalization_fills_defaults() {
     assert_eq!(questions[0]["question"], "Proceed?");
     assert_eq!(questions[1]["header"], "Choice");
     assert_eq!(questions[1]["options"][0]["label"], "SQLite");
+
+    // FR-016: strings become questions, other non-objects are skipped.
+    let loose = normalize_request_user_input(&json!({ "questions": ["Proceed?", 3, null] }));
+    let questions = loose["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0]["question"], "Proceed?");
+    assert_eq!(questions[0]["options"][1]["label"], "No");
+}
+
+/// FR-041: keyless providers are fine on this machine only.
+#[test]
+fn local_base_urls_are_recognized() {
+    for url in ["http://localhost:1234/v1", "http://127.0.0.1:8080", "http://[::1]:11434/v1", "http://lm.localhost/v1"] {
+        assert!(super::drive::is_local_base_url(url), "{url}");
+    }
+    for url in ["https://api.example.com/v1", "http://192.168.1.5:8080", "http://localhost.evil.com", "not a url"] {
+        assert!(!super::drive::is_local_base_url(url), "{url}");
+    }
 }
 
 #[test]
@@ -233,6 +290,13 @@ fn reasoning_support_heuristic() {
     assert!(reasoning_supported("glm-5.3-flash", None));
     assert!(reasoning_supported("gpt-5-mini", None));
     assert!(!reasoning_supported("text-embedding-3", None));
+    // FR-076: the o-series markers only match as the leading name segment.
+    assert!(reasoning_supported("o3-mini", None));
+    assert!(reasoning_supported("openai/o4-mini", None));
+    assert!(reasoning_supported("o1", None));
+    assert!(!reasoning_supported("yolo1-chat", None));
+    assert!(!reasoning_supported("gpt-4o3x", None));
+    assert!(!reasoning_supported("pro1-model", None));
     let info = crate::pi_providers::ModelInfo {
         id: "whatever".into(),
         name: "whatever".into(),

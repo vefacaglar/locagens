@@ -37,7 +37,7 @@ impl Db {
             run.clone()
         });
         if let Some(run) = snapshot {
-            append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
+            append_event(&self.root, state, id, &run.created_at, "run_update", run_update_payload(Some(&run), &run));
             append_session_index(&self.root, &run);
             sync_run_claim(&self.root, state, &run);
         }
@@ -49,14 +49,15 @@ impl Db {
         let mut guard = self.write();
         let state = &mut *guard;
         let updated = state.runs.get_mut(id).map(|run| {
-            let old_title = run.title.clone();
+            let before = run.clone();
             patch(run);
             run.updated_at = now_iso();
             run.last_active_at = Some(now_iso());
-            (run.clone(), old_title != run.title)
+            (run.clone(), before)
         });
-        let (run, title_changed) = updated?;
-        append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
+        let (run, before) = updated?;
+        let title_changed = before.title != run.title;
+        append_event(&self.root, state, id, &run.created_at, "run_update", run_update_payload(Some(&before), &run));
         if title_changed {
             append_session_index(&self.root, &run);
         }
@@ -73,7 +74,7 @@ impl Db {
             run.clone()
         });
         if let Some(run) = snapshot {
-            append_event(&self.root, state, id, &run.created_at, "run_update", run_payload(&run));
+            append_event(&self.root, state, id, &run.created_at, "run_update", run_update_payload(Some(&run), &run));
         }
     }
 
@@ -168,6 +169,13 @@ impl Db {
         }
         append_session_index(&self.root, &fork);
         Some(fork)
+    }
+
+    /// Whether another live process (or `Db` instance) holds the run's owner
+    /// lock, i.e. is driving it right now. A claim of this store is not
+    /// "elsewhere".
+    pub fn run_owned_elsewhere(&self, run_id: &str) -> bool {
+        !self.read().run_claims.contains_key(run_id) && run_owned_by_live_process(&self.root, run_id)
     }
 
     /// Deletes the run's rollout file (usage lines live in it and go too).

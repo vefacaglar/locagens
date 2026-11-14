@@ -128,6 +128,15 @@ impl Orchestrator {
         });
     }
 
+    /// Kills every exec session of every run (process exit): sessions kept
+    /// after a `done` turn would otherwise outlive the app (FR-022).
+    pub async fn kill_all_exec_sessions(&self, processes: &locagens_execpolicy::processes::ProcessManager) {
+        let run_ids: Vec<String> = lock_ignoring_poison(&self.exec_sessions).keys().cloned().collect();
+        for run_id in run_ids {
+            self.kill_exec_sessions(processes, &run_id).await;
+        }
+    }
+
     pub(super) async fn finish_drive(&self, state: &AppState, handle: &Arc<RunHandle>) {
         handle.agents.shutdown();
         let completed = state.db.get_run_full(&handle.run_id).is_some_and(|run| run.status == "done");
@@ -138,6 +147,22 @@ impl Orchestrator {
         handle.record_turn_end().await;
         self.drop_own_handle(handle);
         handle.mark_finished();
+    }
+}
+
+/// Hands messages that were queued but never folded into the turn (it was
+/// cancelled, failed, or they arrived as it ended) back to the frontends as
+/// `queued_messages_undelivered { messages }`, so they can be resent instead
+/// of being lost (FR-010).
+pub(super) async fn emit_undelivered_messages(handle: &RunHandle) {
+    let messages: Vec<String> = {
+        let mut inbox = handle.inbox.lock().await;
+        // Under the inbox lock: `queue_message` refuses from here on.
+        handle.inbox_closed.store(true, Ordering::SeqCst);
+        inbox.drain(..).collect()
+    };
+    if !messages.is_empty() {
+        handle.emit(json!({ "type": "queued_messages_undelivered", "runId": handle.run_id, "messages": messages }));
     }
 }
 
@@ -186,10 +211,30 @@ pub(super) fn reasoning_supported(model_id: &str, info: Option<&crate::pi_provid
     if let Some(true) = info.and_then(|info| info.reasoning) {
         return true;
     }
-    let id = model_id.to_lowercase();
-    ["o1", "o3", "o4", "gpt-5", "glm-5", "deepseek-r", "reasoner", "qwq", "qwen3", "thinking", "gemini-2.5", "gemini-3"]
+    // The model name without a router prefix (`openai/o3-mini` -> `o3-mini`).
+    let lower = model_id.to_lowercase();
+    let id = lower.rsplit('/').next().unwrap_or_default();
+    // `o1` / `o3` / `o4` only as the whole name or its first `-` segment, so
+    // ids that merely contain them (`gpt-4o3x`, `yolo1`) do not match (FR-076).
+    let o_series = ["o1", "o3", "o4"]
         .iter()
-        .any(|marker| id.starts_with(marker) || id.contains(marker))
+        .any(|marker| id.split('-').next() == Some(*marker));
+    o_series
+        || ["gpt-5", "glm-5", "deepseek-r", "reasoner", "qwq", "qwen3", "thinking", "gemini-2.5", "gemini-3"]
+            .iter()
+            .any(|marker| id.contains(marker))
+}
+
+/// Whether a base URL points at this machine (`localhost`, `*.localhost`
+/// or a loopback address).
+pub(super) fn is_local_base_url(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else { return false };
+    match url.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost") || name.to_ascii_lowercase().ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Builds a resolved streaming endpoint from the `pi` provider engine.
@@ -205,7 +250,8 @@ pub(super) async fn resolve_endpoint(
         return Err(format!("No baseUrl configured for provider \"{provider_id}\"."));
     }
     let api_key = pm.resolve_api_key(provider_id, None).await.unwrap_or_default();
-    if api_key.is_empty() && provider_id != "ollama" {
+    // Local servers (Ollama, LM Studio, llama.cpp, vLLM) need no key (FR-041).
+    if api_key.is_empty() && provider_id != "ollama" && !is_local_base_url(&base_url) {
         return Err(format!(
             "No API key available for provider \"{provider_id}\". Add one in Settings → Providers."
         ));
@@ -256,7 +302,10 @@ pub(super) fn cost_of(usage: &llm::Usage, info: Option<&crate::pi_providers::Mod
     let output = per_million(&["outputPerMillion", "output", "completionPerMillion"]);
     let cache_read = per_million(&["cacheReadPerMillion", "cacheRead"]);
     let cache_write = per_million(&["cacheWritePerMillion", "cacheWrite"]);
-    (input * usage.input_tokens as f64
+    // `input_tokens` includes the cached tokens (all protocols): bill only
+    // the uncached part at the input rate (FR-014).
+    let uncached = (usage.input_tokens - usage.cache_read_tokens - usage.cache_write_tokens).max(0);
+    (input * uncached as f64
         + output * usage.output_tokens as f64
         + cache_read * usage.cache_read_tokens as f64
         + cache_write * usage.cache_write_tokens as f64)
@@ -483,6 +532,7 @@ pub(super) async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
         }
     }
     handle.agents.shutdown();
+    emit_undelivered_messages(&handle).await;
     // Post-turn tree before the terminal status, so an immediate `/undo`
     // already knows which files this turn changed.
     handle.record_turn_end().await;
