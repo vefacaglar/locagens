@@ -49,12 +49,12 @@ docs/                CORE_API.md, CLI.md, CONFIG.md, HOOKS.md, SANDBOX.md,
 
 ## Install
 
-**CLI via npm / pnpm** (macOS Terminal and Windows PowerShell / CMD; Node.js >= 18):
+**CLI via npm / pnpm** (macOS Terminal and Windows PowerShell / CMD; Node.js >= 18; installs the `lcgn` command):
 
 ```bash
-npm install -g lcgn
+npm install -g locagens
 # or
-pnpm add -g lcgn
+pnpm add -g locagens
 ```
 
 Prebuilt binaries also come from the latest

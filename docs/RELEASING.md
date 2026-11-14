@@ -48,8 +48,8 @@ and are not versioned per release. Versions are **not** workspace-inherited:
    - Uploads everything as workflow artifacts and publishes a GitHub Release
      with auto-generated notes.
 
-5. Once the GitHub Release is published, publish the `lcgn` npm launcher package
-   from a local terminal (see **npm distribution (`lcgn`)** below).
+5. Once the GitHub Release is published, publish the `locagens` npm launcher
+   package from a local terminal (see **npm distribution (`locagens`)** below).
 
 When done, download the binaries from the GitHub Releases page.
 
@@ -111,26 +111,27 @@ not notarized DMG with a warning; a tagged release fails instead.
 
 ---
 
-## npm distribution (`lcgn`)
+## npm distribution (`locagens`)
 
-Users can install the CLI on macOS (Terminal) and Windows (PowerShell / CMD)
-with a single command:
+Users can install the `lcgn` CLI on macOS (Terminal) and Windows (PowerShell /
+CMD) with a single command:
 
 ```bash
-npm install -g lcgn
+npm install -g locagens
 # or
-pnpm add -g lcgn
+pnpm add -g locagens
 ```
 
-`apps/cli/npm` is a single launcher package (`apps/cli/npm/bin/lcgn.js`) that
-downloads `lcgn-macOS-universal.tar.gz` (macOS) or `lcgn-Windows-x64.zip`
-(Windows) from the matching GitHub Release into `~/.locagens/bin/` during
-`postinstall` (or on first launch if the package manager skips `postinstall`).
+`apps/cli/npm` is a single launcher package (`locagens`, bin `lcgn` in
+`apps/cli/npm/bin/lcgn.js`) that downloads `lcgn-macOS-universal.tar.gz` (macOS)
+or `lcgn-Windows-x64.zip` (Windows) from the matching GitHub Release into
+`~/.locagens/bin/` during `postinstall` (or on first launch if the package
+manager skips `postinstall`).
 
 ### Publishing from local terminal
 
 After the GitHub Release for a tag finishes uploading its binaries, publish the
-`lcgn` package locally (using interactive 2FA when prompted):
+`locagens` package locally (using interactive 2FA when prompted):
 
 ```bash
 npm login
