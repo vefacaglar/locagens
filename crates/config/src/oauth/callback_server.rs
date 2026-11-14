@@ -113,8 +113,14 @@ type SharedSender = Arc<Mutex<Option<oneshot::Sender<CallbackResult>>>>;
 async fn serve(listener: TcpListener, config: Arc<CallbackConfig>, sender: SharedSender) {
     let accept_loop = async {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { continue };
-            tokio::spawn(handle_connection(stream, config.clone(), sender.clone()));
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    tokio::spawn(handle_connection(stream, config.clone(), sender.clone()));
+                }
+                // A persistent accept error (e.g. out of file descriptors)
+                // must not spin a core.
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
         }
     };
     match config.timeout {

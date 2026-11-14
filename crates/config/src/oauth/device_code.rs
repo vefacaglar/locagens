@@ -87,10 +87,25 @@ where
         .unwrap_or(timing.default_interval)
         .max(timing.min_interval);
     let mut slow_downs = 0u32;
+    let mut request_errors = 0u32;
 
     sleep_until_or_deadline(interval, deadline).await;
     while Instant::now() < deadline {
-        match poll().await? {
+        // `Err` is a failed request (network, bad body): retried a few times
+        // in a row before the login gives up. Server verdicts are `Failed`.
+        let step = match poll().await {
+            Ok(step) => step,
+            Err(err) => {
+                request_errors += 1;
+                if request_errors > MAX_REQUEST_ERRORS {
+                    return Err(err);
+                }
+                sleep_until_or_deadline(interval, deadline).await;
+                continue;
+            }
+        };
+        request_errors = 0;
+        match step {
             PollStep::Complete(value) => return Ok(value),
             PollStep::Failed(message) => bail!(message),
             PollStep::Pending => {}
@@ -106,6 +121,9 @@ where
     }
     bail!(if slow_downs > 0 { SLOW_DOWN_TIMEOUT_MESSAGE } else { TIMEOUT_MESSAGE })
 }
+
+/// Failed poll requests in a row that are retried before a login fails.
+const MAX_REQUEST_ERRORS: u32 = 3;
 
 /// Longest device-code lifetime / poll interval honoured (1 hour).
 const MAX_EXPIRES_SECS: f64 = 3600.0;
@@ -135,5 +153,25 @@ mod tests {
         let nan = poll_device_code::<u8, _, _>(None, f64::NAN, timing, || async { Ok(PollStep::Pending) }).await;
         assert!(nan.is_err());
         assert_eq!(positive_duration(1e300), Some(Duration::from_secs(3600)));
+    }
+
+    #[tokio::test]
+    async fn transient_request_errors_are_retried_a_few_times() {
+        let timing = PollTiming {
+            default_interval: Duration::from_millis(1),
+            min_interval: Duration::from_millis(1),
+            slow_down_step: Duration::from_millis(1),
+        };
+        let calls = std::cell::Cell::new(0u32);
+        let poll = || {
+            calls.set(calls.get() + 1);
+            let call = calls.get();
+            async move { if call <= 2 { bail!("network down") } else { Ok(PollStep::Complete(call)) } }
+        };
+        assert_eq!(poll_device_code(None, 5.0, timing, poll).await.unwrap(), 3);
+
+        let always_down = || async { Err::<PollStep<u8>, _>(anyhow::anyhow!("network down")) };
+        let err = poll_device_code(None, 5.0, timing, always_down).await.unwrap_err();
+        assert_eq!(err.to_string(), "network down");
     }
 }

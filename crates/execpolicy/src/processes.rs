@@ -46,16 +46,41 @@ enum StdinSink {
     Channel(tokio::sync::mpsc::UnboundedSender<Vec<u8>>),
 }
 
-/// Resolves the shell program and flag used to run `command`.
+/// Shells a caller may pick with [`SpawnOptions::shell`].
+const KNOWN_SHELLS: [&str; 6] = ["sh", "bash", "zsh", "fish", "dash", "ksh"];
+
+/// System directories an absolute [`SpawnOptions::shell`] path may live in.
+const SHELL_DIRS: [&str; 5] = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/run/current-system/sw/bin"];
+
+/// True when `shell` names a real shell: a bare known name (`bash`) or that
+/// name in a system bin directory (`/usr/bin/bash`). Anything else (such as
+/// a workspace script) would run an arbitrary program in place of the shell
+/// while the safety checks only looked at the command line.
+pub fn is_known_shell(shell: &str) -> bool {
+    let shell = shell.trim();
+    if KNOWN_SHELLS.contains(&shell) {
+        return true;
+    }
+    let path = std::path::Path::new(shell);
+    match (path.parent().and_then(|dir| dir.to_str()), path.file_name().and_then(|name| name.to_str())) {
+        (Some(dir), Some(name)) => SHELL_DIRS.contains(&dir) && KNOWN_SHELLS.contains(&name),
+        _ => false,
+    }
+}
+
+/// Resolves the shell program and flag used to run `command`. An unknown
+/// `shell` falls back to `sh` (callers reject it before spawning).
 fn shell_for_options(options: &SpawnOptions, command: &str) -> (String, Vec<String>) {
     if cfg!(windows) {
         ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
     } else {
         let shell = options
             .shell
-            .clone()
-            .filter(|shell| !shell.trim().is_empty())
-            .unwrap_or_else(|| "sh".to_string());
+            .as_deref()
+            .map(str::trim)
+            .filter(|shell| is_known_shell(shell))
+            .unwrap_or("sh")
+            .to_string();
         let flag = if options.login { "-lc" } else { "-c" };
         (shell, vec![flag.to_string(), command.to_string()])
     }
@@ -1083,6 +1108,25 @@ mod tests {
             sandbox: None,
         };
         manager.lock_processes().insert(id.to_string(), Arc::new(Mutex::new(managed)));
+    }
+
+    /// FR-030: the `shell` option only ever names a real shell.
+    #[test]
+    fn only_known_shells_replace_the_default_shell() {
+        for shell in ["bash", " zsh ", "/bin/sh", "/usr/bin/fish", "/opt/homebrew/bin/bash"] {
+            assert!(is_known_shell(shell), "{shell}");
+        }
+        for shell in ["./run.sh", "run.sh", "python3", "/tmp/bash", "/bin/../tmp/bash", "bin/bash", "/usr/bin/env", "bash -x", ""] {
+            assert!(!is_known_shell(shell), "{shell}");
+        }
+        let options = |shell: &str| SpawnOptions { shell: Some(shell.to_string()), ..Default::default() };
+        let (program, args) = shell_for_options(&options("./run.sh"), "ls");
+        if cfg!(windows) {
+            assert_eq!(program, "cmd");
+        } else {
+            assert_eq!((program.as_str(), args[0].as_str()), ("sh", "-c"));
+            assert_eq!(shell_for_options(&options("/bin/bash"), "ls").0, "/bin/bash");
+        }
     }
 
     /// QA-026: once the ring is full, new output must still be returned.

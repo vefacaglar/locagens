@@ -17,7 +17,7 @@ const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
 const DEFAULT_TOKEN_LIFETIME_SECS: f64 = 3600.0;
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Refresh runs while the auth.json lock is held, so keep it short.
+/// A refresh blocks the request that needs the token, so keep it short.
 const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// xAI OAuth client; endpoints are injectable so tests can use a mock server.
@@ -64,7 +64,11 @@ impl XaiOAuth {
             ];
             let (ok, status, body) = self.post_form(&self.token_url, &fields, LOGIN_REQUEST_TIMEOUT).await?;
             if ok {
-                return Ok(PollStep::Complete(tokens_from_response(&body, None)?));
+                // A bad token answer is final; only failed requests are retried.
+                return Ok(match tokens_from_response(&body, None) {
+                    Ok(tokens) => PollStep::Complete(tokens),
+                    Err(err) => PollStep::Failed(err.to_string()),
+                });
             }
             Ok(match body.get("error").and_then(Value::as_str) {
                 Some("authorization_pending") => PollStep::Pending,

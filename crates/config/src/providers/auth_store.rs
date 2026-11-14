@@ -67,15 +67,22 @@ pub(super) fn literal_ui_key(key: Option<&str>) -> Option<String> {
 /// How long a `!command` credential helper may run before it is killed.
 const KEY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a `!command` helper's output is reused before it runs again, so
+/// short-lived tokens (`gcloud auth print-access-token`, …) are renewed.
+pub(super) const KEY_COMMAND_CACHE_TTL:std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Runs a `!command` credential helper (no stdin, killed on timeout or drop)
-/// and returns its trimmed stdout.
-pub(super) async fn run_credential_command(command: &str, timeout: std::time::Duration) -> Result<String> {
+/// in `cwd` and returns its trimmed stdout. `cwd` is the Locagens home, never
+/// the project folder, so a repository's `op.bat` cannot shadow the helper.
+pub(super) async fn run_credential_command(command: &str, cwd: &Path, timeout: std::time::Duration) -> Result<String> {
     #[cfg(windows)]
     let mut cmd = {
         let mut c = tokio::process::Command::new("cmd");
         // `cmd` does not parse Rust's backslash-quote escaping: pass the line
         // verbatim; `/S` strips exactly the outer quotes.
         c.raw_arg(format!("/S /C \"{command}\""));
+        // `cmd` looks up programs in its working directory first unless this is set.
+        c.env("NoDefaultCurrentDirectoryInExePath", "1");
         c
     };
     #[cfg(not(windows))]
@@ -84,7 +91,7 @@ pub(super) async fn run_credential_command(command: &str, timeout: std::time::Du
         c.args(["-c", command]);
         c
     };
-    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    cmd.current_dir(cwd).stdin(std::process::Stdio::null()).kill_on_drop(true);
     let output = match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(output) => output?,
         Err(_) => anyhow::bail!("credential command timed out after {}s", timeout.as_secs()),
@@ -117,6 +124,14 @@ fn valid_oauth_access(credential: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|access| !access.is_empty())
         .map(str::to_string)
+}
+
+/// The stored credential object of `provider_id` in one `auth.json` map.
+fn stored_oauth_entry(map: &Map<String, Value>, provider_id: &str) -> Result<Map<String, Value>> {
+    map.get(provider_id)
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no stored OAuth credential found"))
 }
 
 impl PiProviderManager {
@@ -195,7 +210,7 @@ impl PiProviderManager {
 
     /// Resolves the API key for a provider: explicit override first, then
     /// `auth.json` (literal, `!command` stdout, or `$ENV_VAR`), then the
-    /// environment-variable fallback chain.
+    /// `models.json` `envKey`, then the built-in provider's own variable.
     pub async fn resolve_api_key(
         &self,
         provider_id: &str,
@@ -245,23 +260,15 @@ impl PiProviderManager {
             }
         }
 
-        // Environment fallback: provider's preferred variable first, then the
-        // shared chain.
-        let mut candidates: Vec<&str> = Vec::new();
-        if let Some(builtin) = builtin(provider_id) {
-            if !builtin.env_var.is_empty() {
-                candidates.push(builtin.env_var);
-            }
-        }
-        for var in ENV_FALLBACKS {
-            if !candidates.contains(&var) {
-                candidates.push(var);
-            }
-        }
-        candidates
-            .into_iter()
-            .find_map(|var| std::env::var(var).ok().filter(|v| !v.trim().is_empty()))
+        // Environment fallback: only the built-in's own variable. A vendor key
+        // (`ANTHROPIC_API_KEY`, …) is never sent to another provider's baseUrl;
+        // other providers name their variable with `$VAR` or `envKey`.
+        builtin(provider_id)
+            .map(|builtin| builtin.env_var)
+            .filter(|var| !var.is_empty())
+            .and_then(|var| std::env::var(var).ok())
             .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     /// Starts an OAuth login. Device-code providers return a code to show;
@@ -394,34 +401,54 @@ impl PiProviderManager {
         }
     }
 
-    /// Refreshes under the lock of the `auth.json` the credential came from
-    /// (primary or a fallback dir), picking up a refresh another process
-    /// already did, and writes the result back to that same file.
+    /// Refreshes an expired credential in the `auth.json` it came from
+    /// (primary or a fallback dir). The network call runs outside the file
+    /// lock; afterwards the file is re-read under the lock and a credential
+    /// another process stored meanwhile wins over ours. Refreshes of one
+    /// provider in this process run one at a time, so a second caller finds
+    /// the first one's token instead of spending the refresh token again.
     async fn refresh_oauth_credential(&self, provider_id: &str) -> Result<String> {
+        let gate = self.refresh_gate(provider_id);
+        let _one_at_a_time = gate.lock().await;
         let path = self
             .oauth_source_path(provider_id)
             .ok_or_else(|| anyhow::anyhow!("no stored OAuth credential found"))?;
-        let _lock = AuthFileLock::acquire(&path).await?;
-        let mut map = Self::read_auth_file(&path)?;
-        let entry = map
-            .get(provider_id)
-            .and_then(Value::as_object)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("no stored OAuth credential found"))?;
-        if let Some(access) = valid_oauth_access(&Value::Object(entry.clone())) {
+        let before = stored_oauth_entry(&Self::read_auth_file(&path)?, provider_id)?;
+        if let Some(access) = valid_oauth_access(&Value::Object(before.clone())) {
             return Ok(access);
         }
-        let refresh_token = entry
+        let refresh_token = before
             .get("refresh")
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .ok_or_else(|| anyhow::anyhow!("stored OAuth credential has no refresh token"))?;
-        let tokens = self.refresh_tokens(provider_id, refresh_token, &entry).await?;
-        let mut updated = entry;
+        let refreshed = self.refresh_tokens(provider_id, refresh_token, &before).await;
+
+        let _lock = AuthFileLock::acquire(&path).await?;
+        let mut map = Self::read_auth_file(&path)?;
+        let current = stored_oauth_entry(&map, provider_id)?;
+        if current != before {
+            // Refreshed (or signed in again) elsewhere while ours was in flight.
+            if let Some(access) = valid_oauth_access(&Value::Object(current.clone())) {
+                return Ok(access);
+            }
+        }
+        let tokens = refreshed?;
+        let mut updated = current;
         tokens.apply_to(&mut updated);
         map.insert(provider_id.to_string(), Value::Object(updated));
         Self::write_json(&path, &Value::Object(map))?;
         Ok(tokens.access)
+    }
+
+    /// The in-process gate that serializes refreshes of one provider.
+    fn refresh_gate(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.refresh_gates
+            .lock()
+            .expect("refresh gates poisoned")
+            .entry(provider_id.to_string())
+            .or_default()
+            .clone()
     }
 
     pub(super) async fn refresh_tokens(&self, provider_id: &str, refresh_token: &str, entry: &Map<String, Value>) -> Result<OAuthTokens> {
@@ -485,20 +512,26 @@ impl PiProviderManager {
             })
     }
 
-    /// Expands `!command` (shell stdout, cached) and `$ENV_VAR` forms.
+    /// Expands `!command` (shell stdout, cached for a while) and `$ENV_VAR` forms.
     async fn expand_key_value(&self, raw: &str, provider_id: &str) -> String {
         let raw = raw.trim();
         if let Some(command) = raw.strip_prefix('!') {
             let command = command.trim();
-            if let Some(cached) = self.command_cache.lock().expect("cache poisoned").get(command) {
-                return cached.clone();
+            if let Some((stdout, _)) = self
+                .command_cache
+                .lock()
+                .expect("cache poisoned")
+                .get(command)
+                .filter(|(_, ran_at)| ran_at.elapsed() < KEY_COMMAND_CACHE_TTL)
+            {
+                return stdout.clone();
             }
             match self.run_key_command(command).await {
                 Ok(stdout) => {
                     self.command_cache
                         .lock()
                         .expect("cache poisoned")
-                        .insert(command.to_string(), stdout.clone());
+                        .insert(command.to_string(), (stdout.clone(), std::time::Instant::now()));
                     stdout
                 }
                 Err(err) => {
@@ -520,7 +553,10 @@ impl PiProviderManager {
     }
 
     async fn run_key_command(&self, command: &str) -> Result<String> {
-        run_credential_command(command, KEY_COMMAND_TIMEOUT).await
+        // The Locagens home when it exists (it normally does), else the temp
+        // dir: never the inherited working directory.
+        let cwd = if self.primary_dir.is_dir() { self.primary_dir.clone() } else { std::env::temp_dir() };
+        run_credential_command(command, &cwd, KEY_COMMAND_TIMEOUT).await
     }
 
     pub fn has_api_key(&self, provider_id: &str) -> bool {
