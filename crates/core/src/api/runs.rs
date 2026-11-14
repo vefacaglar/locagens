@@ -159,20 +159,6 @@ fn active_run_statuses() -> [&'static str; 4] {
     ["created", "generating", "awaiting_permission", "awaiting_input"]
 }
 
-/// How long an active status without a live drive in this process is
-/// trusted to belong to another process before it counts as stale.
-const ACTIVE_RUN_STALE_AFTER: Duration = Duration::from_secs(120);
-
-/// Whether a run's last update is older than [`ACTIVE_RUN_STALE_AFTER`]
-/// (unparseable timestamps count as stale).
-fn is_stale(run: &Run) -> bool {
-    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&run.updated_at) else {
-        return true;
-    };
-    let age = chrono::Utc::now().signed_duration_since(updated.with_timezone(&chrono::Utc));
-    age.to_std().map(|age| age >= ACTIVE_RUN_STALE_AFTER).unwrap_or(false)
-}
-
 fn provider_display_name(state: &AppState, provider_id: &str) -> String {
     state
         .pi
@@ -402,9 +388,8 @@ pub async fn continue_run(
         return Err(ApiError::bad_request("Task is required."));
     }
     crate::config_runtime::reload_if_changed();
-    // One drive per run (QA-022): a live drive in this process owns the run;
-    // without one, an active status is only trusted while it is fresh (the
-    // run may be driven by another Locagens process).
+    // One drive per run (QA-022): a live drive in this process owns the run,
+    // and so does another process that holds the run's owner lock (FR-017).
     if state.orchestrator.is_driving(run_id) {
         return Err(ApiError::conflict(match existing.status.as_str() {
             "awaiting_permission" | "awaiting_input" => {
@@ -413,14 +398,14 @@ pub async fn continue_run(
             _ => "Run is still generating; queue the message instead of starting a new turn.",
         }));
     }
-    if state.orchestrator.handle(run_id).is_none()
-        && active_run_statuses().contains(&existing.status.as_str())
-        && !is_stale(&existing)
-    {
+    if state.db.run_owned_elsewhere(run_id) {
         return Err(ApiError::conflict(
             "Run is active in another Locagens session; wait for it to finish or cancel it there.",
         ));
     }
+    // Validated before a handle is claimed, so a bad mode never leaves a
+    // claimed handle without a drive (FR-018).
+    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions)?;
     // A cancelled drive that is still unwinding is awaited (then aborted).
     let handle = state
         .orchestrator
@@ -428,7 +413,6 @@ pub async fn continue_run(
         .await
         .map_err(ApiError::conflict)?;
 
-    let mode = effective_mode(payload.mode.as_deref(), payload.bypass_permissions)?;
     let message = RunMessage {
         id: format!("msg-{}", uuid::Uuid::new_v4()),
         run_id: run_id.to_string(),
@@ -556,6 +540,13 @@ pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<()> {
     if state.db.get_run_full(run_id).is_none() {
         return Err(ApiError::not_found("Run not found."));
     }
+    // This process cannot stop another process's drive; deleting under it
+    // would silently drop its later writes (FR-077).
+    if state.db.run_owned_elsewhere(run_id) {
+        return Err(ApiError::conflict(
+            "Run is active in another Locagens session; cancel it there before deleting it.",
+        ));
+    }
     cancel_run(state, run_id).await?;
     let deadline = tokio::time::Instant::now() + DELETE_DRAIN_TIMEOUT;
     while state.orchestrator.handle(run_id).is_some() && tokio::time::Instant::now() < deadline {
@@ -564,6 +555,18 @@ pub async fn delete_run(state: &AppState, run_id: &str) -> ApiResult<()> {
     state.db.delete_run(run_id);
     state.orchestrator.drop_handle(run_id);
     Ok(())
+}
+
+/// Process shutdown: cancels every live run of this process and kills all
+/// exec sessions, including those a `done` turn kept for `write_stdin`, so a
+/// dev server the agent started does not outlive the app (FR-022). The CLI
+/// and the desktop app call this before they exit.
+pub async fn shutdown(state: &AppState) {
+    let live: Vec<String> = state.db.list_runs().into_iter().map(|run| run.id).filter(|id| state.orchestrator.is_driving(id)).collect();
+    for run_id in live {
+        let _ = cancel_run(state, &run_id).await;
+    }
+    state.orchestrator.kill_all_exec_sessions(&state.processes).await;
 }
 
 // ----------------------------------------------------------------------
@@ -579,7 +582,11 @@ pub async fn queue_message(state: &AppState, run_id: &str, content: &str) -> Api
     if content.is_empty() {
         return Err(ApiError::bad_request("Message content is required."));
     }
-    handle.inbox.lock().await.push_back(content);
+    let mut inbox = handle.inbox.lock().await;
+    if handle.inbox_closed.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ApiError::conflict("The turn is ending; send the message as a new turn."));
+    }
+    inbox.push_back(content);
     Ok(())
 }
 

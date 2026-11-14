@@ -831,22 +831,7 @@ impl AgentLoop {
 /// After an interrupt the history may end in an assistant message whose tool
 /// calls have no results; providers reject that, so answer each one.
 pub fn repair_dangling_tool_calls(history: &mut Vec<super::llm::LlmMessage>) {
-    let Some(assistant_at) = history.iter().rposition(|message| message.role == "assistant") else { return };
-    let calls = history[assistant_at].tool_calls.clone().unwrap_or_default();
-    for call in calls {
-        let call_id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-        let answered = history[assistant_at + 1..]
-            .iter()
-            .any(|message| message.role == "tool" && message.tool_call_id.as_deref() == Some(call_id.as_str()));
-        if !answered {
-            history.push(super::llm::LlmMessage {
-                role: "tool".into(),
-                content: "Tool call interrupted before it ran.".into(),
-                tool_call_id: Some(call_id),
-                ..Default::default()
-            });
-        }
-    }
+    super::history::sanitize_in_place(history);
 }
 
 #[cfg(test)]

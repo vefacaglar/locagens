@@ -128,6 +128,28 @@ async fn cancel_is_awaited_and_final_for_the_cancelled_drive() {
     assert_eq!(h.mock.request_count(), 2, "the cancelled loop made no further calls");
 }
 
+/// FR-010: a message queued while the final answer streams starts another
+/// round instead of being lost.
+#[tokio::test]
+async fn a_message_queued_during_the_final_answer_is_answered() {
+    let h = harness(|body| {
+        let last = non_system_messages(body).last().and_then(|m| m["content"].as_str()).unwrap_or_default().to_string();
+        MockReply { message: json!({ "role": "assistant", "content": format!("re: {last}") }), delay_ms: 400 }
+    })
+    .await;
+    let started = runs_api::create_run(&h.state, &create_payload(&h.project, "first")).await.unwrap();
+    let run_id = started.run.id.clone();
+    while h.mock.request_count() == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    runs_api::queue_message(&h.state, &run_id, "queued later").await.unwrap();
+    wait_for_status(&h.state, &run_id, "done").await;
+    assert_eq!(h.mock.request_count(), 2, "the queued message got its own round");
+    let messages = h.state.db.list_messages(&run_id);
+    let texts: Vec<(&str, &str)> = messages.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect();
+    assert_eq!(texts, [("user", "first"), ("assistant", "re: first"), ("user", "queued later"), ("assistant", "re: queued later")]);
+}
+
 /// QA-024: a panicking drive task ends `failed` and releases its handle.
 #[tokio::test]
 async fn a_panicking_drive_is_marked_failed_and_its_handle_dropped() {
@@ -172,6 +194,19 @@ async fn exec_sessions_are_killed_when_a_turn_is_cancelled_or_fails() {
         h.state.orchestrator.finish_drive(&h.state, &handle).await;
         assert_eq!(!h.state.orchestrator.exec_sessions(&run_id).is_empty(), kept, "{status}");
     }
+}
+
+/// FR-022: shutdown kills the sessions a `done` turn kept.
+#[tokio::test]
+async fn shutdown_kills_exec_sessions_kept_after_done_turns() {
+    let h = harness(echo_handler).await;
+    let command = if cfg!(windows) { "%SystemRoot%\\System32\\ping.exe -n 30 127.0.0.1 > nul" } else { "sleep 30" };
+    let info = h.state.processes.spawn(command, h.project.clone(), None);
+    seed_run(&h.state, "run-kept", "done");
+    h.state.orchestrator.track_exec_session("run-kept", &info.id, command);
+    runs_api::shutdown(&h.state).await;
+    assert!(h.state.processes.get(&info.id).is_none(), "the session is killed and dropped");
+    assert!(h.state.orchestrator.exec_sessions("run-kept").is_empty());
 }
 
 /// QA-028 / QA-031 / QA-032: network approvals queue behind tool prompts on

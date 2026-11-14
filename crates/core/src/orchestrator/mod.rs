@@ -23,6 +23,7 @@ pub mod command_safety;
 pub mod compact;
 pub mod context_remaining;
 pub mod env_context;
+pub mod history;
 mod hook_calls;
 pub mod host_executable;
 pub mod llm;
@@ -35,6 +36,7 @@ pub mod tools;
 pub mod turn_diff_tracker;
 
 mod agent_loop;
+mod agent_round;
 mod drive;
 mod exec_session;
 mod gating;
@@ -208,6 +210,9 @@ pub struct QuestionSlot {
     pub pending: Option<Value>,
     /// Resolves with `{ selections: string[][], notes: string[] }`.
     pub sender: Option<oneshot::Sender<Value>>,
+    /// Id of the question that owns the slot, so its cleanup never clears
+    /// a newer question.
+    question_id: u64,
 }
 
 
@@ -221,6 +226,9 @@ pub struct RunHandle {
     cancelled_tx: watch::Sender<bool>,
     pub events: tokio::sync::broadcast::Sender<Value>,
     pub inbox: tokio::sync::Mutex<VecDeque<String>>,
+    /// Set (under the inbox lock) once the turn handed back its undelivered
+    /// messages; later queueing is refused instead of silently lost.
+    pub inbox_closed: AtomicBool,
     pub permission: tokio::sync::Mutex<PermissionSlot>,
     pub question: tokio::sync::Mutex<QuestionSlot>,
     /// Tools approved with "Allow for Run" (per tool name, not run-wide).
@@ -291,43 +299,60 @@ pub enum AgentError {
 /// Projects persisted messages into provider-neutral LLM messages. System and
 /// sub-agent messages are skipped (sub-agent output was folded into the
 /// architect's tool responses); tool responses pair with their tool call ids,
-/// which are persisted in the tool message's `rawResponse`.
+/// which are persisted in the tool message's `rawResponse`. The latest
+/// compaction marker replaces everything before the message it kept, and the
+/// result is [`history::sanitize`]d so a failed, cancelled or compacted turn
+/// never makes the next request invalid.
 pub fn seed_history(messages: &[RunMessage]) -> Vec<llm::LlmMessage> {
     let mut history = Vec::new();
-    for message in messages {
-        if message.agent_role.is_some() {
-            continue;
-        }
-        match message.role.as_str() {
-            "system" => continue,
-            "user" => history.push(llm::LlmMessage {
-                role: "user".into(),
-                content: message.content.clone(),
-                ..Default::default()
-            }),
-            "assistant" => {
-                let tool_calls = message
-                    .raw_response
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
-                    .filter(|calls| !calls.is_empty());
-                history.push(llm::LlmMessage {
-                    role: "assistant".into(),
-                    content: message.content.clone(),
-                    tool_calls,
-                    ..Default::default()
-                });
-            }
-            "tool" => history.push(llm::LlmMessage {
-                role: "tool".into(),
-                content: message.content.clone(),
-                tool_call_id: message.raw_response.clone(),
-                ..Default::default()
-            }),
-            _ => continue,
-        }
+    let mut from = 0;
+    if let Some((index, first_kept)) = compact::latest_marker(messages) {
+        history.push(llm::LlmMessage {
+            role: "user".into(),
+            content: messages[index].content.clone(),
+            ..Default::default()
+        });
+        from = first_kept
+            .and_then(|id| messages[..index].iter().position(|message| message.id == id))
+            .unwrap_or(index + 1);
     }
-    history
+    history.extend(messages[from..].iter().filter_map(project_message));
+    history::sanitize(history)
+}
+
+/// One persisted main-agent message as an LLM message (`None` for system
+/// and sub-agent messages).
+fn project_message(message: &RunMessage) -> Option<llm::LlmMessage> {
+    let replayed = matches!(message.role.as_str(), "user" | "assistant" | "tool");
+    (replayed && message.agent_role.is_none()).then(|| to_llm_message(message))
+}
+
+/// A persisted message in LLM form: an assistant's `rawResponse` holds its
+/// tool calls, a tool message's holds the call id it answers.
+fn to_llm_message(message: &RunMessage) -> llm::LlmMessage {
+    let base = llm::LlmMessage {
+        role: message.role.clone(),
+        content: message.content.clone(),
+        source_id: Some(message.id.clone()),
+        ..Default::default()
+    };
+    match message.role.as_str() {
+        "assistant" => llm::LlmMessage {
+            tool_calls: message
+                .raw_response
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+                .filter(|calls| !calls.is_empty()),
+            thinking_blocks: message
+                .thinking_blocks
+                .as_ref()
+                .and_then(|blocks| blocks.as_array().cloned())
+                .filter(|blocks| !blocks.is_empty()),
+            ..base
+        },
+        "tool" => llm::LlmMessage { tool_call_id: message.raw_response.clone(), ..base },
+        _ => base,
+    }
 }
 
 // ----------------------------------------------------------------------

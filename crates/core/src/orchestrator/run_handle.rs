@@ -14,6 +14,7 @@ impl RunHandle {
             cancelled_tx,
             events,
             inbox: tokio::sync::Mutex::new(VecDeque::new()),
+            inbox_closed: AtomicBool::new(false),
             permission: tokio::sync::Mutex::new(PermissionSlot::default()),
             question: tokio::sync::Mutex::new(QuestionSlot::default()),
             allow_run_tools: Mutex::new(Default::default()),
