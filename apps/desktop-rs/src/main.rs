@@ -18,6 +18,7 @@ mod markdown;
 mod prefs;
 mod state_ui;
 mod theme;
+mod unified_diff;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;

@@ -3,6 +3,7 @@
 pub mod appearance;
 pub mod cards;
 pub mod changes;
+pub mod changes_review;
 pub mod chat_header;
 pub mod composer;
 pub mod icons;

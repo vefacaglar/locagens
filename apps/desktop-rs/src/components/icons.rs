@@ -90,6 +90,32 @@ pub fn icon_dots_vertical() -> Element {
     })
 }
 
+pub fn icon_dots_horizontal() -> Element {
+    outline(rsx! {
+        circle { cx: "5", cy: "12", r: "1" }
+        circle { cx: "12", cy: "12", r: "1" }
+        circle { cx: "19", cy: "12", r: "1" }
+    })
+}
+
+/// Document outline (changed-file headers).
+pub fn icon_file() -> Element {
+    outline(rsx! {
+        path { d: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" }
+        path { d: "M14 3v5h5" }
+    })
+}
+
+/// Arrows pulling apart vertically: expand hidden lines.
+pub fn icon_unfold() -> Element {
+    outline(rsx! {
+        path { d: "M12 22v-6" }
+        path { d: "M12 8V2" }
+        path { d: "m15 19-3 3-3-3" }
+        path { d: "m15 5-3-3-3 3" }
+    })
+}
+
 pub fn icon_sidebar() -> Element {
     outline(rsx! { rect { x: "3", y: "3", width: "18", height: "18", rx: "2.5" } path { d: "M9 3v18" } })
 }
