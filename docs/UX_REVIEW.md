@@ -61,6 +61,8 @@ permission "reason and scope" payload from the core.
 
 ### UX-001 · high · M · desktop · Connect a provider inside the app
 
+**Status:** done (desktop). A Models & accounts page with sign-in and inline API-key entry plus test; first-run empty state.
+
 **Current.** With no credentials, Settings opens on the Providers tab, which
 shows one line of text: "No providers configured. Add one via `lcgn auth
 login` or the provider config file (~/.locagens/auth.json …)"
@@ -99,6 +101,8 @@ placeholders and sending produces the toast "Select a provider and model first
 Cursor's model settings.
 
 ### UX-002 · high · M · TUI · `/login` and a first-run screen
+
+**Status:** done (TUI). `/login` with a searchable picker, masked key input, OAuth code/URL view; `/logout`; first-run welcome offers `/login`.
 
 **Current.** Without a model the TUI opens with the notice "No model selected.
 Type /model and pick one from the list." (`tui/mod.rs:142-144`). With no
@@ -139,6 +143,8 @@ static (`tui/ui.rs:61-71`).
 
 ### UX-003 · high · S · both · Remember the last model and effort
 
+**Status:** done (both). `~/.locagens/ui_state.json` (`services::ui_state`) remembers the last model, effort and mode; an interactive `lcgn` opens with the last model unless `--model` is given.
+
 **Current.** The TUI takes its model only from `--model` or `config.toml`
 (`cli/mod.rs:147-170`); `/model` changes the session only
 (`cli/commands.rs:236-249`). A user who picks a model with `/model` has to pick
@@ -156,6 +162,8 @@ the three most recently used models first under a dim `Recent` row.
 **Reference.** pi and Codex both reopen on the last model.
 
 ### UX-004 · med · S · desktop · Opening a folder is the first step, make it one click
+
+**Status:** done (desktop). Add project opens the folder picker; the empty state offers Open folder.
 
 **Current.** With no project selected the empty state still reads "What should
 we build?" and a prompt runs in the core's default project directory without
@@ -187,6 +195,8 @@ with a text field whose placeholder is `C:\path\to\project` on every OS, a
 
 ### UX-005 · high · M · TUI · `/resume` session picker
 
+**Status:** done (TUI). A `/resume` picker (also `lcgn -r` in the TUI).
+
 **Current.** Inside the TUI, `/sessions` prints up to 15 lines of `id  status
 title` as a dim notice and nothing can be done with them
 (`cli/commands.rs:199-215`). Switching means quitting and running `lcgn -r`,
@@ -205,6 +215,8 @@ overlay open. Refuse while a run is generating, with the existing busy notice.
 
 ### UX-006 · high · S · TUI · Expand truncated output and diffs
 
+**Status:** done (TUI). Ctrl+O expands reasoning, tool output and full diffs.
+
 **Current.** A tool cell shows 5 output lines and a diff cell 40, followed by
 "… +N lines" / "… +N more diff lines" (`tui/transcript.rs:11-13,236-245,
 262-274`). There is no key to see the rest. `Ctrl+O` only toggles reasoning
@@ -222,6 +234,8 @@ show 15 lines instead of 5 by default.
 
 ### UX-007 · high · S · TUI · Copying text out
 
+**Status:** done (TUI). `/copy` and `/copy code` (OSC 52 plus the platform clipboard).
+
 **Current.** The TUI enables mouse capture (`tui/mod.rs:54`), so a plain
 click-drag no longer selects text in most terminals, and there is no copy
 command. A user who wants the answer or a command has no obvious way to get
@@ -238,6 +252,8 @@ it.
 **Reference.** Claude Code `/copy`, OpenCode `/copy`.
 
 ### UX-008 · high · M · desktop · Show failures where they happen
+
+**Status:** done (desktop) with a TUI hint after errors. A failure block in the thread, with a link to Models & accounts for auth errors.
 
 **Current.**
 - A failed run is reported only as a toast, "Run failed: {0}"
@@ -280,6 +296,8 @@ tool result inline).
 
 ### UX-009 · high · M · both · "What changed" at the end of a turn, with Undo
 
+**Status:** done (both). A what-changed summary with per-file counts, Review/diff and Undo.
+
 **Current.**
 - Desktop: the turn diff is only in the inspector under Changes
   (`desktop/components/right_panel.rs:476-489`), signalled by a small count on
@@ -321,6 +339,8 @@ tool result inline).
 
 ### UX-010 · med · S · desktop · A status row that says what is happening
 
+**Status:** done (desktop). A status row with elapsed time and "Esc to stop".
+
 **Current.** While a run is active the thread shows a pulsing dot and
 "Working…" (`desktop/components/message_thread.rs:143-148`), with no elapsed
 time and no current action, and the same text while the run waits for a
@@ -334,6 +354,8 @@ and the interrupt key (`tui/ui.rs:169-179`) and has distinct waiting states
 stop" once UX-019 lands. Stop the pulse in the two waiting states.
 
 ### UX-011 · med · M · both · Queued messages are visible and recoverable
+
+**Status:** done (both). Queued messages are visible above the composer and can be withdrawn; undelivered ones return to the composer.
 
 **Current.**
 - Desktop: sending while a run is generating clears the composer and shows
@@ -359,6 +381,8 @@ stop" once UX-019 lands. Stop the pulse in the two waiting states.
 edit), Claude Code.
 
 ### UX-012 · med · S · both · Make the mode visible, and Full Access unmistakable
+
+**Status:** done (both). The mode shows on the composer frame; Full Access is shown in the warn colour.
 
 **Current.** TUI: the mode is one cyan word in the footer (`tui/ui.rs:248`);
 `Shift+Tab` only toggles Plan and Build (`tui/app/input.rs:69-73`); Full
@@ -387,6 +411,8 @@ the raw id, e.g. "Mode set to accept_edits" (FABLE FR-065).
 
 ### UX-013 · med · M · desktop · One searchable model picker
 
+**Status:** done (desktop). A searchable model picker grouped by provider.
+
 **Current.** Provider and model are two separate dropdowns
 (`desktop/components/composer.rs:454-506,508-611`), neither searchable.
 Changing provider silently resets the model to the provider's first one
@@ -408,6 +434,8 @@ High | …`. Last row: "Manage models…" (opens Settings). Shortcut `Ctrl+M`
 ## C. Trust and safety
 
 ### UX-014 · high · M · both · Permission prompts that state reason and scope
+
+**Status:** done (both). Prompts carry `reason`, `grantLabel` and `oneTimeOnly`; Allow once is primary; standing options name what they cover.
 
 **Current.**
 - Desktop: the card headline is assembled as "The agent wants to run
@@ -465,6 +493,8 @@ Codex approval overlay.
 
 ### UX-015 · high · S · TUI · Readable `apply_patch` and network prompts
 
+**Status:** done (TUI). Patch prompts show the files and diff; network prompts name the host.
+
 **Current.** `Approval::from_event` knows the actions command, fetch, move,
 create, edit, delete and mkdir (`tui/overlay.rs:145-175`). The core also sends
 `action: "patch"` with `files` and a ready `diff`
@@ -484,6 +514,8 @@ files)", details are the file list, and the diff is `preview.diff`. For
 
 ### UX-016 · med · S · desktop · Standing permissions readable as sentences
 
+**Status:** done (desktop). Standing grants read as sentences, with Revoke and Undo.
+
 **Current.** Settings → Permissions lists `{tool} {status}` and `{command} ·
 {project_path}` in monospace with a red Delete button
 (`desktop/components/settings/permissions.rs:35-58`). The TUI has no way to
@@ -502,6 +534,8 @@ revoke <n>`.
 ## D. Information design
 
 ### UX-017 · med · S · TUI · Quieter footer, more useful header
+
+**Status:** done (TUI). A quieter footer (model · effort · mode | context · cost); the header shows path and branch.
 
 **Current.** The footer packs `provider/model · think:high · Build ·
 #abcdef12 · 12.3k tok · $0.0123 · 72% context left` on the left and key hints
@@ -528,6 +562,8 @@ appended to the transcript as notices (`cli/commands.rs:140,233`,
 
 ### UX-018 · med · S · TUI · `/help` as an overlay, `?` to open it
 
+**Status:** done (TUI). `?` and `/help` open a two-column help overlay.
+
 **Current.** `/help` prints the command names on one line and three dense
 lines of keys as a dim transcript notice (`tui/app.rs:286-294`,
 `tui/driver.rs:367-369`). It scrolls away and has no descriptions, although
@@ -545,6 +581,8 @@ ends with "? for help".
 ## E. Keyboard and consistency
 
 ### UX-019 · high · M · desktop · Keyboard layer and command palette
+
+**Status:** done (desktop). Keyboard layer, Ctrl+K command palette, shortcuts sheet.
 
 **Current.** The only key handlers in the desktop are Enter in the composer,
 Enter in the terminal tab and Enter in the memory field
@@ -578,6 +616,8 @@ Put the shortcut in each button's tooltip, e.g. "New chat (Ctrl+N)".
 
 ### UX-020 · med · M · desktop · `/` and `@` work from the keyboard
 
+**Status:** done (desktop). `/` and `@` completion at the caret.
+
 **Current.** The placeholder says "Ask anything, @ to mention, / for commands"
 (`desktop/i18n.rs:245`). Typing `/` shows suggestions that can only be
 clicked; Enter sends the half-typed text instead of accepting the highlighted
@@ -593,6 +633,8 @@ project.
 
 ### UX-021 · med · S · desktop · No "CLI only" dead ends
 
+**Status:** partly (desktop). Model, thinking, diff, mcp, skills, resume and usage work on the desktop; `/login`, `/logout`, `/copy` and `/exit` stay terminal-only.
+
 **Current.** `/model`, `/thinking`, `/diff`, `/mcp`, `/skills`, `/sessions`
 and `/usage` are CLI-only in the table (`crates/core/src/commands.rs:49-63`);
 on the desktop they answer "{0} is only available in the lcgn CLI."
@@ -605,6 +647,8 @@ Usage page, `/sessions` opens the palette on chats, `/mcp` and `/skills` open
 their settings tabs. Mark all of them `ALL` in the table.
 
 ### UX-022 · med · S · TUI · Prompt history survives restarts
+
+**Status:** done (TUI). Prompt history is seeded from `history.jsonl`; Ctrl+R searches it.
 
 **Current.** Composer history is in memory only (`tui/composer.rs:18,29,
 222-230`), so `Up` recalls nothing after a restart, although every prompt is
@@ -622,6 +666,8 @@ composer, `Esc` cancels.
 ## F. Visual polish
 
 ### UX-023 · med · S · TUI · A small theme instead of fixed ANSI colours
+
+**Status:** partly (TUI). Dark/light presets (`[tui] theme`, `COLORFGBG`) and `NO_COLOR`; the header badge and syntax colours are not themed.
 
 **Current.** Colours are literals: cyan accents, a black-on-cyan ` lcgn `
 badge, yellow for busy and waiting states, magenta agent tags, and the `DIM`
@@ -643,6 +689,8 @@ band.
 
 ### UX-024 · med · S · desktop · Secondary text contrast and minimum size
 
+**Status:** done (desktop). Brighter tertiary text; readable text is at least 12 px.
+
 **Current.** In the dark theme `--text-3` is `#6f6f79` on `#0e0e10`
 (`desktop/theme.rs:32,48`), a contrast of about 3.9:1, below the 4.5:1 that
 WCAG AA asks for body text. It is used in 54 rules, including 11 px monospace
@@ -655,6 +703,8 @@ and keep 11 px for badges and counters only. The light theme's `#6e6e76` on
 
 ### UX-025 · low · S · desktop · Less repetition in the thread
 
+**Status:** done (desktop). The model label only shows when it changes; tool rows read as verb + target.
+
 **Current.** Every assistant message carries a label with the raw model id
 (`desktop/components/message_thread.rs:179-182`), so a turn with ten tool
 rounds repeats it ten times. User messages have no actions at all
@@ -665,6 +715,8 @@ turn and when it differs from the previous one. Give user bubbles the same
 hover footer with `Copy` and `Reuse` (puts the text in the composer).
 
 ### UX-026 · low · S · desktop · Motion that explains, under a reduced-motion guard
+
+**Status:** done (desktop). Motion runs only under `prefers-reduced-motion: no-preference`.
 
 **Current.** The only animation is the status-dot pulse
 (`desktop/theme.rs:440-445`); cards and messages appear abruptly, and there is
@@ -681,6 +733,8 @@ static status dot.
 
 ### UX-027 · med · M · desktop · Focus and announcements for cards that block the run
 
+**Status:** done (desktop). Live region and focus for blocking cards; radio/checkbox roles.
+
 **Current.** A permission or question card is inserted between the thread and
 the composer (`desktop/main.rs:121-124`). Focus stays where it was, nothing is
 announced, and a keyboard user has to tab through the thread to reach the
@@ -696,6 +750,8 @@ streamed message text. In the question card, options are radio or checkbox
 inputs so the arrow keys work (FABLE FR-066 notes the missing state).
 
 ### UX-028 · low · S · TUI · Reduced motion and a screen-reader path
+
+**Status:** done (TUI). `[tui] animations = false` / `LCGN_REDUCED_MOTION=1`; `--no-tui` documented for screen readers.
 
 **Current.** The spinner and the shimmer redraw the status line about ten
 times a second while a run is active (`tui/ui.rs:122-139,169-176`,

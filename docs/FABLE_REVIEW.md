@@ -512,6 +512,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-034 · high · model output can open arbitrary URI schemes and load remote images in the desktop app *(sub-review, lines re-checked)*
 
+**Status:** fixed. Only http/https/mailto become links (opened in the system browser); remote images are shown as links and never load; the window never navigates away.
+
 - **Location:** `desktop/markdown.rs:87-119` (links and images pass through
   unchanged).
 - **Problem:** raw HTML is escaped, but `[x](file:///…)`, `ms-…:` and UNC
@@ -704,6 +706,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-048 · high · answering a permission or question card can wipe the next queued prompt *(sub-review, lines re-checked)*
 
+**Status:** fixed. Answers carry the prompt id; a card only answers and clears its own prompt.
+
 - **Location:** `desktop/components/cards.rs:11-19` (`decide`), about `:399`
   (`answer_question`); core side `core/api/runs.rs:604-623` (no request id).
 - **Problem:** `decide` sets `pending_permission` to `None` after the await.
@@ -718,6 +722,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-049 · high · the Git and Terminal tabs start a new poll loop on every project switch and never stop the old one *(sub-review, lines re-checked)*
 
+**Status:** fixed. The Git and Terminal poll loops stop when the project changes.
+
 - **Location:** `desktop/components/right_panel.rs:415-447`, `:849-867`.
 - **Problem:** the effect re-runs when the project changes and spawns another
   endless loop; only a `version` bump ends a loop. Old loops keep writing the
@@ -727,6 +733,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   or use a keyed `use_resource`.
 
 ### FR-050 · high · opening a conversation does not switch the selected project *(sub-review, lines re-checked)*
+
+**Status:** fixed. Opening a conversation selects its project.
 
 - **Location:** `desktop/state_ui.rs` `select_run` (about `:356`); the only
   writers of `selected_project` are `state_ui.rs:320`, `sidebar.rs:300`,
@@ -742,6 +750,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-051 · high · the skill editor cannot save an existing skill *(sub-review)*
 
+**Status:** fixed. The skill editor loads and saves the real SKILL.md.
+
 - **Location:** `desktop/components/settings/skills.rs:157`, `:181`;
   `core/services/skills.rs:68-71`.
 - **Problem:** the editor is filled with the parsed body (no frontmatter,
@@ -750,6 +760,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** load the raw `SKILL.md` for editing.
 
 ### FR-052 · medium · the Windows release build opens a console window
+
+**Status:** fixed. Release builds use the Windows subsystem; child processes (git, hooks, MCP, exec pipe, credential helper) start without a console window; a startup error shows a dialog.
 
 - **Location:** `desktop/main.rs:1-22` (no
   `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` anywhere
@@ -763,12 +775,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-053 · low · `default-run` and `build` are inside a metadata table
 
+**Status:** fixed.
+
 - **Location:** `apps/desktop-rs/Cargo.toml:7-11`.
 - **Problem:** both keys follow the `[package.metadata.notes]` header, so
   Cargo reads them as metadata. The build script still runs (auto-detected);
   `default-run` has no effect.
 
 ### FR-054 · medium · a background run that waits for the user gives no signal *(sub-review)*
+
+**Status:** fixed. A background run that waits for the user raises a toast.
 
 - **Location:** `desktop/components/sidebar.rs:442`
   (`status == "generating" || status == "created"`).
@@ -779,12 +795,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-055 · medium · the permission card does not say which agent is asking *(sub-review)*
 
+**Status:** fixed. The card says which agent is asking.
+
 - **Location:** `desktop/components/cards.rs`; the fields exist in
   `core/orchestrator/run_handle.rs:115-116`, and are dropped by
   `pending_permission()` at `:156-164`.
 - **Fix:** show role and name on the card and keep them in the replay payload.
 
 ### FR-056 · medium · `select_run` subscribes after loading, and `run_completed` can overwrite the active run *(sub-review)*
+
+**Status:** fixed. Subscribe before load; `run_completed` checks the active run.
 
 - **Location:** `desktop/state_ui.rs:371-400`, `:582-593`.
 - Events between `list_messages` and `subscribe_run_events` are lost, so a
@@ -795,6 +815,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-057 · medium · provider, model, effort and mode are neither restored on start nor taken from the opened run *(sub-review)*
 
+**Status:** fixed. The last model, effort and mode are restored (`ui_state.json`, shared with the TUI); an opened run brings its own.
+
 - **Location:** `desktop/state_ui.rs` (`use_ui_store` defaults),
   `desktop/components/composer.rs:823-835`.
 - **Problem:** after a restart the first provider and Build mode are selected
@@ -802,6 +824,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   model changes silently.
 
 ### FR-058 · medium · settings and inspector wiring gaps *(sub-review)*
+
+**Status:** fixed.
 
 - `desktop/components/settings/mod.rs:29`: `use_signal(|| initial_tab)` is
   set once, so "Customizations" in the sidebar does nothing while Settings is
@@ -822,12 +846,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-059 · medium · the Git tab shows a changed file as fully removed and fully added *(sub-review)*
 
+**Status:** fixed. The Git tab shows the real per-file diff.
+
 - **Location:** `desktop/components/right_panel.rs:460-466` (`pseudo_diff`).
 - **Problem:** a one-line change in a 2 000-line file renders 4 000 coloured
   lines, with no line cap.
 - **Fix:** use `git diff` output, which the core already produces.
 
 ### FR-060 · medium · copy buttons may do nothing on Windows (needs-confirmation) *(sub-review)*
+
+**Status:** fixed. Copy uses the native Windows clipboard.
 
 - **Location:** `desktop/markdown.rs` (`COPY_SCRIPT`),
   `desktop/components/message_thread.rs` about `:277`.
@@ -838,6 +866,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-061 · medium · layout at small window sizes *(sub-review)*
 
+**Status:** fixed. Minimum window size; side columns shrink; cards scroll.
+
 - **Location:** `desktop/main.rs:28-32` (no `with_min_inner_size`),
   `desktop/theme.rs:714`.
 - The sidebar (264 px) and inspector (380 px) are fixed, so a narrow window
@@ -847,6 +877,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-062 · medium · toasts overwrite each other and cut long text *(sub-review)*
 
+**Status:** fixed. Toasts stack, wrap and can be closed.
+
 - **Location:** `desktop/state_ui.rs:627`, `.toast` in `desktop/theme.rs`.
 - Each toast starts its own 4-second timer that clears whatever is shown, so
   a second toast can vanish after one second.
@@ -854,6 +886,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   the `/help` list.
 
 ### FR-063 · medium · streaming re-renders the whole thread on every event *(sub-review, needs-confirmation on cost)*
+
+**Status:** partly fixed. Rendered Markdown is cached; the thread still re-renders on each event.
 
 - **Location:** `desktop/components/message_thread.rs:113`,
   `desktop/components/review.rs` (`AssistantBody`).
@@ -863,12 +897,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-064 · low · preferences file handling *(sub-review)*
 
+**Status:** fixed. Preferences load per field and are written atomically; a broken file is kept as `.json.broken`.
+
 - **Location:** `desktop/prefs.rs:108-113`, `desktop/components/appearance.rs`.
 - A `settings.json` that fails to parse is replaced; one unknown value resets
   every preference; the write is not atomic; the font inputs save and rebuild
   the stylesheet on every keystroke.
 
 ### FR-065 · low · i18n and raw-id leftovers *(sub-review)*
+
+**Status:** fixed.
 
 - `desktop/i18n.rs`: `header.tokens` is "tok" in Turkish too ("tok" means
   "full").
@@ -886,6 +924,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   "patch is not correct" as passing.
 
 ### FR-066 · low · accessibility and small polish *(sub-review)*
+
+**Status:** fixed.
 
 - Row actions are `display:none` or `opacity:0` until hover, so keyboard users
   cannot reach or see them.
