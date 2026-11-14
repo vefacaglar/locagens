@@ -48,7 +48,8 @@ impl AgentLoop {
     /// `Stop` (+ the `notify` command). Returns `true` when a hook blocked
     /// the stop: its reason was fed back as a user message and the loop
     /// should run another round.
-    pub(super) async fn stop_hook_continues(&mut self, final_text: &str, attempts: &mut u32) -> bool {
+    pub(super) async fn stop_hook_continues(&mut self, final_message: &crate::db::RunMessage, attempts: &mut u32) -> bool {
+        let final_text = final_message.content.as_str();
         if self.fires_hooks() {
             let outcome = hooks::fire(
                 "Stop",
@@ -66,18 +67,10 @@ impl AgentLoop {
                 *attempts += 1;
                 let reason = outcome.reason.unwrap_or_else(|| "A Stop hook asked you to continue.".to_string());
                 let feedback = format!("Stop hook feedback: {reason}");
-                self.history.push(super::llm::LlmMessage {
-                    role: "assistant".into(),
-                    content: final_text.to_string(),
-                    ..Default::default()
-                });
+                self.history.push(super::to_llm_message(final_message));
                 let message = self.new_message("user", &feedback);
                 self.persist_and_emit(&message);
-                self.history.push(super::llm::LlmMessage {
-                    role: "user".into(),
-                    content: feedback,
-                    ..Default::default()
-                });
+                self.history.push(super::to_llm_message(&message));
                 return true;
             }
         }

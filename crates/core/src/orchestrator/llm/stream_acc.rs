@@ -16,7 +16,13 @@ pub struct StreamAcc {
     /// Argument length already reported per tool slot (`take_tool_progress`).
     reported_tool_args: std::collections::BTreeMap<usize, usize>,
     pub usage: Usage,
+    /// A terminal event arrived (`finish_reason`, `message_stop`,
+    /// `response.completed` / `.incomplete`): the answer is complete.
     pub finished: bool,
+    /// Why generation stopped (`stop`, `length`, `max_tokens`, ...).
+    pub stop_reason: Option<String>,
+    /// Anthropic `thinking` / `redacted_thinking` blocks by content index.
+    thinking: std::collections::BTreeMap<usize, Value>,
 }
 
 #[derive(Default)]
@@ -106,7 +112,8 @@ impl StreamAcc {
                 }
             }
         }
-        if choice.get("finish_reason").and_then(Value::as_str).is_some() {
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.stop_reason = Some(reason.to_string());
             self.finished = true;
         }
     }
@@ -116,21 +123,19 @@ impl StreamAcc {
         match event.get("type").and_then(Value::as_str).unwrap_or_default() {
             "message_start" => {
                 if let Some(usage) = event.pointer("/message/usage") {
-                    self.usage.input_tokens = usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
-                    self.usage.cache_read_tokens = usage.get("cache_read_input_tokens").and_then(Value::as_i64).unwrap_or(0);
-                    self.usage.cache_write_tokens = usage.get("cache_creation_input_tokens").and_then(Value::as_i64).unwrap_or(0);
+                    let count = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+                    self.usage.cache_read_tokens = count("cache_read_input_tokens");
+                    self.usage.cache_write_tokens = count("cache_creation_input_tokens");
+                    // Anthropic's `input_tokens` leaves the cached part out;
+                    // `Usage.input_tokens` is the whole prompt everywhere.
+                    self.usage.input_tokens =
+                        count("input_tokens") + self.usage.cache_read_tokens + self.usage.cache_write_tokens;
                 }
             }
             "content_block_start" => {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 if let Some(block) = event.get("content_block") {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        self.tool_acc.insert(index, ToolAcc {
-                            id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            args: String::new(),
-                        });
-                    }
+                    self.start_anthropic_block(index, block);
                 }
             }
             "content_block_delta" => {
@@ -149,7 +154,13 @@ impl StreamAcc {
                             if !text.is_empty() {
                                 self.reasoning.push_str(text);
                                 self.deltas.push((String::new(), text.to_string()));
+                                self.extend_thinking(event, "thinking", text);
                             }
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            self.extend_thinking(event, "signature", signature);
                         }
                     }
                     "input_json_delta" => {
@@ -164,8 +175,11 @@ impl StreamAcc {
                 }
             }
             "message_delta" => {
-                if let Some(usage) = event.get("usage") {
-                    self.usage.output_tokens = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+                if let Some(output) = event.pointer("/usage/output_tokens").and_then(Value::as_i64) {
+                    self.usage.output_tokens = output;
+                }
+                if let Some(reason) = event.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.stop_reason = Some(reason.to_string());
                 }
             }
             "message_stop" => {
@@ -252,7 +266,10 @@ impl StreamAcc {
                     }
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" => {
+                if let Some(reason) = event.pointer("/response/incomplete_details/reason").and_then(Value::as_str) {
+                    self.stop_reason = Some(reason.to_string());
+                }
                 if let Some(usage) = event.pointer("/response/usage").filter(|u| !u.is_null()) {
                     self.usage = Usage {
                         input_tokens: usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0),
@@ -269,6 +286,60 @@ impl StreamAcc {
             }
             _ => {}
         }
+    }
+
+    /// `content_block_start`: tool calls and thinking blocks get a slot.
+    fn start_anthropic_block(&mut self, index: usize, block: &Value) {
+        match block.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "tool_use" => {
+                self.tool_acc.insert(index, ToolAcc {
+                    id: block.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    name: block.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    args: String::new(),
+                });
+            }
+            "thinking" => {
+                let text = block.get("thinking").and_then(Value::as_str).unwrap_or_default();
+                if !text.is_empty() {
+                    self.reasoning.push_str(text);
+                    self.deltas.push((String::new(), text.to_string()));
+                }
+                let signature = block.get("signature").and_then(Value::as_str).unwrap_or_default();
+                self.thinking.insert(index, json!({ "type": "thinking", "thinking": text, "signature": signature }));
+            }
+            "redacted_thinking" => {
+                self.thinking.insert(index, block.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Appends `text` to field `key` of the thinking block an event targets.
+    fn extend_thinking(&mut self, event: &Value, key: &str, text: &str) {
+        let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if let Some(Value::Object(block)) = self.thinking.get_mut(&index) {
+            let current = block.get(key).and_then(Value::as_str).unwrap_or_default();
+            let joined = format!("{current}{text}");
+            block.insert(key.to_string(), json!(joined));
+        }
+    }
+
+    /// Thinking blocks to replay with the assistant message. A `thinking`
+    /// block without a signature cannot be replayed and is left out.
+    pub fn thinking_blocks(&self) -> Vec<Value> {
+        self.thinking
+            .values()
+            .filter(|block| {
+                block.get("type").and_then(Value::as_str) == Some("redacted_thinking")
+                    || block.get("signature").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the output hit the model's output-token limit.
+    pub fn truncated(&self) -> bool {
+        matches!(self.stop_reason.as_deref(), Some("length" | "max_tokens" | "max_output_tokens"))
     }
 
     /// Tool-accumulator key for a Responses event: the `output_index` field

@@ -16,11 +16,19 @@ pub struct LlmMessage {
     pub tool_call_id: Option<String>,
     /// Tool calls requested by an assistant message.
     pub tool_calls: Option<Vec<Value>>,
+    /// Anthropic `thinking` / `redacted_thinking` blocks of an assistant
+    /// message, replayed unchanged (signature included).
+    pub thinking_blocks: Option<Vec<Value>>,
+    /// Id of the persisted `RunMessage` this message came from (compaction
+    /// markers point at the first message they kept).
+    pub source_id: Option<String>,
 }
 
 /// Token accounting for one completion call.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Usage {
+    /// The whole prompt, cached tokens included, for every protocol
+    /// (Anthropic's uncached count is normalized at parse time).
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
@@ -44,6 +52,10 @@ pub struct StreamOutcome {
     /// Normalized tool calls: `[{ id, function: { name, arguments(str) } }]`.
     pub tool_calls: Vec<Value>,
     pub usage: Option<Usage>,
+    /// Anthropic thinking blocks (with signatures) to replay.
+    pub thinking_blocks: Vec<Value>,
+    /// Generation stopped at the output-token limit.
+    pub truncated: bool,
 }
 
 /// Resolved endpoint for one loop iteration.

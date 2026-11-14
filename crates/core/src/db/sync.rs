@@ -84,16 +84,10 @@ impl Db {
 // JSON primitives
 // ----------------------------------------------------------------------
 
-/// Atomic text write: write a `.tmp` sibling, then rename over the target.
+/// Atomic text write: a uniquely named, fsynced temp sibling renamed over
+/// the target, so two writers never share a temp file (FR-021).
 pub(super) fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    locagens_config::private_file::write_private_atomic(path, text.as_bytes())
 }
 
 /// Atomic JSON write so readers never observe a half-written file.
@@ -115,6 +109,32 @@ pub(super) fn read_json_or<T: for<'de> Deserialize<'de> + Default>(path: &Path) 
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+/// Like [`read_json_or`] for a shared file the next mutation rewrites: a
+/// file that does not parse (a hand edit with a typo) is first copied to
+/// `<name>.corrupt`, so rewriting it never loses its content (FR-021).
+pub(super) fn read_shared_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
+    let Ok(raw) = std::fs::read_to_string(path) else { return T::default() };
+    match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            let mut backup = path.as_os_str().to_owned();
+            backup.push(".corrupt");
+            let backup = PathBuf::from(backup);
+            if std::fs::read_to_string(&backup).ok().as_deref() != Some(raw.as_str()) {
+                if let Err(copy_err) = std::fs::write(&backup, &raw) {
+                    tracing::error!("[Database] Cannot back up {}: {copy_err}", path.display());
+                }
+            }
+            tracing::error!(
+                "[Database] {} is not valid JSON ({err}); it was copied to {} and is read as empty",
+                path.display(),
+                backup.display()
+            );
+            T::default()
+        }
+    }
 }
 
 pub(super) fn read_jsonl_or<T: for<'de> Deserialize<'de>>(path: &Path) -> Vec<T> {
@@ -147,8 +167,8 @@ pub(super) fn reload_shared_files(root: &Path, state: &mut StorageState) {
     state.projects_sig = file_sig(&root.join("projects.json"));
     state.permissions_sig = file_sig(&root.join("permissions.json"));
     state.memories_sig = memories_signature(root);
-    state.projects = read_json_or::<Vec<Project>>(&root.join("projects.json"));
-    state.permissions = read_json_or::<Vec<PermissionRule>>(&root.join("permissions.json"));
+    state.projects = read_shared_json::<Vec<Project>>(&root.join("projects.json"));
+    state.permissions = read_shared_json::<Vec<PermissionRule>>(&root.join("permissions.json"));
     let memories = load_memories(root);
     state.memory_files = memories
         .iter()

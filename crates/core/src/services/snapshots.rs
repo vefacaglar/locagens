@@ -43,6 +43,11 @@ pub struct GitSnapshot {
     /// or a later turn).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Paths (or directories) the turn's file tools changed, when the turn
+    /// ran no command that could change anything else. Undo then leaves
+    /// other changed paths (the user's edits during the turn) alone (FR-008).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_paths: Option<Vec<String>>,
 }
 
 /// `run_id` suffix of the backup snapshot an undo takes of the state it
@@ -196,6 +201,7 @@ pub async fn create_git_snapshot_for_path(
         after_head_sha: None,
         restored: Vec::new(),
         skipped: Vec::new(),
+        agent_paths: None,
     };
 
     let _guard = lock_store();
@@ -406,6 +412,24 @@ pub async fn record_turn_end_for_path(project_path: &Path, snapshot_id: &str) ->
     persist_snapshots(project_path, &snapshots)
 }
 
+/// Records which paths the turn's file tools changed (relative, `/`
+/// separated) for snapshot `snapshot_id` (FR-008).
+pub fn record_agent_paths(project_path: &Path, snapshot_id: &str, paths: Vec<String>) -> Result<(), String> {
+    let _guard = lock_store();
+    let mut snapshots = load_snapshots(project_path);
+    if let Some(snapshot) = snapshots.iter_mut().find(|snapshot| snapshot.id == snapshot_id) {
+        snapshot.agent_paths = Some(paths);
+    }
+    persist_snapshots(project_path, &snapshots)
+}
+
+/// Whether `path` is one of `agent_paths` or lies inside one of them.
+fn changed_by_agent(agent_paths: &[String], path: &str) -> bool {
+    agent_paths
+        .iter()
+        .any(|agent| path == agent || path.strip_prefix(agent.as_str()).is_some_and(|rest| rest.starts_with('/')))
+}
+
 /// `mode sha path` lines of an index (the real one, or a copy), ignoring
 /// the stat data git refreshes on every `git status`.
 async fn index_entries(project_path: &Path, index: Option<&Path>) -> Option<Vec<u8>> {
@@ -518,6 +542,13 @@ pub async fn undo_last_turn_for_path(
             paths
         }
     };
+    // A path the turn's tools never wrote changed during the turn by someone
+    // else (the user's editor, another run): leave it alone (FR-008).
+    let (touched, foreign): (Vec<String>, Vec<String>) = match (&after, snapshot.agent_paths.as_deref()) {
+        (Some(_), Some(agent_paths)) => touched.into_iter().partition(|path| changed_by_agent(agent_paths, path)),
+        _ => (touched, Vec::new()),
+    };
+    snapshot.skipped.extend(foreign);
     let existing: Vec<String> = touched.iter().filter(|path| is_regular_file(&project_path.join(path))).cloned().collect();
     let existing_shas = hash_files(project_path, &existing, false).await?;
     let current: std::collections::HashMap<&str, &str> =
@@ -793,6 +824,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// FR-008: a file the user saved during the turn, which the turn's tools
+    /// never wrote, is left alone by undo.
+    #[tokio::test]
+    async fn undo_leaves_files_the_agent_did_not_write_alone() {
+        let root = std::env::temp_dir().join(format!("locagens-snap-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"), "typo\n").unwrap();
+        std::fs::write(root.join("src/a.rs"), "a base\n").unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-q", "-m", "init"]);
+
+        let snapshot = create_git_snapshot_for_path(&root, "run-u").await.unwrap().expect("snapshot");
+        std::fs::write(root.join("src/a.rs"), "a by the agent\n").unwrap();
+        std::fs::create_dir_all(root.join("src/gen")).unwrap();
+        std::fs::write(root.join("src/gen/out.rs"), "generated\n").unwrap();
+        std::fs::write(root.join("README.md"), "fixed by the user\n").unwrap();
+        record_turn_end_for_path(&root, &snapshot.id).await.unwrap();
+        record_agent_paths(&root, &snapshot.id, vec!["src/a.rs".into(), "src/gen".into()]).unwrap();
+
+        let undone = undo_last_turn_for_path(&root, Some("run-u")).await.unwrap();
+        let read = |name: &str| std::fs::read_to_string(root.join(name)).unwrap();
+        assert_eq!(read("src/a.rs"), "a base\n");
+        assert!(!root.join("src/gen/out.rs").exists());
+        assert_eq!(read("README.md"), "fixed by the user\n", "the user's edit survives");
+        assert_eq!(undone.skipped, vec!["README.md".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn legacy_in_project_snapshot_store_moves_under_the_locagens_home() {
         let root = std::env::temp_dir().join(format!("locagens-snap-migrate-{}", uuid::Uuid::new_v4()));
@@ -813,6 +873,7 @@ mod tests {
             after_head_sha: None,
             restored: vec![],
             skipped: vec![],
+            agent_paths: None,
         };
         std::fs::write(
             legacy.join("snapshots.json"),

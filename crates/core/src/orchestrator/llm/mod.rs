@@ -1,8 +1,9 @@
 //! Pure Rust streaming LLM client.
 //!
-//! Talks directly to the provider endpoints resolved from `pi`'s
-//! configuration (`~/.pi/agent/auth.json` for credentials, `models.json` /
-//! `models-store.json` for `baseUrl` + API protocol) via `reqwest`:
+//! Talks directly to the provider endpoints resolved by the provider engine
+//! (`locagens-config`: credentials from the agent-dir chain's `auth.json` /
+//! env vars, `baseUrl` + API protocol from built-ins, `models.json`,
+//! `config.toml` and the model stores) via `reqwest`:
 //!
 //! - **OpenAI-compatible** (`{baseUrl}/chat/completions`, `stream: true`):
 //!   parses `data: {...}` SSE chunks (`choices[0].delta.content`,
@@ -156,29 +157,12 @@ async fn consume_response(
             acc.feed_responses(&json!({ "type": "response.completed", "response": body }));
             return finish(acc);
         }
-        acc.feed_openai(&non_streaming_openai(&body));
-        let blocks = body.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
-        for (i, block) in blocks.iter().enumerate() {
-            acc.feed_anthropic(&json!({
-                "type": "content_block_start", "index": i as u64,
-                "content_block": normalize_anthropic_block(block)
-            }));
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        acc.feed_anthropic(&json!({ "type": "content_block_delta", "index": i as u64, "delta": { "type": "text_delta", "text": text } }));
-                    }
-                }
-                Some("thinking") => {
-                    if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                        acc.feed_anthropic(&json!({ "type": "content_block_delta", "index": i as u64, "delta": { "type": "thinking_delta", "thinking": text } }));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(usage) = body.get("usage") {
-            acc.feed_anthropic(&json!({ "type": "message_delta", "usage": usage }));
+        // Only an Anthropic body is replayed as Anthropic events: feeding an
+        // OpenAI `usage` as `message_delta` zeroed the output count (FR-015).
+        if is_anthropic || body.get("type").and_then(Value::as_str) == Some("message") {
+            replay_anthropic_body(&mut acc, &body);
+        } else {
+            acc.feed_openai(&non_streaming_openai(&body));
         }
         return finish(acc);
     }
@@ -226,16 +210,16 @@ async fn consume_response(
             let Ok(event) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            if event.get("type").and_then(Value::as_str) == Some("error") {
+                let message = event
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stream error");
+                anyhow::bail!("Provider stream error: {message}");
+            }
             if is_anthropic {
                 acc.feed_anthropic(&event);
             } else {
-                if event.get("type").and_then(Value::as_str) == Some("error") {
-                    let message = event
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("stream error");
-                    anyhow::bail!("Provider stream error: {message}");
-                }
                 acc.feed_openai(&event);
             }
             for (content_delta, reasoning_delta) in acc.deltas.drain(..) {
@@ -250,9 +234,42 @@ async fn consume_response(
         }
     }
 
+    // A connection that closes without a terminal event is a truncated
+    // answer, not a finished one (FR-012).
+    if !acc.finished {
+        anyhow::bail!("Provider stream ended before the response was complete");
+    }
     finish(acc)
 }
 
+/// Replays a non-streaming Anthropic `message` body as stream events.
+fn replay_anthropic_body(acc: &mut StreamAcc, body: &Value) {
+    let usage = body.get("usage").cloned().unwrap_or(Value::Null);
+    acc.feed_anthropic(&json!({ "type": "message_start", "message": { "usage": usage } }));
+    let blocks = body.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+    for (i, block) in blocks.iter().enumerate() {
+        let index = i as u64;
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or_default();
+        let start = if kind == "text" { json!({ "type": "text" }) } else { block.clone() };
+        acc.feed_anthropic(&json!({ "type": "content_block_start", "index": index, "content_block": start }));
+        let delta = match kind {
+            "text" => block.get("text").map(|text| json!({ "type": "text_delta", "text": text })),
+            "tool_use" => block
+                .get("input")
+                .map(|input| json!({ "type": "input_json_delta", "partial_json": input.to_string() })),
+            _ => None,
+        };
+        if let Some(delta) = delta {
+            acc.feed_anthropic(&json!({ "type": "content_block_delta", "index": index, "delta": delta }));
+        }
+    }
+    acc.feed_anthropic(&json!({
+        "type": "message_delta",
+        "delta": { "stop_reason": body.get("stop_reason").cloned().unwrap_or(Value::Null) },
+        "usage": usage,
+    }));
+    acc.feed_anthropic(&json!({ "type": "message_stop" }));
+}
 
 fn finish(acc: StreamAcc) -> Result<StreamOutcome> {
     Ok(StreamOutcome {
@@ -260,6 +277,8 @@ fn finish(acc: StreamAcc) -> Result<StreamOutcome> {
         reasoning: acc.reasoning.clone(),
         tool_calls: acc.tool_calls(),
         usage: if acc.usage.is_empty() { None } else { Some(acc.usage) },
+        thinking_blocks: acc.thinking_blocks(),
+        truncated: acc.truncated(),
     })
 }
 
@@ -309,11 +328,13 @@ mod openai_responses;
 mod sse;
 mod stream_acc;
 #[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
 mod tests;
 mod types;
 
 pub use self::http::shared_http_client;
-pub use self::openai_responses::stream_openai_responses;
+pub use self::openai_responses::{stream_openai_responses, tool_image_text};
 pub use self::sse::{SseLineBuffer, STREAM_IDLE_TIMEOUT};
 pub use self::stream_acc::{StreamAcc, ToolArgsProgress};
 pub use self::types::*;

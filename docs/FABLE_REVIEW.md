@@ -33,6 +33,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-001 · high · a failed or cancelled round leaves an empty assistant message that breaks every later turn (reproduced)
 
+**Status:** fixed. `orchestrator/history.rs` `sanitize` drops empty assistant messages in `seed_history` and before every request.
+
 - **Location:** `core/orchestrator/agent_loop.rs:95-96` (placeholder persisted
   before the request), `core/orchestrator/mod.rs:304-316` (`seed_history`),
   `core/orchestrator/llm/openai_chat.rs:454-476`, `llm/anthropic.rs:355-357`.
@@ -53,6 +55,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-002 · high · cancelling or failing between tool calls leaves tool calls without results in the replayed history
 
+**Status:** fixed. Unanswered tool calls get an "interrupted" result; orphan and duplicate results are dropped.
+
 - **Location:** `core/orchestrator/agent_loop.rs:180-190` (assistant message
   with `raw_response` tool calls persisted), `:239-279` (results persisted one
   by one, `check_cancel` between them), `core/orchestrator/mod.rs:291-327`.
@@ -68,6 +72,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-003 · high · auto-compaction can cut between a tool call and its result
 
+**Status:** fixed. The compaction cut never separates a call from its results.
+
 - **Location:** `core/orchestrator/compact.rs:86-90` (`split_history`),
   `:147-157` (`apply_compaction`).
 - **Problem:** the tail is always the last 8 messages. When message
@@ -81,6 +87,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-004 · high · compaction summarizes only the oldest 80 000 characters and silently drops the rest
 
+**Status:** fixed. All older history is summarized in chunks; only one oversized message is shortened, with a marker.
+
 - **Location:** `core/orchestrator/compact.rs:41`, `:99-123`.
 - **Problem:** the transcript sent to the summarizer is cut at
   `COMPACT_USER_MESSAGE_MAX_TOKENS * 4` characters from the start. Compaction
@@ -93,6 +101,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   summarize in chunks.
 
 ### FR-005 · medium · the compaction threshold ignores the model's context window, and compaction is never persisted
+
+**Status:** fixed. The threshold uses the catalog context window (minus prompt and tools); compaction is persisted as a marker that `seed_history` replays; sub-agents compact too.
 
 - **Location:** `core/orchestrator/compact.rs:38`, `:74-78`,
   `crates/config/src/config_toml.rs:398-405`,
@@ -110,6 +120,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   marker in the rollout that `seed_history` honours, and compact sub-agents.
 
 ### FR-006 · high · the turn snapshot deadlocks on large repositories, so the run never ends (reproduced)
+
+**Status:** fixed. `git_bytes` writes stdin from a separate task while reading stdout; regression test with a ~3 MB path list under a timeout.
 
 - **Location:** `core/services/git.rs:58-62` (`git_bytes` writes all of stdin,
   then reads stdout), `core/services/snapshots.rs:217-232` (`hash_files`),
@@ -131,6 +143,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-007 · medium · the snapshot hashes the whole worktree twice per turn
 
+**Status:** fixed. Snapshots keep a `hashcache.json` (size + mtime → blob) and only re-hash changed files.
+
 - **Location:** `core/services/snapshots.rs:145-197`, `:273-290`.
 - **Problem:** every Build or Full Access turn runs `hash-object -w` over every
   non-ignored file before and after the turn. Measured on a 4 000-file
@@ -142,6 +156,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   index, which reuses the stat cache.
 
 ### FR-008 · medium · undo reverts edits the user made while the turn was running
+
+**Status:** fixed. Undo only reverts paths the agent's file tools changed this turn (a shell or MCP call falls back to the whole-tree diff); other changes are listed as skipped.
 
 - **Location:** `core/services/snapshots.rs:379-390`, `:407-431`.
 - **Problem:** "paths the turn changed" is the difference between the pre-turn
@@ -158,6 +174,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-009 · low · undo and snapshot gaps
 
+**Status:** partly fixed. `snapshots.json` updates are serialized in-process, symlinks are excluded, and undo refuses while the run is live. A project in a subfolder of a repo still gets no snapshot.
+
 - **Location:** `core/services/snapshots.rs:149`, `:208`, `:193-195`,
   `core/api/projects.rs:570-578`.
 - `project_path.join(".git").exists()` means a project that is a subfolder of
@@ -169,6 +187,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - `undo_last_turn` does not refuse while the run is still generating.
 
 ### FR-010 · high · a message queued during the last round is silently lost on the desktop, and sub-agents can consume queued messages
+
+**Status:** fixed in core. Only the main agent drains the inbox; a message queued during the final answer starts another round; undelivered messages are emitted as `queued_messages_undelivered`.
 
 - **Location:** `core/orchestrator/agent_loop.rs:223-229` (returns before the
   inbox is drained), `:281-284` (drain runs in every `AgentLoop`, sub-agents
@@ -186,6 +206,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-011 · medium · streamed text is not persisted when a round is cancelled or fails
 
+**Status:** fixed. Streamed text is saved when a round is cancelled or fails.
+
 - **Location:** `core/orchestrator/agent_loop.rs:157-169`,
   `core/db/messages.rs:74-135`, `core/db/sync.rs:19-28`.
 - **Problem:** `update_message_full` runs only on success. On cancel or error
@@ -196,6 +218,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** persist the partial content on the cancel and error paths.
 
 ### FR-012 · medium · a provider stream that ends early or reports an error counts as a finished answer
+
+**Status:** fixed. A stream without a terminal event, or an Anthropic `error` event, is an error; truncation is reported.
 
 - **Location:** `core/orchestrator/llm/mod.rs:229-240`, `:253`,
   `llm/stream_acc.rs:109-111`, `:166-175`.
@@ -216,6 +240,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-013 · high · Anthropic with a reasoning effort breaks on the first tool call (needs-confirmation)
 
+**Status:** fixed. Thinking blocks are captured with signatures, persisted and replayed; Claude 4.6+ models get adaptive thinking. Not run against the live API.
+
 - **Location:** `core/orchestrator/llm/anthropic.rs:336-359`, `:415-424`,
   `llm/stream_acc.rs:147-154`.
 - **Problem:** with an effort set, the request enables extended thinking. The
@@ -230,6 +256,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-014 · medium · no prompt caching on the Anthropic path, and cached tokens are double-counted on the OpenAI path
 
+**Status:** fixed. Anthropic cache breakpoints; input tokens normalized so cached tokens are not double-counted.
+
 - **Location:** `core/orchestrator/llm/anthropic.rs:325-427`,
   `core/orchestrator/drive.rs:259-263`, `llm/stream_acc.rs:44-56`.
 - The Anthropic body never sets `cache_control`, so every round of a long tool
@@ -242,6 +270,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-015 · low · the non-streaming fallback zeroes the output token count (reproduced)
 
+**Status:** fixed. The non-streaming fallback keeps output tokens and `tool_use` input.
+
 - **Location:** `core/orchestrator/llm/mod.rs:180-182`.
 - **Problem:** after `feed_openai` has read `completion_tokens`, the same
   `usage` object is fed to `feed_anthropic` as a `message_delta`, which sets
@@ -253,6 +283,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-016 · medium · model-supplied question items can panic the drive task
 
+**Status:** fixed. Question items are normalized; non-objects are skipped.
+
 - **Location:** `core/orchestrator/interactive.rs:194-195`
   (`question.as_object_mut().unwrap()`).
 - **Problem:** `request_user_input` with `questions: ["Proceed?"]` (strings
@@ -261,6 +293,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** skip or wrap non-object items.
 
 ### FR-017 · medium · `continue_run` uses a 120-second staleness guess instead of the run's owner lock
+
+**Status:** fixed. `continue_run` uses the owner lock instead of a staleness guess.
 
 - **Location:** `core/api/runs.rs:160-170`, `:423-430`; the exact probe exists
   at `core/db/locks.rs:79-91` (`run_owned_by_live_process`).
@@ -272,6 +306,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-018 · low · `continue_run` can leave a claimed handle that never finishes
 
+**Status:** fixed. The mode is validated before a drive is prepared.
+
 - **Location:** `core/api/runs.rs:432-438`.
 - **Problem:** `prepare_drive` inserts a claimed handle, then
   `effective_mode(...)?` can still return an error. No drive is spawned, so
@@ -280,6 +316,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** validate the mode before `prepare_drive`.
 
 ### FR-019 · low · `ask_user_question` announces the question before it can be answered
+
+**Status:** fixed. The question slot is filled before `question_requested` is emitted.
 
 - **Location:** `core/orchestrator/interactive.rs:63-75`.
 - **Problem:** `question_requested` is emitted before the slot holds the
@@ -290,6 +328,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-020 · low · round budget and argument handling details
 
+**Status:** fixed. The round limit fails the run with a notice; invalid JSON arguments get an explanatory result; hook-rewritten input is what is stored.
+
 - `core/orchestrator/agent_loop.rs:302-304`: after 40 rounds the run ends as
   `done` with the last intermediate text and no notice that it was cut off.
 - `agent_loop.rs:244`: unparseable tool arguments become `{}` without telling
@@ -299,6 +339,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-021 · low · shared JSON stores reset to empty on a parse error
 
+**Status:** fixed. An unparseable store file is backed up as `<name>.corrupt` before it is rewritten.
+
 - **Location:** `core/db/sync.rs:113-118`, `:150-151`, `:88-97`.
 - **Problem:** `projects.json` and `permissions.json` that fail to parse (a
   hand edit with a typo) load as empty lists, and the next mutation writes the
@@ -307,6 +349,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   use `write_private_atomic`.
 
 ### FR-022 · low · exec sessions of a finished run are never cleaned up at exit (needs-confirmation)
+
+**Status:** fixed in core (`api::runs::shutdown`); frontends call it at exit.
 
 - **Location:** `core/orchestrator/drive.rs:133-136`,
   `crates/execpolicy/src/processes.rs:585` (`kill_on_drop(false)`).
@@ -320,6 +364,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-023 · medium · `read_file` cannot reach anything past the first 120 KB
 
+**Status:** fixed. `read_file` takes `offset`/`limit`, with a 32 MiB size guard and a continuation hint.
+
 - **Location:** `core/orchestrator/tools.rs:498-522`.
 - **Problem:** the file is cut at 120 000 bytes before `start_line` /
   `end_line` are applied, and the result is cut again at 24 000 characters.
@@ -330,6 +376,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-024 · medium · `edit_file` does not check that `old_text` is unique
 
+**Status:** fixed. A non-unique `old_text` is refused with the match count; `replace_all` replaces every match.
+
 - **Location:** `core/orchestrator/tools.rs:543-549`.
 - **Problem:** the description says "must match exactly and be unique". The
   code replaces the first match, so an ambiguous snippet edits the wrong place
@@ -337,6 +385,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** fail when `content.matches(old_text).count() > 1`.
 
 ### FR-025 · low · `write_file` and friends accept missing required arguments
+
+**Status:** fixed. A missing `content` / `new_text` is rejected.
 
 - **Location:** `core/orchestrator/tools.rs:528` (`unwrap_or("")`).
 - **Problem:** a call with a `path` but no `content` truncates the file to
@@ -346,6 +396,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-026 · low · `search_files` details
 
+**Status:** fixed except `.gitignore` support.
+
 - **Location:** `core/orchestrator/tools.rs:606-694`.
 - `*.rs` matches with `ends_with("rs")`, so `users` and `foo.tsrs` match.
 - Every directory starting with a dot is skipped (`.github`, `.config`); the
@@ -354,6 +406,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - `.gitignore` is not honoured.
 
 ### FR-027 · medium · `view_image` stores the image twice as base64 in the rollout and the event stream
+
+**Status:** fixed. Image bytes are not stored in the rollout or events; the model can call `view_image` again.
 
 - **Location:** `core/orchestrator/tools.rs:426-440`,
   `core/orchestrator/compact.rs:48-65`.
@@ -367,6 +421,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   exclude them from the estimate.
 
 ### FR-028 · medium · `remember` writes global memory with no prompt, in every mode
+
+**Status:** fixed. `remember` prompts for global memory outside Full Access and for project memory in chat/plan/ask modes.
 
 - **Location:** `core/orchestrator/agent_loop.rs:399-411`,
   `core/orchestrator/mod.rs:96-101` (offered in chat and plan),
@@ -384,6 +440,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-029 · high · Locagens' own git calls run repository-controlled config before any trust decision (needs-confirmation)
 
+**Status:** fixed. Every internal git call goes through one hardened builder: fsmonitor, hooks, external diff, textconv, pager and askpass are off, and system config is ignored (except for `push`, which needs the credential helper).
+
 - **Location:** `core/services/git.rs:20-37`, `:40-69`; callers
   `core/api/projects.rs:307-326` (`git_status`, polled by the desktop Git tab),
   `core/services/snapshots.rs`, `core/orchestrator/review.rs:55`.
@@ -400,6 +458,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-030 · high · on macOS and Linux the `exec_command` `shell` argument runs any program without a prompt (needs-confirmation)
 
+**Status:** fixed. Only known shells are accepted as `shell`; anything else is an error.
+
 - **Location:** `crates/execpolicy/src/processes.rs:50-62`
   (`shell_for_options`), `core/orchestrator/exec_session.rs:121-124`,
   `core/orchestrator/gating.rs:64-70`, `:321-350`.
@@ -415,6 +475,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-031 · medium · MCP tools run without a prompt in Build mode
 
+**Status:** fixed. MCP tools prompt in Build mode; standing grants work per tool.
+
 - **Location:** `core/orchestrator/tools.rs:40`
   (`tool.starts_with("mcp__") && mode != "accept_edits"`).
 - **Problem:** Build mode prompts for every command and every `fetch_url`,
@@ -425,6 +487,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-032 · medium · standing grants are broader than the card suggests
 
+**Status:** partly fixed. Command grants need an equal domain list and `fetch_url` grants are per host; file-tool grants are still tool-wide.
+
 - **Location:** `core/orchestrator/gating.rs:321-350`.
 - A command grant saved without domains matches the same command with any
   `network_domains` (`if !rule.network_domains.is_empty()`), so a later call
@@ -434,6 +498,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** require equal domain lists; scope `fetch_url` grants to the host.
 
 ### FR-033 · high · an environment API key of one vendor is sent to any other provider that has no key *(sub-review, lines re-checked)*
+
+**Status:** fixed. A vendor env key is only used for that vendor's built-in, or when it is named explicitly (`$VAR`, `envKey`).
 
 - **Location:** `crates/config/src/providers/auth_store.rs:248-264`,
   `core/orchestrator/drive.rs:207-212`.
@@ -458,6 +524,7 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-035 · medium · credential helper and redirect handling *(sub-review)*
 
+**Status:** fixed. The credential helper runs in the Locagens home with a 10-minute cache; neither the provider client nor the LLM client follows redirects.
 - `crates/config/src/providers/auth_store.rs:78`: the `!command` helper runs
   through `cmd /C` in the inherited working directory (the project folder), so
   a repository's `op.bat` can shadow the real helper. Its output is cached for
@@ -471,6 +538,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-036 · medium · `auth.json` lock is held across the network refresh *(sub-review)*
 
+**Status:** fixed. The OAuth refresh runs unlocked, then re-reads and compares; refreshes are serialized per provider; a lock broken by mistake is put back.
+
 - **Location:** `crates/config/src/providers/auth_store.rs:188-194`,
   `:400-404`; `crates/config/src/oauth/auth_lock.rs:13`, `:76-83`.
 - **Problem:** a refresh holds the lock for up to the HTTP timeout (30 to
@@ -480,6 +549,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** refresh outside the lock, then lock, re-read, compare and write.
 
 ### FR-037 · low · other credential and config hygiene *(sub-review)*
+
+**Status:** fixed. Atomic `config.toml` trust writes; `Debug` hides env values; `save_configs` only removes custom providers it owns, never panics and never overwrites an unparseable `models.json`; `[model_providers]` is read from the Locagens home too.
 
 - `crates/config/src/config_toml.rs:222`: `write_project_trust_level` rewrites
   the user's `config.toml` with a plain `std::fs::write` (not atomic, no lock).
@@ -504,6 +575,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-038 · high · `--no-session` with `-c` or `--session` deletes the existing session (reproduced)
 
+**Status:** fixed. `--no-session` with `-c`, `-r` or `--session` is rejected.
+
 - **Location:** `core/cli/runner.rs:192-195`, `core/cli/mod.rs:204-220`,
   `core/cli/tui/driver.rs:138`.
 - **Reproduction:** two sessions listed by `lcgn sessions`; run
@@ -512,6 +585,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** reject the combination, or delete only runs this process created.
 
 ### FR-039 · high · typed-ahead keys answer a TUI permission prompt, including "always" *(sub-review)*
+
+**Status:** fixed. Grant keys are ignored for 600 ms after the prompt opens; project/always need a double press.
 
 - **Location:** `core/cli/tui/overlay.rs:100-104`,
   `core/cli/tui/app/input.rs:46`, `core/cli/tui/app/events.rs:77`.
@@ -523,6 +598,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-040 · high · AltGr characters cannot be typed in the TUI on Windows *(sub-review)*
 
+**Status:** fixed. Ctrl+Alt+char is typed as text on Windows (AltGr).
+
 - **Location:** `core/cli/tui/app/input.rs:223`
   (`KeyCode::Char(ch) if !ctrl && !alt`), `core/cli/tui/overlay.rs:307`.
 - **Problem:** crossterm reports AltGr as Ctrl+Alt on Windows. On a Turkish Q
@@ -532,6 +609,7 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-041 · high · environment-only authentication is rejected by the CLI pre-check *(sub-review)*
 
+**Status:** fixed. The pre-check uses the same key resolution as the run; keyless providers work on loopback / `*.localhost` base URLs.
 - **Location:** `core/cli/commands.rs:84`, `core/cli/auth.rs:325`,
   `crates/config/src/providers/auth_store.rs:526`.
 - **Problem:** `has_api_key` looks only at `auth.json`. With just
@@ -542,6 +620,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-042 · medium · model ids that contain `/` conflict with `--provider` and config defaults *(sub-review)*
 
+**Status:** fixed. With `--provider`, the whole string is tried as that provider's model id first.
+
 - **Location:** `core/cli/models.rs:38`.
 - **Scenario:** `lcgn --provider openrouter --model openai/gpt-4o`, or
   `model = "openai/gpt-4o"` with `model_provider = "openrouter"` in
@@ -551,12 +631,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-043 · medium · the TUI panic hook restores the terminal for any thread while the UI keeps running *(sub-review)*
 
+**Status:** fixed. The panic hook restores the terminal only for the UI thread.
+
 - **Location:** `core/cli/tui/mod.rs:80-83`.
 - **Problem:** a panic in a tokio task leaves raw mode and the alternate
   screen while the event loop continues, so the screen is garbled.
 - **Fix:** restore only on the UI thread; log other panics.
 
 ### FR-044 · medium · quitting the TUI while busy skips cleanup *(sub-review)*
+
+**Status:** fixed. Quitting waits up to 2 s for the run's cleanup.
 
 - **Location:** `core/cli/tui/driver.rs:171-176`.
 - **Problem:** `quit()` cancels but does not wait. A `--no-session` run keeps
@@ -566,6 +650,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-045 · medium · `-p` can block forever on an inherited stdin pipe *(sub-review)*
 
+**Status:** fixed. Piped stdin is read only without a message or with `--stdin`.
+
 - **Location:** `core/cli/args.rs:339-349`.
 - **Problem:** stdin is read to the end whenever it is not a terminal. A CI
   step or parent process that leaves the pipe open hangs `lcgn -p "…"`.
@@ -573,6 +659,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** read stdin only when no message was given, or behind `--stdin`.
 
 ### FR-046 · medium · no `tracing` subscriber is installed *(sub-review)*
+
+**Status:** fixed. `lcgn` logs to `<home>/logs/lcgn.log` (`RUST_LOG`).
 
 - **Location:** `core/cli/mod.rs` (`main_entry`); none in the workspace.
 - **Problem:** OAuth refresh failures, ignored config files, provider retries
@@ -582,6 +670,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   TUI and desktop.
 
 ### FR-047 · low · further CLI and TUI details *(sub-review)*
+
+**Status:** fixed (every item).
 
 - `core/cli/auth.rs:23-25`: `lcgn auth login 3` stores a credential under the
   provider id `3` (the documented number form is only resolved in the picker).
@@ -827,6 +917,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-067 · low · missing regression tests for the lifecycle failures above
 
+**Status:** fixed. Regression tests for the lifecycle, history, compaction, streaming and store fixes.
+
 - No test replays a history that contains a failed round (FR-001), unanswered
   tool calls (FR-002) or a compaction split inside a tool group (FR-003).
 - No test runs the snapshot on more than a handful of files (FR-006).
@@ -835,12 +927,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-068 · low · rollout growth
 
+**Status:** fixed. `run_update` lines repeat the task and prompts only when they change.
+
 - **Location:** `core/db/runs.rs:48-65`.
 - Every `patch_run` appends the whole `Run` (task text and system prompts
   included). A run with many permission prompts and an `@file`-heavy first
   prompt repeats that text on every status change.
 
 ### FR-069 · low · documentation drift
+
+**Status:** fixed. CLI.md, CONFIG.md, database-schema.md and the LLM / orchestrator comments match the code.
 
 - `docs/QA_REVIEW.md` QA-035 says streaming writes are one checkpoint every
   5 s; `core/orchestrator/mod.rs:66` still names a 250 ms
@@ -862,39 +958,48 @@ state here.
 - **FR-070 · medium** · `core/orchestrator/llm/http.rs:108-117`: `Retry-After`
   is capped at 10 s and there are 4 attempts, so a 60-second rate limit always
   fails the run after about 30 s.
+  **Status:** fixed. `Retry-After` / `retry-after-ms` honoured up to 90 s.
 - **FR-071 · low** · `core/orchestrator/interactive.rs:63-84`: the question
   slot is single. It is only reachable from the main agent today, but the
   cleanup at `:80-84` clears whatever is in the slot, and
   `ask_user_question` does not react to a sub-agent interrupt
   (`stop_signal`), only to run cancel.
+  **Status:** fixed. The question slot is owned by an id; a sub-agent interrupt ends the wait.
 - **FR-072 · medium** · `core/orchestrator/tools.rs:958-970`: permission
   previews cut old and new content at 4 000 characters with no marker, so the
   user approves a write whose tail they cannot see.
+  **Status:** fixed. Previews end with "… (N more characters)".
 - **FR-073 · medium** · `core/orchestrator/exec_session.rs:114-118`:
   `max_output_tokens` allows up to 800 000 characters in one tool result, far
   above the 24 000-character cap of every other tool and enough to overflow
   the context in one call.
+  **Status:** fixed. `exec_command` / `write_stdin` output is capped like the other tools.
 - **FR-074 · medium** · `core/orchestrator/tools.rs:496`, `:541`: `read_file`
   and `edit_file` fail on any file that is not valid UTF-8 (Windows-1254 or
   Latin-1 sources), with a raw "stream did not contain valid UTF-8" error and
   no way to edit the file.
+  **Status:** fixed. Non-UTF-8 files are read lossily with a note; editing them is refused.
 - **FR-075 · low** · `core/orchestrator/mod.rs:96-101`,
   `core/orchestrator/agent_loop.rs:440-464`: chat and plan modes block MCP
   tools, but still offer `list_mcp_resources` and `read_mcp_resource`, which
   start the configured MCP servers and read from them with no prompt.
+  **Status:** fixed. Chat and plan modes no longer offer the MCP resource tools.
 - **FR-076 · low** · `core/orchestrator/drive.rs:190-192`:
   `reasoning_supported` uses `contains` on short markers (`o1`, `o3`, `o4`),
   so any model id that merely contains one of them gets a `reasoning_effort`
   parameter, which some providers reject.
+  **Status:** fixed. `o1`/`o3`/`o4` only match as the model name's first segment.
 - **FR-077 · low** · `core/api/runs.rs:562-574`: `delete_run` on a run driven
   by another process cancels nothing there, deletes the rollout, and the other
   process recreates nothing (tombstones are per process), so its later appends
   are lost without an error on either side (**needs-confirmation**, traced in
   code only).
+  **Status:** fixed. `delete_run` refuses a run another process owns.
 - **FR-078 · low** · `core/orchestrator/agent_loop.rs:205-209`,
   `core/api/runs.rs:793-800`: the cache hit rate is `cache_read / input`.
   Anthropic's `input_tokens` excludes cached tokens, so the rate can exceed
   100 %, and `context_usage` under-counts the context for Anthropic.
+  **Status:** fixed. The cache hit rate stays ≤ 100 % and `context_usage` counts Anthropic correctly.
 
 ---
 

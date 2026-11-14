@@ -173,7 +173,8 @@ fn anthropic_stream_accumulates_text_thinking_and_tool_input() {
 
     assert!(acc.finished);
     assert_eq!(acc.content, "Hi ");
-    assert_eq!(acc.usage.input_tokens, 20);
+    // Normalized: the whole prompt, cached tokens included.
+    assert_eq!(acc.usage.input_tokens, 25);
     assert_eq!(acc.usage.cache_read_tokens, 5);
     assert_eq!(acc.usage.output_tokens, 9);
     let tool_calls = acc.tool_calls();
@@ -215,9 +216,15 @@ fn request_bodies_match_protocols() {
 
     let anthropic = Endpoint { api: "anthropic".into(), ..endpoint };
     let body = anthropic_body(&anthropic, "sys", &messages, &[]);
-    assert_eq!(body["system"], "sys");
-    assert_eq!(body["max_tokens"], 9216);
-    assert_eq!(body["thinking"]["budget_tokens"], 8192);
+    assert_eq!(body["system"][0]["text"], "sys");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    // The open tool turn has no thinking block to replay, so the budget
+    // form stays off for this request (FR-013).
+    assert_eq!(body["max_tokens"], 8192);
+    assert!(body.get("thinking").is_none());
+    let first_turn = anthropic_body(&anthropic, "sys", &messages[..1], &[]);
+    assert_eq!(first_turn["max_tokens"], 9216);
+    assert_eq!(first_turn["thinking"]["budget_tokens"], 8192);
     // Assistant message: text block (skipped when empty) + tool_use block.
     assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
     assert_eq!(body["messages"][1]["content"][0]["input"], json!({ "a": 1 }));
