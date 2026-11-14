@@ -251,6 +251,9 @@ pub struct RunHandle {
     /// `(project, snapshot id)` of this turn's pre-turn git snapshot until
     /// its post-turn state is recorded (QA-030).
     turn_snapshot: Mutex<Option<(PathBuf, String)>>,
+    /// Paths this turn's file tools changed; `None` once a command (shell,
+    /// MCP) ran that could have changed anything (FR-008).
+    turn_paths: Mutex<Option<std::collections::BTreeSet<String>>>,
     /// Name the chat with a model call on this (first) turn
     /// ([`CreateRunPayload::auto_title`](crate::api::runs::CreateRunPayload)).
     pub auto_title: AtomicBool,

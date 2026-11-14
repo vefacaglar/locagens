@@ -26,6 +26,7 @@ impl RunHandle {
             finished_tx,
             drive_abort: Mutex::new(None),
             turn_snapshot: Mutex::new(None),
+            turn_paths: Mutex::new(Some(Default::default())),
             auto_title: AtomicBool::new(false),
         })
     }
@@ -36,7 +37,78 @@ impl RunHandle {
         if let Err(err) = crate::services::snapshots::record_turn_end_for_path(&project, &snapshot_id).await {
             tracing::warn!("Could not record the post-turn snapshot of run {}: {err}", self.run_id);
         }
+        // Undo then reverts only what the agent's tools wrote (FR-008).
+        if let Some(paths) = lock_ignoring_poison(&self.turn_paths).take() {
+            let paths = paths.into_iter().collect();
+            if let Err(err) = crate::services::snapshots::record_agent_paths(&project, &snapshot_id, paths) {
+                tracing::warn!("Could not record the changed paths of run {}: {err}", self.run_id);
+            }
+        }
     }
+
+    /// Records the paths a tool call may change: file tools name them,
+    /// commands and MCP tools can change anything (the set is dropped).
+    pub(super) fn note_tool_paths(&self, project: &Path, name: &str, args: &Value) {
+        let mut guard = lock_ignoring_poison(&self.turn_paths);
+        let Some(paths) = guard.as_mut() else { return };
+        match tool_paths(project, name, args) {
+            Some(changed) => paths.extend(changed.iter().map(|path| normalize_relative(project, path))),
+            None => *guard = None,
+        }
+    }
+}
+
+/// Paths a tool call changes: `Some(empty)` for read-only tools, `None`
+/// when it is unknowable (shell commands, MCP tools).
+fn tool_paths(project: &Path, name: &str, args: &Value) -> Option<Vec<String>> {
+    let arg = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
+    match name {
+        "exec_command" | "run_command" | "write_stdin" => None,
+        name if name.starts_with("mcp__") => None,
+        "apply_patch" => {
+            let text = arg("input").or_else(|| arg("patch")).unwrap_or_default();
+            let parsed = apply_patch::parse_patch(&text).ok()?;
+            Some(apply_patch::affected_paths(project, &parsed).ok()?.all())
+        }
+        name if tools::MUTATION_TOOLS.contains(&name) => Some(["path", "from", "to"].iter().filter_map(|key| arg(key)).collect()),
+        _ => Some(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn turn_paths_follow_file_tools_and_drop_on_commands() {
+    let project = std::env::temp_dir().join("locagens-turn-paths");
+    let handle = RunHandle::new("run-paths");
+    handle.note_tool_paths(&project, "read_file", &json!({ "path": "x" }));
+    handle.note_tool_paths(&project, "write_file", &json!({ "path": "./src\\a.rs" }));
+    handle.note_tool_paths(&project, "move_file", &json!({ "from": "old/../b.rs", "to": project.join("c.rs").display().to_string() }));
+    let paths: Vec<String> = lock_ignoring_poison(&handle.turn_paths).clone().unwrap().into_iter().collect();
+    let expected_a = if cfg!(windows) { "src/a.rs" } else { "src\\a.rs" };
+    assert_eq!(paths, vec!["b.rs".to_string(), "c.rs".to_string(), expected_a.to_string()]);
+    handle.note_tool_paths(&project, "exec_command", &json!({ "cmd": "make" }));
+    assert!(lock_ignoring_poison(&handle.turn_paths).is_none(), "a command can change anything");
+}
+
+/// A tool path as a snapshot tree path: relative to `project`, `/`
+/// separated, without `./` segments.
+fn normalize_relative(project: &Path, path: &str) -> String {
+    let path = Path::new(path);
+    let relative = path.strip_prefix(project).unwrap_or(path);
+    let mut parts: Vec<String> = Vec::new();
+    for part in relative.components() {
+        match part {
+            std::path::Component::Normal(name) => parts.push(name.to_string_lossy().to_string()),
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            _ => {}
+        }
+    }
+    parts.join("/")
+}
+
+impl RunHandle {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)

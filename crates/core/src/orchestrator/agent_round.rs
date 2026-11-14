@@ -243,6 +243,7 @@ impl AgentLoop {
         }
         let rewritten = pre.updated_input.filter(|input| *input != args);
         let executed = rewritten.clone().unwrap_or(args);
+        self.handle.note_tool_paths(&self.project_path, name, &executed);
         let result = match self.dispatch_tool(call_id, name, &executed).await {
             Ok(result) => result,
             Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
