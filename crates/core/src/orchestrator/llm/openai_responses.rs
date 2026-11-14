@@ -7,6 +7,9 @@ use super::*;
 /// `compact_json` is the response with `data_base64`/`data_url` stripped
 /// (the raw base64 blob is delivered as a real image part instead of text).
 pub(super) fn extract_tool_image(content: &str) -> Option<(String, String, String, String)> {
+    if !content.contains("\"data_base64\"") {
+        return None;
+    }
     let value: Value = serde_json::from_str(content).ok()?;
     let object = value.as_object()?;
     let b64 = object.get("data_base64").and_then(Value::as_str)?;
@@ -25,6 +28,12 @@ pub(super) fn extract_tool_image(content: &str) -> Option<(String, String, Strin
         mime.to_string(),
         b64.to_string(),
     ))
+}
+
+/// A tool result without its attached image bytes: the compact JSON when
+/// the result carries a `view_image` payload, else `None` (FR-027).
+pub fn tool_image_text(content: &str) -> Option<String> {
+    extract_tool_image(content).map(|(compact_json, ..)| compact_json)
 }
 
 /// Builds a Codex OpenAI `/v1/responses` (Responses WireAPI) request body:
