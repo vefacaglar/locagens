@@ -263,7 +263,10 @@ async fn planted_commondir_and_config_worktree_are_quarantined() {
     }
     assert_original_git(&ws);
 
-    // An existing one is write-protected like `.git/config`.
+    // An existing one is write-protected like `.git/config`. Wait for the
+    // attack's console process to go: while it lives, a `.git` change is
+    // taken as the sandbox's and repaired (even the test's own write).
+    wait_until_unguarded(&ws.root).await;
     std::fs::write(ws.root.join(".git").join("commondir"), ".").unwrap();
     let overwrite = run(&ws, &spec, "echo elsewhere> .git\\commondir").await;
     assert!(!overwrite.success(), "{}", text(&overwrite));
@@ -594,7 +597,7 @@ async fn ordinary_commands_still_work_at_low_integrity() {
         ("type \"%SystemRoot%\\System32\\drivers\\etc\\hosts\" >nul && echo hosts-ok", "hosts-ok"),
         ("dir /b \"%SystemRoot%\\System32\\cmd.exe\"", "cmd.exe"),
         ("echo edited>> src\\lib.txt && type src\\lib.txt", "edited"),
-        ("ren src\\lib.txt lib2.txt && del src\\lib2.txt && rmdir src && echo cleanup-ok", "cleanup-ok"),
+        ("ren src\\lib.txt lib2.txt && del src\\lib2.txt && echo cleanup-ok", "cleanup-ok"),
         ("\"%SystemRoot%\\System32\\whoami.exe\" /groups", "S-1-16-4096"),
     ];
     for (script, expected) in checks {
@@ -602,6 +605,18 @@ async fn ordinary_commands_still_work_at_low_integrity() {
         assert!(output.success(), "{script}: {}", text(&output));
         assert!(String::from_utf8_lossy(&output.stdout).contains(expected), "{script}: {}", text(&output));
     }
+    // Removing the now-empty folder: right after a delete, antivirus or the
+    // indexer can still hold the file ("directory not empty"), so retry.
+    let mut removed = false;
+    for _ in 0..10 {
+        let output = run(&ws, &spec, "rmdir src && echo rmdir-ok").await;
+        if output.success() && String::from_utf8_lossy(&output.stdout).contains("rmdir-ok") {
+            removed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    assert!(removed, "rmdir of the emptied folder never succeeded");
 
     let git_on_host = std::process::Command::new("git").arg("--version").output().is_ok_and(|out| out.status.success());
     if git_on_host {
@@ -667,4 +682,15 @@ async fn allow_network_skips_the_proxy_and_default_uses_it() {
         "{}",
         text(&direct)
     );
+}
+
+/// Waits (up to 15 s) until no sandboxed command of `root` is guarded.
+async fn wait_until_unguarded(root: &std::path::Path) {
+    for _ in 0..150 {
+        if !locagens_execpolicy::metadata_guard::is_guarded(root) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the workspace stayed guarded");
 }

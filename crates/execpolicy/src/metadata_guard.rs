@@ -284,6 +284,13 @@ fn late_reports() -> std::sync::MutexGuard<'static, Vec<(PathBuf, String)>> {
     LATE_REPORTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Whether a sandboxed command in `root` (or one of its background
+/// descendants) is still guarded. Changes the user makes to `.git` while
+/// this is true are taken as the sandbox's and repaired.
+pub fn is_guarded(root: &Path) -> bool {
+    active().iter().any(|guard| guard.root == root)
+}
+
 /// Repairs what still-running sandboxed commands in `root` (or their
 /// background descendants) changed. The reports are returned and also
 /// queued for the next sandboxed command, so none is lost when the caller
