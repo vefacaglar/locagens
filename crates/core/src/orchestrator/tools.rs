@@ -5,7 +5,7 @@
 //! via `canonicalize` + `starts_with`), and every write, delete and move
 //! goes through `workspace_fs`, which never follows a link swapped in after
 //! that check (QA-017). Dangerous tools (`run_command`,
-//! `fetch_url`) are permission-gated by the orchestrator; `build_preview`
+//! `fetch_url`, `web_search`) are permission-gated by the orchestrator; `build_preview`
 //! produces the red/green diff payload the UI permission card renders.
 
 use locagens_apply_patch::workspace_fs;
@@ -29,8 +29,9 @@ const MAX_SEARCH_DEPTH: usize = 14;
 pub const MUTATION_TOOLS: [&str; 6] = ["write_file", "edit_file", "delete_file", "move_file", "create_directory", "apply_patch"];
 
 /// Whether a tool call needs interactive permission approval under `mode`.
-/// Only the exact `auto` mode skips prompts. `fetch_url` sends data out of
-/// the machine, so it prompts in every other mode, Plan and Chat included
+/// Only the exact `auto` mode skips prompts. `fetch_url` and `web_search`
+/// send data out of the machine, so they prompt in every other mode, Plan
+/// and Chat included
 /// (commands are forbidden there outright, see
 /// [`is_forbidden_in_readonly_mode`]).
 pub fn needs_permission(mode: &str, tool: &str) -> bool {
@@ -41,7 +42,8 @@ pub fn needs_permission(mode: &str, tool: &str) -> bool {
     let mutation = MUTATION_TOOLS.contains(&tool);
     // MCP servers are not sandboxed: their tools prompt in Build mode too.
     let mcp = tool.starts_with("mcp__");
-    tool == "fetch_url" || command || (mutation && mode != "accept_edits") || mcp
+    let network = matches!(tool, "fetch_url" | "web_search");
+    network || command || (mutation && mode != "accept_edits") || mcp
 }
 
 /// Whether a `remember` call needs a prompt: global memory is injected into
@@ -280,6 +282,7 @@ fn module_tool_defs() -> Vec<Value> {
     let mut defs = super::agents::tool_defs(&super::agent_roles::builtin_roles());
     defs.push(super::context_remaining::tool_def());
     defs.push(super::host_executable::tool_def());
+    defs.push(super::web_search::tool_def());
     defs
 }
 
@@ -960,7 +963,7 @@ async fn fetch_pinned(url: &url::Url, blocked: &BlockedAddress) -> Result<reqwes
 }
 
 /// Reads at most `limit` bytes of the body; `true` when it was cut.
-async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> (Vec<u8>, bool) {
+pub(super) async fn read_capped_body(mut response: reqwest::Response, limit: usize) -> (Vec<u8>, bool) {
     let mut body: Vec<u8> = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
         let room = limit.saturating_sub(body.len());
@@ -1128,6 +1131,15 @@ pub fn build_preview(project: &Path, name: &str, args: &Value) -> Option<Value> 
             "oldContent": Value::Null,
             "newContent": Value::Null,
             "url": str_arg(args, "url").unwrap_or(""),
+        }),
+        "web_search" => json!({
+            "tool": name,
+            "action": "web_search",
+            "path": "",
+            "absolutePath": "",
+            "oldContent": Value::Null,
+            "newContent": Value::Null,
+            "query": str_arg(args, "query").unwrap_or(""),
         }),
         "exec_command" => json!({
             "tool": name,
@@ -1464,6 +1476,11 @@ mod tests {
         assert!(needs_permission("chat", "fetch_url"));
         assert!(needs_permission("accept_edits", "fetch_url"));
         assert!(!needs_permission("auto", "fetch_url"));
+        // web_search prompts exactly like fetch_url.
+        for mode in ["plan", "chat", "accept_edits", "ask_permissions", "build"] {
+            assert!(needs_permission(mode, "web_search"), "{mode}");
+        }
+        assert!(!needs_permission("auto", "web_search"));
         assert!(!needs_permission("plan", "read_file"));
         // Unknown / misspelled modes prompt for everything (QA-011).
         for tool in ["write_file", "run_command", "fetch_url", "mcp__x__y", "apply_patch"] {
@@ -1492,7 +1509,7 @@ mod tests {
                 );
             }
         }
-        for tool in ["read_file", "list_directory", "search_files", "view_image", "fetch_url"] {
+        for tool in ["read_file", "list_directory", "search_files", "view_image", "fetch_url", "web_search"] {
             assert!(!is_forbidden_in_readonly_mode("plan", tool), "{tool} stays allowed in plan");
             assert!(!is_forbidden_in_readonly_mode("chat", tool), "{tool} stays allowed in chat");
         }
@@ -1620,7 +1637,7 @@ mod tests {
             "write_stdin", "view_image", "request_user_input", "compact_context", "spawn_agent",
             "send_message", "followup_task", "wait_agent", "interrupt_agent", "close_agent", "list_agents", "get_context_remaining", "host_executable", "set_chat_title", "update_plan",
             "remember", "load_skill", "ask_user_question", "spawn_agents",
-            "list_mcp_resources", "read_mcp_resource",
+            "list_mcp_resources", "read_mcp_resource", "web_search",
         ]).len());
     }
 

@@ -1327,3 +1327,54 @@ fn saving_configs_never_drops_sign_ins_or_overwrites_a_broken_models_json() {
     let _ = std::fs::remove_dir_all(agent);
     let _ = std::fs::remove_dir_all(support);
 }
+
+#[tokio::test]
+async fn web_search_keys_are_login_entries_but_never_model_providers() {
+    let _guard = ENV_VAR_TEST_LOCK.lock().await;
+    for provider in SEARCH_PROVIDERS {
+        std::env::remove_var(provider.env_var);
+    }
+    std::env::set_var("EXA_API_KEY", "exa-secret-env");
+    std::env::set_var("LCGN_TEST_BRAVE", "brave-secret-env");
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("primary");
+    write_auth(&primary, json!({
+        "tavily": { "type": "api_key", "key": "tvly-secret-key" },
+        "brave-search": { "type": "api_key", "key": "$LCGN_TEST_BRAVE" },
+    }));
+    let manager = PiProviderManager::with_dirs(primary, tmp.path().join("support"));
+
+    // Keys resolve like any API key: literal, `$ENV_VAR`, or the backend's own variable.
+    assert_eq!(manager.resolve_api_key("tavily", None).await.as_deref(), Some("tvly-secret-key"));
+    assert_eq!(manager.resolve_api_key("brave-search", None).await.as_deref(), Some("brave-secret-env"));
+    assert_eq!(manager.resolve_api_key("exa", None).await.as_deref(), Some("exa-secret-env"));
+
+    // Not model providers: absent from every model catalog surface.
+    let listed: Vec<String> = manager.list_providers().await.into_iter().map(|p| p.id).collect();
+    let configs = manager.get_configs();
+    for id in ["tavily", "brave-search", "exa"] {
+        assert!(is_search_provider(id));
+        assert!(!manager.provider_ids().contains(&id.to_string()), "{id}");
+        assert!(!listed.contains(&id.to_string()), "{id}");
+        assert!(!configs.contains_key(id), "{id}");
+    }
+    assert!(!is_search_provider("openai"));
+
+    // But `/login` and Settings → Providers can store their keys.
+    let rows = manager.login_providers();
+    let search_rows: Vec<&LoginProvider> = rows.iter().filter(|row| row.web_search).collect();
+    let ids: Vec<&str> = search_rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, ["tavily", "brave-search", "exa"]);
+    assert!(search_rows.iter().all(|row| row.oauth_label.is_none()));
+    assert_eq!(search_rows[0].status, LoginStatus::ApiKey);
+    assert_eq!(search_rows[2].status, LoginStatus::Env("EXA_API_KEY".into()));
+    assert_eq!(search_rows[2].api_key_env.as_deref(), Some("EXA_API_KEY"));
+    let raw = serde_json::to_string(&rows).unwrap() + &serde_json::to_string(&configs).unwrap();
+    assert!(!raw.contains("secret"), "{raw}");
+
+    // Saving the model-provider map never deletes a search key.
+    manager.save_configs(&HashMap::new()).unwrap();
+    assert!(manager.has_api_key("tavily"));
+    std::env::remove_var("EXA_API_KEY");
+    std::env::remove_var("LCGN_TEST_BRAVE");
+}

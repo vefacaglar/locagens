@@ -73,6 +73,8 @@ const STANDING: [(&str, &str); 3] = [
 pub enum PermissionTitle {
     Command,
     Network(String),
+    /// A `web_search` call, with its quoted query.
+    WebSearch(String),
     Edit(String),
     Tool(String),
 }
@@ -86,6 +88,9 @@ pub fn permission_title(tool_name: &str, arguments: &Value, preview: Option<&Val
         .and_then(Value::as_array)
         .map(|list| list.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
+    if tool_name == "web_search" {
+        return PermissionTitle::WebSearch(locagens_core::tool_labels::quoted_query(arguments));
+    }
     if tool_name == "fetch_url" || (text("command").is_none() && !domains.is_empty()) {
         let host = text("url").map(|url| host_of(&url)).or_else(|| domains.first().cloned()).unwrap_or_default();
         return PermissionTitle::Network(host);
@@ -130,6 +135,7 @@ fn PermissionCard(request: Value) -> Element {
     let title = match permission_title(&tool_name, &arguments, preview.as_ref()) {
         PermissionTitle::Command => store.t("perm.title_command").to_string(),
         PermissionTitle::Network(host) => store.tf("perm.title_network", &[&host]),
+        PermissionTitle::WebSearch(query) => store.tf("perm.title_web_search", &[&query]),
         PermissionTitle::Edit(path) if path.is_empty() => store.t("perm.title_edit_files").to_string(),
         PermissionTitle::Edit(path) => store.tf("perm.title_edit", &[&path]),
         PermissionTitle::Tool(label) => store.tf("perm.title_tool", &[&label]),
@@ -566,6 +572,10 @@ mod tests {
         assert_eq!(
             permission_title("fetch_url", &json!({}), Some(&json!({"url": "https://api.github.com/repos?x=1"}))),
             PermissionTitle::Network("api.github.com".into())
+        );
+        assert_eq!(
+            permission_title("web_search", &json!({"query": "rust serde"}), Some(&json!({"query": "rust serde"}))),
+            PermissionTitle::WebSearch("\"rust serde\"".into())
         );
         assert_eq!(
             permission_title("edit_file", &json!({}), Some(&json!({"path": "src/a.rs"}))),

@@ -493,6 +493,7 @@ workspace tools. The per-mode tool lists are in `README.md`; `load_skill`,
 | `tool_search` | `{ query, limit? }` (default 8) | Present only when more than 8 MCP tools are connected: all MCP tools are then deferred, and each search (BM25 over name, description and argument names) appends the best matches to the tools of the next model request. |
 | `get_context_remaining` | `{}` | `{ tokens_left, context_window, estimated_tokens_used, percent_remaining, tokens_until_auto_compact }`; `tokens_left` is the smaller of window-left and auto-compact-left, estimated with the compactor's ~4 chars/token. |
 | `host_executable` | `{ name, all? }` | Locates an executable on `PATH` (Windows: `PATHEXT`). `{ name, lookup_key, found, path, paths, total_matches }`. |
+| `web_search` | `{ query, max_results? }` (1..10, default 5) | Local web search for every provider: a numbered list of title, URL and snippet plus the backend that answered; pages are then read with `fetch_url`. Backends, first with a key wins: Tavily (`tavily` / `TAVILY_API_KEY`), Brave Search (`brave-search` / `BRAVE_API_KEY`), Exa (`exa` / `EXA_API_KEY`); keys resolve like provider keys (`auth.json` literal, `!command`, `$ENV_VAR`). Without a key it falls back to DuckDuckGo's HTML page (keyless, weaker results). Only those fixed hosts are contacted. Offered in Plan and the edit modes (not Chat) and to `worker` sub-agents; prompts like `fetch_url` (grant label "searching the web"). |
 
 Custom agent roles are TOML files (`name`, `description`, `developer_instructions`,
 `nickname_candidates`, `sandbox_mode = "read-only"`) in
@@ -512,7 +513,8 @@ auto (Full Access)     → never + danger-full-access
 `apply_permission_decision` sends any unknown decision as `deny`.
 Outside `auto`, dangerous commands and mutations of protected paths
 (`.git`, `.locagens`, `.codex`, `.agents`) always prompt and their approval
-is downgraded to `allow_once`; `fetch_url` prompts in every other mode.
+is downgraded to `allow_once`; `fetch_url` and `web_search` prompt in every
+other mode.
 `allow_run` covers only the approved tool.
 
 Commands requesting `network_domains` never use the known-safe bypass: the

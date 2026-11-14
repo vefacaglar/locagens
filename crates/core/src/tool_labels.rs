@@ -20,6 +20,7 @@ pub enum ToolVerb {
     CreatedDir,
     Moved,
     Fetched,
+    SearchedWeb,
     SpawnedAgents,
     SpawnedAgent,
     WaitedForAgents,
@@ -48,6 +49,7 @@ impl ToolVerb {
             ToolVerb::CreatedDir => "created_dir",
             ToolVerb::Moved => "moved",
             ToolVerb::Fetched => "fetched",
+            ToolVerb::SearchedWeb => "searched_web",
             ToolVerb::SpawnedAgents => "spawned_agents",
             ToolVerb::SpawnedAgent => "spawned_agent",
             ToolVerb::WaitedForAgents => "waited_agents",
@@ -75,6 +77,7 @@ impl ToolVerb {
             ToolVerb::CreatedDir => "Created dir",
             ToolVerb::Moved => "Moved",
             ToolVerb::Fetched => "Fetched",
+            ToolVerb::SearchedWeb => "Searched the web",
             ToolVerb::SpawnedAgents => "Spawned agents",
             ToolVerb::SpawnedAgent => "Spawned agent",
             ToolVerb::WaitedForAgents => "Waited for agents",
@@ -106,6 +109,7 @@ pub fn describe_tool(name: &str, args: &Value) -> (ToolVerb, String) {
         "create_directory" => (ToolVerb::CreatedDir, first(&["path"])),
         "move_file" => (ToolVerb::Moved, format!("{} -> {}", first(&["from", "path"]), first(&["to"]))),
         "fetch_url" => (ToolVerb::Fetched, first(&["url"])),
+        "web_search" => (ToolVerb::SearchedWeb, quoted_query(args)),
         "spawn_agents" => (ToolVerb::SpawnedAgents, String::new()),
         "spawn_agent" => (ToolVerb::SpawnedAgent, first(&["task_name", "name"])),
         "load_skill" => (ToolVerb::LoadedSkill, first(&["name"])),
@@ -118,6 +122,14 @@ pub fn describe_tool(name: &str, args: &Value) -> (ToolVerb, String) {
             (ToolVerb::Tool(name.to_string()), first(&["target", "agent_id", "id"]))
         }
         other => (ToolVerb::Tool(other.to_string()), first(&["path", "command", "url", "query", "name", "title"])),
+    }
+}
+
+/// `"<query>"` of a `web_search` call (empty without a query).
+pub fn quoted_query(args: &Value) -> String {
+    match args.get("query").and_then(Value::as_str).map(str::trim).filter(|query| !query.is_empty()) {
+        Some(query) => format!("\"{query}\""),
+        None => String::new(),
     }
 }
 
@@ -170,6 +182,8 @@ mod tests {
         let (verb, target) = describe_tool("close_agent", &json!({"target": "scan"}));
         assert_eq!((verb.key(), verb.english(), target.as_str()), (None, "close agent".into(), "scan"));
         assert_eq!(ToolVerb::AppliedPatch.key(), Some("applied_patch"));
+        let (verb, target) = describe_tool("web_search", &json!({"query": "rust serde"}));
+        assert_eq!((verb.key(), verb.english(), target.as_str()), (Some("searched_web"), "Searched the web".into(), "\"rust serde\""));
     }
 
     #[test]

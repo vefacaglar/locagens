@@ -81,7 +81,9 @@ Naming:    specific (PiProviderManager, Orchestrator, build_core);
   `run_command`, `write_stdin`) are permission-gated outside Full Access unless a standing
   grant matches or, in Build only, the command is known-safe or `.rules`-allowed; `fetch_url` prompts in every
   mode except Full Access and only reaches public addresses (redirects are
-  re-validated, DNS is pinned). Outside Full Access, dangerous commands and
+  re-validated, DNS is pinned). `web_search` (`orchestrator/web_search/`) prompts like
+  `fetch_url`; backends Tavily → Brave Search → Exa by key (`tavily` /
+  `brave-search` / `exa` auth.json ids, never model providers), else keyless DuckDuckGo. Outside Full Access, dangerous commands and
   mutations of protected paths (`.git`, `.locagens`, `.codex`, `.agents`;
   `execpolicy::protected_paths`) always prompt; no grant or Allow-for-Run
   covers them. Calls to tools that were not offered to the agent are

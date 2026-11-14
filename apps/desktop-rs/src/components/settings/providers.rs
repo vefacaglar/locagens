@@ -8,7 +8,7 @@ use crate::components::ConfirmButton;
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::providers::OAuthLoginStart;
-use locagens_core::pi_providers::{LoginStatus, ProviderMetadata, SetPiAuthInput, TestProviderInput};
+use locagens_core::pi_providers::{LoginProvider, LoginStatus, ProviderMetadata, SetPiAuthInput, TestProviderInput};
 use serde_json::Value;
 
 /// Connect rows plus the model switches of connected providers.
@@ -34,45 +34,16 @@ pub(super) fn ProvidersTab() -> Element {
     rsx! {
         div { class: "panel-section-title", "{store.t(\"providers.connect\")}" }
         div { class: "settings-hint", "{store.t(\"providers.connect_hint\")}" }
-        for login in logins.iter() {
-            {
-                let (status, preview) = match &login.status {
-                    LoginStatus::OAuth => ("oauth".to_string(), String::new()),
-                    LoginStatus::ApiKey => {
-                        let preview = accounts
-                            .read()
-                            .iter()
-                            .find(|account| account["providerId"] == login.id.as_str())
-                            .and_then(|account| account["keyPreview"].as_str().map(str::to_string))
-                            .unwrap_or_default();
-                        ("api_key".to_string(), preview)
-                    }
-                    LoginStatus::Env(var) => ("env".to_string(), var.clone()),
-                    LoginStatus::SignedOut => ("signed_out".to_string(), String::new()),
-                };
-                let oauth_id = locagens_core::api::providers::oauth_providers()
-                    .into_iter()
-                    .find(|info| info.id == login.id)
-                    .map(|info| info.id);
-                rsx! {
-                    ConnectRow {
-                        key: "{login.id}",
-                        provider_id: login.id.clone(),
-                        name: login.name.clone(),
-                        status,
-                        preview,
-                        oauth_id,
-                        oauth_label: login.oauth_label.clone(),
-                        takes_key: login.api_key_env.is_some() || login.oauth_label.is_none(),
-                        busy: waiting.is_some(),
-                        on_sign_in: move |id: &'static str| begin_oauth_login(id, accounts, pending, login_task, store),
-                        refresh,
-                    }
-                }
-            }
+        for login in logins.iter().filter(|login| !login.web_search) {
+            {connect_row(login, accounts, pending, login_task, store, refresh, waiting.is_some())}
         }
         if waiting.is_some() {
             OAuthPending { accounts, pending, login_task }
+        }
+        div { class: "panel-section-title", "{store.t(\"providers.search_title\")}" }
+        div { class: "settings-hint", "{store.t(\"providers.search_hint\")}" }
+        for login in logins.iter().filter(|login| login.web_search) {
+            {connect_row(login, accounts, pending, login_task, store, refresh, waiting.is_some())}
         }
         div { class: "panel-section-title", "{store.t(\"providers.models_title\")} ({providers.len()})" }
         if providers.is_empty() {
@@ -82,6 +53,52 @@ pub(super) fn ProvidersTab() -> Element {
         }
         for provider in providers.iter() {
             ProviderRow { key: "{provider.id}", provider: provider.clone() }
+        }
+    }
+}
+
+/// The Connect row of one login provider (model provider or web search key).
+fn connect_row(
+    login: &LoginProvider,
+    accounts: Signal<Vec<Value>>,
+    pending: Signal<Option<OAuthLoginStart>>,
+    login_task: Signal<Option<dioxus::core::Task>>,
+    store: UiStore,
+    refresh: Signal<u32>,
+    busy: bool,
+) -> Element {
+    let (status, preview) = match &login.status {
+        LoginStatus::OAuth => ("oauth".to_string(), String::new()),
+        LoginStatus::ApiKey => {
+            let preview = accounts
+                .read()
+                .iter()
+                .find(|account| account["providerId"] == login.id.as_str())
+                .and_then(|account| account["keyPreview"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            ("api_key".to_string(), preview)
+        }
+        LoginStatus::Env(var) => ("env".to_string(), var.clone()),
+        LoginStatus::SignedOut => ("signed_out".to_string(), String::new()),
+    };
+    let oauth_id = locagens_core::api::providers::oauth_providers()
+        .into_iter()
+        .find(|info| info.id == login.id)
+        .map(|info| info.id);
+    rsx! {
+        ConnectRow {
+            key: "{login.id}",
+            provider_id: login.id.clone(),
+            name: login.name.clone(),
+            status,
+            preview,
+            oauth_id,
+            oauth_label: login.oauth_label.clone(),
+            takes_key: login.api_key_env.is_some() || login.oauth_label.is_none(),
+            web_search: login.web_search,
+            busy,
+            on_sign_in: move |id: &'static str| begin_oauth_login(id, accounts, pending, login_task, store),
+            refresh,
         }
     }
 }
@@ -96,6 +113,8 @@ fn ConnectRow(
     oauth_id: Option<&'static str>,
     oauth_label: Option<String>,
     takes_key: bool,
+    /// A web search key: saved without a model test.
+    web_search: bool,
     busy: bool,
     on_sign_in: EventHandler<&'static str>,
     refresh: Signal<u32>,
@@ -199,6 +218,12 @@ fn ConnectRow(
                             }
                             key.set(String::new());
                             editing.set(false);
+                            if web_search {
+                                result.set(Some((true, store.t("providers.search_key_ok").to_string())));
+                                saving.set(false);
+                                refresh += 1;
+                                return;
+                            }
                             let test = TestProviderInput { provider_id: provider_id.clone(), base_url: None, api_key: None, model: None };
                             let tested = locagens_core::api::providers::test_provider(&state, &test).await.ok();
                             let models = locagens_core::api::providers::list_providers(&state)

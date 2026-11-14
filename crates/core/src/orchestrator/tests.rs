@@ -147,12 +147,24 @@ fn extract_command_reads_command_then_cmd() {
 }
 
 #[test]
+fn workers_get_web_search_and_explorers_do_not() {
+    let names = |defs: Vec<Value>| -> Vec<String> {
+        defs.iter().filter_map(|t| t.pointer("/function/name").and_then(Value::as_str).map(str::to_string)).collect()
+    };
+    let worker = names(worker_tool_defs());
+    assert!(worker.iter().any(|n| n == "web_search") && worker.iter().any(|n| n == "fetch_url"));
+    let explorer = names(tools::readonly_tool_defs(false));
+    assert!(!explorer.iter().any(|n| n == "web_search" || n == "fetch_url"));
+}
+
+#[test]
 fn tool_names_follow_mode() {
     let chat = tool_names_for_mode("chat");
     assert!(chat.contains(&"read_file"));
     assert!(chat.contains(&"compact_context"));
     assert!(!chat.contains(&"update_plan"));
     assert!(!chat.contains(&"fetch_url"));
+    assert!(!chat.contains(&"web_search"));
     assert!(!chat.contains(&"spawn_agent"));
     assert!(!chat.contains(&"write_file"));
     assert!(!chat.contains(&"run_command"));
@@ -166,6 +178,7 @@ fn tool_names_follow_mode() {
     }
     assert!(plan.contains(&"update_plan"));
     assert!(plan.contains(&"fetch_url"));
+    assert!(plan.contains(&"web_search"));
     assert!(plan.contains(&"spawn_agent"));
     assert!(plan.contains(&"spawn_agents"));
     assert!(!plan.contains(&"write_file"));
@@ -177,6 +190,7 @@ fn tool_names_follow_mode() {
     let full = tool_names_for_mode("accept_edits");
     assert!(full.contains(&"write_file"));
     assert!(full.contains(&"exec_command"));
+    assert!(full.contains(&"web_search"));
     assert!(full.contains(&"write_stdin"));
     assert!(full.contains(&"apply_patch"));
     assert!(full.contains(&"spawn_agents"));

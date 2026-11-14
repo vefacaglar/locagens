@@ -257,6 +257,7 @@ impl AgentLoop {
                 tools::run_command_with_network(&self.project_path, &self.mode, args, Some(network)).await
             }
             "apply_patch" => self.apply_patch_tool(args).await,
+            web_search::TOOL_NAME => web_search::execute(&self.state.pi, args).await,
             name if name.starts_with("mcp__") => {
                 let (server_key, tool_name) = crate::services::mcp::parse_qualified_mcp_tool(name)
                     .ok_or_else(|| format!("Invalid qualified MCP tool name: {name}"))?;

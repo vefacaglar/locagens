@@ -42,7 +42,7 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
 - `-p` runs in Build mode (`accept_edits`) unless config.toml or a flag says otherwise. Without `--approve`, every call
   that needs a permission prompt is **denied with a message** unless a
   standing grant exists in `permissions.json`. The gated tools are
-  `run_command`, `exec_command`, `write_stdin` and `fetch_url`; known-safe
+  `run_command`, `exec_command`, `write_stdin`, `fetch_url` and `web_search`; known-safe
   commands (read-only ones such as `git status`) and commands a `.rules` file
   allows run without a prompt. Dangerous commands (`rm -rf`, `git reset --hard`,
   ...) and writes to protected paths (`.git`, `.locagens`, `.codex`,
@@ -270,10 +270,17 @@ lcgn auth login openai          # Sign in with ChatGPT (browser + loopback redir
 lcgn auth login github-copilot  # GitHub device login (asks for an Enterprise domain on a terminal)
 lcgn auth login openrouter      # Sign in with OpenRouter (browser + loopback redirect)
 lcgn auth login kimi-coding     # Kimi Code device login
+lcgn auth login tavily          # web_search key (also brave-search, exa)
 lcgn auth logout opencode-go
 lcgn auth check                 # exit 0 ready / 1 not ready
 lcgn auth check --provider opencode-go --json
 ```
+
+`tavily`, `brave-search` and `exa` are listed last: they are keys for the
+`web_search` tool (tried in that order; `TAVILY_API_KEY`, `BRAVE_API_KEY`,
+`EXA_API_KEY` work too), not model providers, so they add no models. Without
+any of them `web_search` uses a keyless DuckDuckGo fallback with weaker
+results.
 
 Status shows `signed in (oauth)`, `signed in (api key)`, `env $VAR` or `-`
 (never key or token values). Without a terminal, `lcgn auth login` only prints

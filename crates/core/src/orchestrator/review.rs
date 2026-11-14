@@ -493,7 +493,7 @@ mod tests {
         let names = crate::orchestrator::tool_names_for_mode(REVIEW_RUN_MODE);
         for forbidden in [
             "write_file", "edit_file", "delete_file", "move_file", "create_directory", "apply_patch",
-            "run_command", "exec_command", "write_stdin", "fetch_url", "spawn_agent", "spawn_agents",
+            "run_command", "exec_command", "write_stdin", "fetch_url", "web_search", "spawn_agent", "spawn_agents",
         ] {
             assert!(!names.contains(&forbidden), "{forbidden} exposed in review mode");
             assert!(

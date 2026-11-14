@@ -282,6 +282,10 @@ fn print_preview(preview: &Value) {
             let url = preview.get("url").and_then(Value::as_str).unwrap_or("");
             eprintln!("  url: {url}");
         }
+        "web_search" => {
+            let query = preview.get("query").and_then(Value::as_str).unwrap_or("");
+            eprintln!("  search the web: \"{query}\"");
+        }
         "move" => {
             let dest = preview.get("destPath").and_then(Value::as_str).unwrap_or("");
             eprintln!("  move: {path} -> {dest}");
