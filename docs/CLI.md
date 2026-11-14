@@ -265,8 +265,24 @@ key (never refreshed). OpenCode's `~/.local/share/opencode/auth.json`
 other source and never written.
 `lcgn auth check` reports OAuth credentials as valid/expired (never the
 tokens). Only providers you have configured (credential in `auth.json`, the
-provider's own env var, or an entry in `models.json` / Codex `config.toml`)
-appear in `/model` and `--list-models`.
+provider's own env var, or an entry in `models.json` / `config.toml`
+`[model_providers]`) and that have a base URL appear in `/model` and
+`--list-models`. A vendor env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...)
+is only used for that vendor's own built-in provider; any other provider uses
+an env key only when it names it (`"$VAR"` in `auth.json`, or `envKey` /
+`env_key`).
+
+Model lists are fetched live: the TUI (and the desktop app) re-fetch each
+signed-in provider's `GET /models` in the background when the cached list is
+missing or older than 6 hours (`~/.locagens/models-live.json`). Once fetched,
+that list decides which models a provider offers (models you declared in
+`models.json` stay), so retired models drop out. Models switched off in the
+desktop's Settings → Providers are hidden from `/model` too.
+
+New chats are named by the model: on the first turn of a TUI or desktop chat a
+small extra call (no tools, logged under the `title` usage role) writes a
+2–6 word title, unless one was set meanwhile. Headless `lcgn -p` runs keep the
+first line of the prompt as the title.
 
 ## MCP
 
