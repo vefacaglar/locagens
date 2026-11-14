@@ -122,7 +122,14 @@ impl AgentLoop {
             .map(str::trim)
             .filter(|shell| !shell.is_empty())
             .map(str::to_string);
-        let login = args.get("login").and_then(Value::as_bool).unwrap_or(false);
+        // The safety checks and grants look only at `cmd`, so `shell` must
+        // never name an arbitrary program (FR-030).
+        if let Some(shell) = shell.as_deref().filter(|shell| !locagens_execpolicy::processes::is_known_shell(shell)) {
+            return Err(format!(
+                "exec_command: unknown shell {shell:?}; use sh, bash, zsh, fish, dash or ksh, or omit it for the platform shell."
+            ));
+        }
+        let login =args.get("login").and_then(Value::as_bool).unwrap_or(false);
         // Unknown hosts may prompt only while this call waits (see network_access).
         let (network, _approval_window) = self.command_network_policy(args);
         let options = locagens_execpolicy::processes::SpawnOptions {

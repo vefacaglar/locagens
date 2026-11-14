@@ -123,6 +123,46 @@ async fn env_var_credential_resolution() {
     let _ = std::fs::remove_dir_all(support);
 }
 
+/// FR-033: a vendor's environment key only reaches that vendor's built-in
+/// provider, or a provider whose config names the variable explicitly.
+#[tokio::test]
+async fn vendor_env_keys_never_reach_other_providers() {
+    let _guard = ENV_VAR_TEST_LOCK.lock().await;
+    let (agent, support) = temp_dirs("env-scope");
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    for provider in BUILTINS {
+        if !provider.env_var.is_empty() {
+            std::env::remove_var(provider.env_var);
+        }
+    }
+    std::env::set_var("ANTHROPIC_API_KEY", "fake-anthropic-env-key");
+    std::env::set_var("OPENAI_API_KEY", "fake-openai-env-key");
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": {
+            "my-local": { "baseUrl": "http://localhost:1/v1" },
+            "my-proxy": { "baseUrl": "http://localhost:2/v1", "envKey": "OPENAI_API_KEY" },
+        } })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(manager.resolve_api_key("anthropic", None).await.as_deref(), Some("fake-anthropic-env-key"));
+    assert_eq!(manager.resolve_api_key("openai", None).await.as_deref(), Some("fake-openai-env-key"));
+    for other in ["groq", "deepseek", "ollama", "my-local", "unknown-provider"] {
+        assert_eq!(manager.resolve_api_key(other, None).await, None, "{other}");
+    }
+    // Explicit opt-in: `envKey` in models.json and `$VAR` in auth.json.
+    assert_eq!(manager.resolve_api_key("my-proxy", None).await.as_deref(), Some("fake-openai-env-key"));
+    write_auth(&agent, json!({ "groq": { "type": "api_key", "key": "$ANTHROPIC_API_KEY" } }));
+    assert_eq!(manager.resolve_api_key("groq", None).await.as_deref(), Some("fake-anthropic-env-key"));
+
+    std::env::remove_var("ANTHROPIC_API_KEY");
+    std::env::remove_var("OPENAI_API_KEY");
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
 #[tokio::test]
 async fn codex_chatgpt_tokens_are_ignored_but_openai_api_key_works() {
     let (agent, support) = temp_dirs("codex-tokens");
@@ -731,6 +771,54 @@ async fn failed_oauth_refresh_resolves_to_none() {
     assert!(manager.resolve_api_key("xai", None).await.is_none());
     assert_eq!(read_auth(&agent)["xai"]["access"], "acc-old");
     assert!(!agent.join("auth.json.lock").exists());
+}
+
+/// FR-036: the refresh request runs without the `auth.json` lock, and a
+/// refresh another process stored meanwhile wins over our (failed) one.
+#[tokio::test]
+async fn oauth_refresh_runs_unlocked_and_keeps_a_concurrent_refresh() {
+    use axum::{routing::post, Json, Router};
+    let tmp = tempfile::tempdir().unwrap();
+    let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+    write_auth(&agent, json!({ "xai": oauth_entry("acc-old", "ref-old", 1) }));
+    let locked_during_request = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (seen, dir) = (locked_during_request.clone(), agent.clone());
+    let app = Router::new().route(
+        "/token",
+        post(move || {
+            let (seen, dir) = (seen.clone(), dir.clone());
+            async move {
+                seen.store(dir.join("auth.json.lock").exists(), Ordering::SeqCst);
+                // Another process refreshes first; our refresh token is now spent.
+                write_auth(&dir, json!({ "xai": oauth_entry("acc-other", "ref-other", oauth::now_ms() + 600_000) }));
+                (axum::http::StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_grant" })))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let xai = XaiOAuth::with_endpoints(&format!("{base}/device"), &format!("{base}/token"), PollTiming::default());
+    let manager = PiProviderManager::with_dirs(agent.clone(), support).with_xai_oauth(xai);
+
+    assert_eq!(manager.resolve_api_key("xai", None).await.as_deref(), Some("acc-other"));
+    assert!(!locked_during_request.load(Ordering::SeqCst), "lock must not be held across the request");
+    assert_eq!(read_auth(&agent)["xai"]["access"], "acc-other");
+    assert!(!agent.join("auth.json.lock").exists());
+}
+
+/// FR-036: concurrent refreshes in one process spend the refresh token once.
+#[tokio::test]
+async fn concurrent_oauth_refreshes_send_one_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
+    write_auth(&agent, json!({ "xai": oauth_entry("acc-old", "ref-old", 1) }));
+    let (xai, hits) = spawn_xai_mock(200, json!({ "access_token": "acc-new", "refresh_token": "ref-new", "expires_in": 3600 })).await;
+    let manager = PiProviderManager::with_dirs(agent.clone(), support).with_xai_oauth(xai);
+    let (first, second) = tokio::join!(manager.resolve_api_key("xai", None), manager.resolve_api_key("xai", None));
+    assert_eq!((first.as_deref(), second.as_deref()), (Some("acc-new"), Some("acc-new")));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(read_auth(&agent)["xai"]["refresh"], "ref-new");
 }
 
 #[tokio::test]

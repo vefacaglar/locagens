@@ -15,6 +15,8 @@ const DEFAULT_POLL_INTERVAL_SECS: f64 = 5.0;
 const DEFAULT_DEVICE_CODE_TIMEOUT_SECS: f64 = 900.0;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const REFRESH_MAX_RETRIES: u32 = 3;
+/// The access token is refreshed five minutes before it expires.
+const EXPIRY_MARGIN_MS: i64 = 5 * 60 * 1000;
 
 /// Kimi Code OAuth client; the host and pacing are injectable for tests.
 pub struct KimiOAuth {
@@ -161,7 +163,10 @@ fn parse_tokens(body: &Value) -> Result<OAuthTokens> {
     let (Some(access), Some(refresh), Some(expires_in)) = (text("access_token"), text("refresh_token"), positive(body, "expires_in")) else {
         bail!("Kimi Code token response is missing access_token, refresh_token or expires_in");
     };
-    let expires_ms = super::now_ms() + (expires_in * 1000.0) as i64;
+    // Like the other providers, refresh a little before the real expiry
+    // (at most half the lifetime for very short-lived tokens).
+    let lifetime_ms = (expires_in * 1000.0) as i64;
+    let expires_ms = super::now_ms() + lifetime_ms - EXPIRY_MARGIN_MS.min(lifetime_ms / 2);
     Ok(OAuthTokens::new(access.to_string(), refresh.to_string(), expires_ms))
 }
 
@@ -264,7 +269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_login_stores_tokens_without_extra_fields_or_margin() {
+    async fn device_login_stores_tokens_without_extra_fields_and_with_a_margin() {
         let (kimi, forms) = start_mock(vec![
             (400, json!({ "error": "authorization_pending" })),
             (400, json!({ "error": "slow_down", "interval": 0.02 })),
@@ -281,7 +286,7 @@ mod tests {
         assert_eq!(credential["access"], "acc-1");
         assert_eq!(credential["refresh"], "ref-1");
         let expires = credential["expires"].as_i64().unwrap();
-        assert!(expires >= before + 3_600_000 && expires < before + 3_620_000, "no refresh margin");
+        assert!(expires >= before + 3_300_000 && expires < before + 3_320_000, "5 minute refresh margin");
         assert_eq!(credential.as_object().unwrap().len(), 4);
 
         let forms = forms.lock().unwrap();

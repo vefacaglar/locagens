@@ -78,7 +78,7 @@ impl AuthFileLock {
                     if !is_stale(&lock_dir, stale_after) {
                         return Ok(None);
                     }
-                    let _ = std::fs::remove_dir(&lock_dir);
+                    break_stale(&lock_dir, stale_after);
                 }
                 Err(err) => return Err(err.into()),
             }
@@ -147,6 +147,22 @@ fn lock_dir_for(auth_path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Removes a lock directory that was seen stale. It is first renamed to a
+/// unique name, so of two waiters that both saw it stale only one moves it.
+/// If the moved directory is fresh after all (another waiter broke the stale
+/// one and re-took the lock in between), it is put back untouched.
+fn break_stale(lock_dir: &Path, stale_after: Duration) {
+    let mut moved = lock_dir.as_os_str().to_os_string();
+    moved.push(format!(".stale-{:016x}", rand::random::<u64>()));
+    let moved = PathBuf::from(moved);
+    if std::fs::rename(lock_dir, &moved).is_err() {
+        return;
+    }
+    if is_stale(&moved, stale_after) || std::fs::rename(&moved, lock_dir).is_err() {
+        let _ = std::fs::remove_dir(&moved);
+    }
+}
+
 fn is_stale(lock_dir: &Path, stale_after: Duration) -> bool {
     std::fs::metadata(lock_dir)
         .and_then(|meta| meta.modified())
@@ -179,6 +195,21 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         let lock = AuthFileLock::try_acquire(&auth, Duration::from_millis(5)).unwrap();
         assert!(lock.is_some());
+    }
+
+    /// FR-036: a waiter that saw a stale lock never removes a fresh one that
+    /// another waiter took in the meantime.
+    #[test]
+    fn breaking_a_lock_that_turned_fresh_puts_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = dir.path().join("auth.json");
+        let lock = AuthFileLock::acquire_blocking(&auth).unwrap();
+        let lock_dir = dir.path().join("auth.json.lock");
+        break_stale(&lock_dir, STALE_AFTER);
+        assert!(lock_dir.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "only the lock dir and its owner file");
+        drop(lock);
+        assert!(!lock_dir.exists());
     }
 
     #[test]
