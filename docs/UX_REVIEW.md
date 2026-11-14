@@ -667,7 +667,7 @@ composer, `Esc` cancels.
 
 ### UX-023 · med · S · TUI · A small theme instead of fixed ANSI colours
 
-**Status:** partly (TUI). Dark/light presets (`[tui] theme`, `COLORFGBG`) and `NO_COLOR`; the header badge and syntax colours are not themed.
+**Status:** done (TUI). Dark/light presets (`[tui] theme`, `COLORFGBG`) and `NO_COLOR`, including the header badge and syntax highlighting (InspiredGitHub on light, no hues under `NO_COLOR`).
 
 **Current.** Colours are literals: cyan accents, a black-on-cyan ` lcgn `
 badge, yellow for busy and waiting states, magenta agent tags, and the `DIM`

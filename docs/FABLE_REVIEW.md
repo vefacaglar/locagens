@@ -174,8 +174,7 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-009 · low · undo and snapshot gaps
 
-**Status:** partly fixed. `snapshots.json` updates are serialized in-process, symlinks are excluded, and undo refuses while the run is live. A project in a subfolder of a repo still gets no snapshot.
-
+**Status:** fixed. `snapshots.json` updates are serialized in-process, symlinks are excluded, undo refuses while the run is live, and a project inside a larger repo gets snapshots and undo limited to its subtree.
 - **Location:** `core/services/snapshots.rs:149`, `:208`, `:193-195`,
   `core/api/projects.rs:570-578`.
 - `project_path.join(".git").exists()` means a project that is a subfolder of
@@ -396,8 +395,7 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-026 · low · `search_files` details
 
-**Status:** fixed except `.gitignore` support.
-
+**Status:** fixed. `search_files` walks with the `ignore` crate and honours `.gitignore` (also outside a git repo).
 - **Location:** `core/orchestrator/tools.rs:606-694`.
 - `*.rs` matches with `ends_with("rs")`, so `users` and `foo.tsrs` match.
 - Every directory starting with a dot is skipped (`.github`, `.config`); the
@@ -887,8 +885,7 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-063 · medium · streaming re-renders the whole thread on every event *(sub-review, needs-confirmation on cost)*
 
-**Status:** partly fixed. Rendered Markdown is cached; the thread still re-renders on each event.
-
+**Status:** fixed. Thread rows are keyed components with comparable props built from a memo, so streaming re-renders only the changed message; rendered Markdown is cached. Not profiled in the running app.
 - **Location:** `desktop/components/message_thread.rs:113`,
   `desktop/components/review.rs` (`AssistantBody`).
 - `store.messages.read().clone()` plus regrouping runs per `message_updated`;
