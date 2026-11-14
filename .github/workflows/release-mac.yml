@@ -7,6 +7,7 @@ name: Release (macOS & Windows binaries)
 # - Windows: x86_64 `locagens.exe` + `lcgn.exe` in a zip.
 # Tags (`v*`) and a dispatch with `tag_name` also publish a GitHub Release;
 # a push that changes this workflow only builds (artifacts, no release).
+# Notarization needs the Apple Developer agreements accepted (HTTP 403 otherwise).
 
 on:
   push:
