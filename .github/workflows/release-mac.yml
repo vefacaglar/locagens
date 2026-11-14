@@ -140,6 +140,7 @@ jobs:
         if: steps.signing.outputs.enabled == 'true'
         run: |
           set -e
+          trap 'echo "::error::Signing step failed at: $BASH_COMMAND"' ERR
           codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" build/lcgn
           codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" build/Locagens.app
           codesign --verify --deep --strict --verbose=2 build/Locagens.app
@@ -162,6 +163,7 @@ jobs:
         if: steps.signing.outputs.enabled == 'true'
         run: |
           set -e
+          trap 'echo "::error::DMG signing failed at: $BASH_COMMAND"' ERR
           codesign --force --timestamp --sign "$SIGN_IDENTITY" dist/Locagens-macOS-universal.dmg
           bash .github/scripts/notarize.sh dist/Locagens-macOS-universal.dmg
           xcrun stapler staple dist/Locagens-macOS-universal.dmg
