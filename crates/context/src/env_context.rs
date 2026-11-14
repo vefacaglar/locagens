@@ -29,9 +29,11 @@ pub fn build_environment_context(args: &EnvironmentContextArgs) -> String {
     )
 }
 
+/// The shell commands actually run in: `cmd /C` on Windows (the command
+/// tools and their safety rules use cmd), so the model writes cmd syntax.
 fn default_shell() -> &'static str {
     if cfg!(windows) {
-        "powershell"
+        "cmd"
     } else if let Ok(shell) = std::env::var("SHELL") {
         if shell.ends_with("zsh") {
             "zsh"

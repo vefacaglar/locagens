@@ -28,7 +28,8 @@ impl LoginRow {
         let has_oauth = provider.oauth_label.is_some();
         let method = match (&provider.oauth_label, keyless) {
             (_, true) => "no sign-in needed (local)".to_string(),
-            (Some(label), _) => format!("Sign in with {label}"),
+            // The label is the whole phrase ("Sign in with ChatGPT").
+            (Some(label), _) => label.clone(),
             (None, _) => "API key".to_string(),
         };
         let status = match &provider.status {
@@ -310,6 +311,19 @@ mod tests {
             has_oauth: oauth,
             keyless: id == "ollama",
         }
+    }
+
+    #[test]
+    fn sign_in_label_is_not_doubled() {
+        let provider = LoginProvider {
+            id: "openai-codex".into(),
+            name: "OpenAI".into(),
+            oauth_label: Some("Sign in with ChatGPT".into()),
+            oauth_flow: None,
+            api_key_env: None,
+            status: LoginStatus::SignedOut,
+        };
+        assert_eq!(LoginRow::from_provider(&provider).method, "Sign in with ChatGPT");
     }
 
     fn flow() -> LoginFlow {

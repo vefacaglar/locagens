@@ -136,7 +136,7 @@ fn sign_in_methods(provider: &LoginProvider) -> String {
         return "none (local)".to_string();
     }
     match &provider.oauth_label {
-        Some(label) => format!("OAuth ({label}), API key"),
+        Some(label) => format!("{label}, or an API key"),
         None => "API key".to_string(),
     }
 }

@@ -178,3 +178,21 @@ async fn non_streaming_openai_body_keeps_output_tokens() {
     assert_eq!((usage.input_tokens, usage.output_tokens), (10, 4));
     assert_eq!(outcome.content, "OK");
 }
+
+/// OpenCode's Messages endpoint sends zero usage in `message_start` and the
+/// real prompt counts in `message_delta`; Anthropic sends them at the start.
+#[test]
+fn anthropic_prompt_usage_is_taken_from_either_event() {
+    let mut delta_only = StreamAcc::default();
+    delta_only.feed_anthropic(&json!({ "type": "message_start", "message": { "usage": { "input_tokens": 0, "output_tokens": 0 } } }));
+    delta_only.feed_anthropic(&json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" },
+        "usage": { "input_tokens": 1, "output_tokens": 22, "cache_read_input_tokens": 203 } }));
+    assert_eq!((delta_only.usage.input_tokens, delta_only.usage.cache_read_tokens, delta_only.usage.output_tokens), (204, 203, 22));
+
+    let mut start_only = StreamAcc::default();
+    start_only.feed_anthropic(&json!({ "type": "message_start", "message": { "usage": {
+        "input_tokens": 10, "cache_read_input_tokens": 90, "cache_creation_input_tokens": 5 } } }));
+    start_only.feed_anthropic(&json!({ "type": "message_delta", "usage": { "output_tokens": 7 } }));
+    assert_eq!((start_only.usage.input_tokens, start_only.usage.cache_read_tokens, start_only.usage.cache_write_tokens), (105, 90, 5));
+    assert_eq!(start_only.usage.output_tokens, 7);
+}

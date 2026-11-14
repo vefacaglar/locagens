@@ -34,10 +34,11 @@ pub(super) fn apply_provider_headers(
         if base_url.contains("openrouter") {
             request = request.header("X-Title", "Locagens");
         }
-        // OpenCode Zen requires a per-conversation routing header.
-        if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
-            request = request.header("x-opencode-session", &endpoint.session_id);
-        }
+    }
+    // OpenCode Zen requires a per-conversation routing header, on both its
+    // OpenAI-compatible and its Anthropic Messages endpoints.
+    if base_url.contains("opencode.ai") && !endpoint.session_id.is_empty() {
+        request = request.header("x-opencode-session", &endpoint.session_id);
     }
     request
 }
@@ -194,6 +195,33 @@ pub(super) fn summarize_error(body: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| body.chars().take(400).collect())
+}
+
+#[cfg(test)]
+mod provider_header_tests {
+    use super::apply_provider_headers;
+    use crate::orchestrator::llm::types::Endpoint;
+
+    fn session_header(api: &str) -> Option<String> {
+        let base_url = "https://opencode.ai/zen/go/v1";
+        let endpoint = Endpoint {
+            base_url: base_url.into(),
+            api: api.into(),
+            api_key: "test-key".into(),
+            session_id: "run-1".into(),
+            ..Default::default()
+        };
+        let request = apply_provider_headers(reqwest::Client::new().post(base_url), &endpoint, base_url, &[])
+            .build()
+            .unwrap();
+        request.headers().get("x-opencode-session").map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn opencode_gets_the_session_header_on_both_apis() {
+        assert_eq!(session_header("openai-compatible").as_deref(), Some("run-1"));
+        assert_eq!(session_header("anthropic-messages").as_deref(), Some("run-1"));
+    }
 }
 
 #[cfg(test)]

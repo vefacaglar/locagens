@@ -67,18 +67,24 @@ fn key_lines() -> Vec<Line<'static>> {
     lines
 }
 
+/// Inner width from which the help shows commands and keys side by side.
+const HELP_TWO_COLUMN_WIDTH: u16 = 136;
+
 pub fn draw_help(f: &mut Frame, help: &mut HelpView, area: Rect) {
-    let width = area.width.saturating_sub(2).min(120);
+    let width = area.width.saturating_sub(2).min(150);
     let height = area.height.saturating_sub(2).max(5);
     let rect = centered(area, width, height);
     let inner = frame(f, rect, " Help ");
     let [body, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    let wide = body.width >= 96;
+    // Side by side only when both columns fit whole (usage + description
+    // each); otherwise one column, so no description is cut off.
+    let wide = body.width >= HELP_TWO_COLUMN_WIDTH;
     let (commands, bindings) = (command_lines(), key_lines());
     let lines_total = if wide { commands.len().max(bindings.len()) } else { commands.len() + bindings.len() + 1 };
     help.scroll = help.scroll.min(lines_total.saturating_sub(body.height as usize));
     if wide {
-        let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
+        let [left, _gap, right] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(3), Constraint::Fill(1)]).areas(body);
         f.render_widget(Paragraph::new(commands).scroll((help.scroll as u16, 0)), left);
         f.render_widget(Paragraph::new(bindings).scroll((help.scroll as u16, 0)), right);
     } else {
@@ -272,7 +278,7 @@ fn draw_login_pick(f: &mut Frame, flow: &LoginFlow, query: &str, selected: usize
                 let marker = if here { "› " } else { "  " };
                 let mut spans = vec![
                     Span::styled(format!("{marker}{:<22}", truncate_to_width(&row.name, 22)), style),
-                    Span::styled(format!("{:<28}", truncate_to_width(&row.method, 28)), dim()),
+                    Span::styled(format!("{:<38}", truncate_to_width(&row.method, 36)), dim()),
                 ];
                 if !row.status.is_empty() {
                     spans.push(Span::styled(row.status.clone(), Style::default().fg(theme::ok())));

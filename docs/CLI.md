@@ -127,7 +127,7 @@ messages back into the composer.
 Permission requests open a modal that says why it appeared. `y`/`o` allow
 once, `r` this run, `d`/`n`/Esc deny, Up/Down scroll the diff. `p` (project)
 and `a` (always) are standing grants: press the key twice (the footer reads
-`p p project` and `a a always`; after the first press it says "press a again
+`p×2 project` and `a×2 always`; after the first press it says "press a again
 to always allow"), and grant keys are ignored for the first 600 ms. The line
 under the options shows what a standing grant covers. Dangerous commands and
 protected paths show only `y` and `d`. `apply_patch` requests list the files

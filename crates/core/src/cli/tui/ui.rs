@@ -77,13 +77,28 @@ fn header_location(app: &App) -> String {
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let title = app.display_title();
+    // Badge, spaces and at least part of the title; the path gets the rest.
+    let budget = (area.width as usize).saturating_sub(10 + title.chars().count().min(30));
     let line = Line::from(vec![
         Span::styled(" lcgn ", theme::badge()),
-        Span::styled(format!(" {}", header_location(app)), dim()),
+        Span::styled(format!(" {}", keep_path_tail(&header_location(app), budget)), dim()),
         Span::raw("  "),
-        Span::styled(app.display_title(), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// A path cut from the left to `max` characters (`…\work\demo`), so the
+/// folder name at its end stays visible.
+fn keep_path_tail(path: &str, max: usize) -> String {
+    let count = path.chars().count();
+    if count <= max {
+        return path.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let tail: String = path.chars().skip(count - keep).collect();
+    format!("…{tail}")
 }
 
 fn welcome_lines(app: &App) -> Vec<Line<'static>> {
@@ -589,9 +604,9 @@ pub fn approval_legend(approval: &Approval) -> Line<'static> {
         Span::raw(" once  "),
         Span::styled("r", key),
         Span::raw(" this run  "),
-        Span::styled("p p", key),
+        Span::styled("p×2", key),
         Span::raw(" project  "),
-        Span::styled("a a", key),
+        Span::styled("a×2", key),
         Span::raw(" always  "),
         Span::styled("d", key),
         Span::raw(" deny  "),
@@ -865,6 +880,10 @@ mod tests {
         assert!(screen.contains("Commands"), "{screen}");
         // Long usages keep a gap before their description.
         assert!(screen.contains("/model [provider/id]  show or switch models"), "{screen}");
+        // A 100-column terminal stacks the sections instead of cutting the
+        // command descriptions at a second column.
+        let medium = render(&mut app, 100, 30);
+        assert!(medium.contains("reasoning effort (off..max)"), "{medium}");
     }
 
     #[test]
@@ -963,11 +982,17 @@ mod ux_tests {
     }
 
     #[test]
+    fn long_header_paths_keep_their_folder_name() {
+        assert_eq!(keep_path_tail("C:/work/demo", 20), "C:/work/demo");
+        assert_eq!(keep_path_tail("C:/very/long/path/to/demo", 10), "…h/to/demo");
+    }
+
+    #[test]
     fn approval_legend_announces_the_second_press() {
         let event = serde_json::json!({"toolCall": {"function": {"name": "run_command"}}, "preview": {"action": "command", "command": "ls"}});
         let mut approval = Approval::from_event(&event);
-        assert!(line_text(&approval_legend(&approval)).contains("a a always"));
-        assert!(line_text(&approval_legend(&approval)).contains("p p project"));
+        assert!(line_text(&approval_legend(&approval)).contains("a×2 always"));
+        assert!(line_text(&approval_legend(&approval)).contains("p×2 project"));
         approval.pending_grant = Some("allow_always");
         assert_eq!(line_text(&approval_legend(&approval)), "press a again to always allow (d to deny)");
         approval.pending_grant = None;

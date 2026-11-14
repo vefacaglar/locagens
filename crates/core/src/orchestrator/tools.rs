@@ -146,7 +146,7 @@ fn base_tool_defs() -> Vec<Value> {
                 "input": json!({ "type": "string", "description": "Patch text in *** Begin Patch ... *** End Patch format." }),
                 "patch": json!({ "type": "string", "description": "Alias for `input` (Codex compatibility)." })
             }), &["input"]),
-        def("exec_command", "Run a shell command in the workspace (Codex unified exec). If it finishes within yield_time_ms the result is returned directly; otherwise it keeps running as a background session you can drive with write_stdin.",
+        def("exec_command", "Run a shell command in the workspace (Codex unified exec). It runs with `cmd /C` on Windows and `sh -c` elsewhere (the <shell> of the environment context); for PowerShell use `powershell -NoProfile -Command \"...\"`. If it finishes within yield_time_ms the result is returned directly; otherwise it keeps running as a background session you can drive with write_stdin.",
             json!({
                 "cmd": json!({ "type": "string", "description": "The command to execute." }),
                 "workdir": json!({ "type": "string", "description": "Optional working directory inside the workspace." }),

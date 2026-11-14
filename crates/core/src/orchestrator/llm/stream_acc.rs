@@ -118,18 +118,25 @@ impl StreamAcc {
         }
     }
 
+    /// Takes the prompt-side counts of an Anthropic `usage` object, never
+    /// lowering one already seen (start and delta counts are cumulative).
+    /// Anthropic's `input_tokens` leaves the cached part out;
+    /// `Usage.input_tokens` is the whole prompt everywhere.
+    fn merge_anthropic_input_usage(&mut self, usage: &Value) {
+        let count = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+        let uncached = self.usage.input_tokens - self.usage.cache_read_tokens - self.usage.cache_write_tokens;
+        self.usage.cache_read_tokens = self.usage.cache_read_tokens.max(count("cache_read_input_tokens"));
+        self.usage.cache_write_tokens = self.usage.cache_write_tokens.max(count("cache_creation_input_tokens"));
+        self.usage.input_tokens =
+            uncached.max(count("input_tokens")) + self.usage.cache_read_tokens + self.usage.cache_write_tokens;
+    }
+
     /// Consumes one Anthropic Messages streaming event.
     pub fn feed_anthropic(&mut self, event: &Value) {
         match event.get("type").and_then(Value::as_str).unwrap_or_default() {
             "message_start" => {
                 if let Some(usage) = event.pointer("/message/usage") {
-                    let count = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
-                    self.usage.cache_read_tokens = count("cache_read_input_tokens");
-                    self.usage.cache_write_tokens = count("cache_creation_input_tokens");
-                    // Anthropic's `input_tokens` leaves the cached part out;
-                    // `Usage.input_tokens` is the whole prompt everywhere.
-                    self.usage.input_tokens =
-                        count("input_tokens") + self.usage.cache_read_tokens + self.usage.cache_write_tokens;
+                    self.merge_anthropic_input_usage(usage);
                 }
             }
             "content_block_start" => {
@@ -177,6 +184,11 @@ impl StreamAcc {
             "message_delta" => {
                 if let Some(output) = event.pointer("/usage/output_tokens").and_then(Value::as_i64) {
                     self.usage.output_tokens = output;
+                }
+                // The delta's counts are cumulative; some servers (OpenCode's
+                // Messages endpoint) report the prompt only here.
+                if let Some(usage) = event.get("usage") {
+                    self.merge_anthropic_input_usage(usage);
                 }
                 if let Some(reason) = event.pointer("/delta/stop_reason").and_then(Value::as_str) {
                     self.stop_reason = Some(reason.to_string());
