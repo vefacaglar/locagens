@@ -102,12 +102,27 @@ fn EmptyState(icon: Element, title: String, hint: Option<String>) -> Element {
 fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
     let store: UiStore = use_context();
     // Plan and Agents start open only when they have something to show.
-    let initially_open = (count.is_some() && matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents))
-        || *store.right_panel_tab.peek() == tab;
+    let initially_open = match tab {
+        RightPanelTab::Plan | RightPanelTab::Agents => count.is_some(),
+        RightPanelTab::Git | RightPanelTab::Terminal => *store.right_panel_tab.peek() == tab,
+    };
     let mut open = use_signal(|| initially_open);
-    // "Review changes" / `/diff` select a tab: open its section.
+    // Plan/Agents content often arrives after mount: open once it appears.
+    let has_content = count.is_some();
+    use_effect(use_reactive!(|has_content| {
+        if has_content && matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents) && !*open.peek() {
+            open.set(true);
+        }
+    }));
+    // "Review changes" / `/diff` / summary rows select a tab: open its
+    // section. The first run is the mount, where the default tab is not a
+    // request to open anything.
+    let mut mounted = use_signal(|| false);
     use_effect(move || {
-        if *store.right_panel_tab.read() == tab && !*open.peek() {
+        let selected = *store.right_panel_tab.read() == tab;
+        if !*mounted.peek() {
+            mounted.set(true);
+        } else if selected && !*open.peek() {
             open.set(true);
         }
     });
@@ -335,9 +350,14 @@ fn SummaryCard() -> Element {
                                 style: "width: {percent}%",
                             }
                         }
-                        span { class: "summary-muted", "{percent}%" }
-                    } else {
-                        span { class: "summary-muted", "{crate::state_ui::fmt_tokens(context.used_tokens)}" }
+                    }
+                    span {
+                        class: "summary-muted",
+                        title: "{store.t(\"inspector.window_used\")}",
+                        match context.context_window {
+                            Some(window) => format!("{} / {}", crate::state_ui::fmt_tokens(context.used_tokens), crate::state_ui::fmt_tokens(window)),
+                            None => crate::state_ui::fmt_tokens(context.used_tokens),
+                        }
                     }
                 }
             }
