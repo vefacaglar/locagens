@@ -1179,6 +1179,11 @@ button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex
 .ccm-footer { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 4px; }
 .composer-context-menu.model-menu { max-height: min(460px, 70vh); overflow: visible; }
 .effort-anchor { anchor-name: --effort-row; }
+/* WebKit before anchor positioning (older macOS): pin the flyout beside
+   the menu's bottom instead of the hovered row. */
+@supports not (anchor-name: --effort-row) {
+  .picker-effort-flyout { left: calc(100% + 6px); top: auto; bottom: 0; }
+}
 .picker-effort-flyout {
   position: absolute; position-anchor: --effort-row;
   top: calc(anchor(top) - 6px); left: calc(anchor(right) + 10px);
