@@ -8,8 +8,6 @@ use crate::markdown::render_markdown;
 use crate::state_ui::{core, mode_key, RightPanelTab, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::projects::{GitFileDiff, GitStatus, GitWorktree};
-use locagens_core::api::processes::{list_processes, process_logs, spawn_process, SpawnProcessInput};
-use locagens_core::services::processes::ProcessInfo;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -61,11 +59,11 @@ pub fn RightPanel() -> Element {
             }
         }
         div {
-            class: "right-panel-body",
+            class: if tab == RightPanelTab::Git { "right-panel-body" } else { "right-panel-body terminal-body" },
             id: if tab == RightPanelTab::Git { "inspector-git" } else { "inspector-terminal" },
             match tab {
                 RightPanelTab::Git => rsx! { GitTab {} },
-                _ => rsx! { TerminalTab {} },
+                _ => rsx! { crate::components::terminal::TerminalPanel { project: store.current_project() } },
             }
         }
     }
@@ -1016,231 +1014,6 @@ fn GitTab() -> Element {
             None => rsx! {
                 EmptyState { icon: icon_git_branch(), title: store.t("git.no_project"), hint: store.t("git.no_project_hint").to_string() }
             },
-        }
-    }
-}
-
-/// i18n key of a background process state.
-fn process_status_key(status: &str) -> &'static str {
-    match status {
-        "running" => "term.status_running",
-        "exited" => "term.status_exited",
-        "stopped" => "term.status_stopped",
-        _ => "term.status_error",
-    }
-}
-
-/// Terminal / Processes: launch background commands in the selected project,
-/// watch their stdout/stderr logs and stop them.
-#[component]
-fn TerminalTab() -> Element {
-    let store: UiStore = use_context();
-    let processes: Signal<Vec<ProcessInfo>> = use_signal(Vec::new);
-    let mut selected: Signal<Option<String>> = use_signal(|| None);
-    let logs: Signal<Option<locagens_core::api::processes::ProcessLogs>> = use_signal(|| None);
-    let mut command = use_signal(String::new);
-    let busy = use_signal(|| false);
-    let mut version = use_signal(|| 0u32);
-
-    let project_path = inspector_project_path(&store);
-
-    // Load + poll the process list; bumping `version` restarts it and a
-    // project switch ends the old loop (FR-049).
-    use_effect(move || {
-        let path = inspector_project_path(&store);
-        let mut processes = processes;
-        let current_version = *version.read();
-        spawn(async move {
-            let state = core();
-            loop {
-                if *version.peek() != current_version || store.current_project_peek() != path {
-                    break;
-                }
-                processes.set(
-                    list_processes(&state, path.as_deref())
-                        .await
-                        .unwrap_or_default(),
-                );
-                tokio::time::sleep(Duration::from_millis(2500)).await;
-            }
-        });
-    });
-
-    // Poll the selected process's logs; ends when the process disappears or
-    // the selection changes.
-    use_effect(move || {
-        let id = selected.read().clone();
-        let mut logs = logs;
-        spawn(async move {
-            let state = core();
-            let Some(id) = id else {
-                logs.set(None);
-                return;
-            };
-            loop {
-                if selected.peek().as_deref() != Some(id.as_str()) {
-                    break;
-                }
-                match process_logs(&state, &id).await {
-                    Ok(data) => {
-                        logs.set(Some(data));
-                        // Tail-follow while the reader is at the bottom (FR-066).
-                        dioxus::document::eval(
-                            "requestAnimationFrame(() => { const v = document.querySelector('.log-view'); if (v && v.scrollHeight - v.scrollTop - v.clientHeight < 60) v.scrollTop = v.scrollHeight; });",
-                        );
-                    }
-                    Err(_) => {
-                        logs.set(None);
-                        break;
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(1200)).await;
-            }
-        });
-    });
-
-    let process_list = processes.read().clone();
-    let selected_id = selected.read().clone();
-    let log_data = logs.read().clone();
-    let path_for_spawn_key = project_path.clone();
-    let path_for_spawn_run = project_path.clone();
-
-    rsx! {
-        div {
-            class: "composer-row-top",
-            input {
-                placeholder: store.t("term.command"),
-                "aria-label": store.t("term.command"),
-                value: "{command.read()}",
-                oninput: move |event| command.set(event.value()),
-                onkeydown: move |event: KeyboardEvent| {
-                    // `busy` guards a double Enter (FR-066).
-                    if event.key() == Key::Enter && !*busy.peek() && !command.read().trim().is_empty() {
-                        let mut busy = busy;
-                        let cmd = command.read().trim().to_string();
-                        let path = path_for_spawn_key.clone();
-                        busy.set(true);
-                        spawn(async move {
-                            let state = core();
-                            match spawn_process(
-                                &state,
-                                &SpawnProcessInput {
-                                    command: Some(cmd),
-                                    project_path: path.clone(),
-                                    env: None,
-                                },
-                            )
-                            .await
-                            {
-                                Ok(info) => {
-                                    command.set(String::new());
-                                    selected.set(Some(info.id.clone()));
-                                    version.with_mut(|value| *value += 1);
-                                }
-                                Err(err) => store.toast(store.tf("toast.proc_start_failed", &[&err.to_string()])),
-                            }
-                            busy.set(false);
-                        });
-                    }
-                },
-            }
-            button {
-                class: "primary",
-                disabled: *busy.read() || command.read().trim().is_empty(),
-                onclick: move |_| {
-                    let mut busy = busy;
-                    let cmd = command.read().trim().to_string();
-                    let path = path_for_spawn_run.clone();
-                    busy.set(true);
-                    spawn(async move {
-                        let state = core();
-                        match spawn_process(
-                            &state,
-                            &SpawnProcessInput {
-                                command: Some(cmd),
-                                project_path: path.clone(),
-                                env: None,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(info) => {
-                                command.set(String::new());
-                                selected.set(Some(info.id.clone()));
-                                version.with_mut(|value| *value += 1);
-                            }
-                            Err(err) => store.toast(store.tf("toast.proc_start_failed", &[&err.to_string()])),
-                        }
-                        busy.set(false);
-                    });
-                },
-                "{store.t(\"term.run\")}"
-            }
-        }
-        if process_list.is_empty() {
-            EmptyState { icon: icon_terminal(), title: store.t("term.none"), hint: store.t("term.none_hint").to_string() }
-        }
-        for process in process_list.iter() {
-            {
-                let id = process.id.clone();
-                let is_selected = selected_id.as_deref() == Some(process.id.as_str());
-                let process_status = process.status.clone();
-                let kill_id = process.id.clone();
-                rsx! {
-                    div {
-                        key: "{id}",
-                        class: if is_selected { "settings-row selected" } else { "settings-row" },
-                        role: "button",
-                        tabindex: "0",
-                        onclick: move |_| selected.set(if is_selected { None } else { Some(id.clone()) }),
-                        div {
-                            class: "grow",
-                            div { class: "mono proc-command", "{process.command}" }
-                            span { class: "badge", "{store.t(process_status_key(&process_status))} · {id}" }
-                        }
-                        button {
-                            class: "icon-btn danger",
-                            title: store.t("term.stop"),
-                            onclick: move |event: Event<MouseData>| {
-                                event.stop_propagation();
-                                let kill_id = kill_id.clone();
-                                spawn(async move {
-                                    let state = core();
-                                    match locagens_core::api::processes::kill_process(&state, &kill_id).await {
-                                        Ok(_) => store.toast(store.t("toast.proc_stopped").to_string()),
-                                        Err(err) => store.toast(store.tf("toast.stop_proc_failed", &[&err.to_string()])),
-                                    }
-                                    version.with_mut(|value| *value += 1);
-                                });
-                            },
-                            {icon_stop()}
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(data) = log_data {
-            div {
-                class: "panel-card",
-                div {
-                    class: "panel-section-title",
-                    "{store.t(\"term.logs\")} · {data.process.command}"
-                }
-                div {
-                    class: "tool-output log-view",
-                    if data.logs.is_empty() {
-                        "{store.t(\"term.no_output\")}"
-                    }
-                    for (index, entry) in data.logs.iter().enumerate() {
-                        div {
-                            key: "{index}",
-                            class: "log-line",
-                            span { class: "badge", "{entry.stream}" }
-                            span { class: "mono", "{entry.text}" }
-                        }
-                    }
-                }
-            }
         }
     }
 }

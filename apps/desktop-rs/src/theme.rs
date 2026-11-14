@@ -879,6 +879,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .right-panel-head { padding: 0 var(--controls-w) 0 16px; border-bottom-color: transparent; }
 .head-title { font-size: 12px; font-weight: 500; color: var(--text-3); }
 .right-panel-body { flex: 1; overflow-y: auto; padding: 4px 8px 16px; display: flex; flex-direction: column; gap: 4px; }
+.right-panel-body.terminal-body { padding: 0; overflow: hidden; min-height: 0; }
 /* Codex-style floating summary card at the top of the inspector. */
 .summary-card {
   margin: 4px 2px 8px; padding: 6px; border-radius: 14px;

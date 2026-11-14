@@ -137,6 +137,8 @@ fn App() -> Element {
     let appearance = store.appearance;
     let system_dark = store.system_dark;
     use_context_provider(|| store);
+    // Shells of the terminal panel end with the window.
+    use_drop(locagens_core::api::terminal::close_all);
 
     // Chat scroll helpers, a11y basics and the context-menu rule.
     use_effect(|| {
