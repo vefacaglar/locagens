@@ -214,10 +214,14 @@ async fn run(mut cli: Cli) -> i32 {
             initial_session,
             open_resume,
         };
-        if cli.use_tui() {
-            return tui::run(state, config).await;
-        }
-        return repl::repl(state, config).await;
+        let code = if cli.use_tui() {
+            tui::run(state.clone(), config).await
+        } else {
+            repl::repl(state.clone(), config).await
+        };
+        // Exec sessions (dev servers, watchers) end with lcgn (FR-022).
+        crate::api::runs::shutdown(&state).await;
+        return code;
     }
 
     // One-shot run (with -p, --mode json, or piped/non-tty stdin).
@@ -241,7 +245,9 @@ async fn run(mut cli: Cli) -> i32 {
             return 2;
         }
     };
-    runner::run_turn(&state, target, &opts, task, None).await.0
+    let code = runner::run_turn(&state, target, &opts, task, None).await.0;
+    crate::api::runs::shutdown(&state).await;
+    code
 }
 
 /// Resolves `-c` / `--session` / `-r` into the session id to continue
