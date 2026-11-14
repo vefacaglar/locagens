@@ -159,11 +159,7 @@ pub async fn create_git_snapshot_for_path(
     project_path: &Path,
     run_id: &str,
 ) -> Result<Option<GitSnapshot>, String> {
-    if !project_path.join(".git").exists()
-        || git(project_path, &["rev-parse", "--is-inside-work-tree"])
-            .await
-            .is_err()
-    {
+    if repo_location(project_path).await.is_none() {
         return Ok(None);
     }
     // Repos without any commit have no HEAD to restore to.
@@ -211,6 +207,18 @@ pub async fn create_git_snapshot_for_path(
     Ok(Some(snapshot))
 }
 
+/// Where the project sits in its repository: the repository root and the
+/// project's path below it (`"sub/"`, or `""` when the project is the root).
+/// `None` outside a worktree. A project may be a subfolder of a repository;
+/// snapshots and undo then cover only that subtree (FR-009).
+async fn repo_location(project_path: &Path) -> Option<(PathBuf, String)> {
+    let raw = git(project_path, &["rev-parse", "--show-toplevel", "--show-prefix"]).await.ok()?;
+    let mut lines = raw.lines();
+    let root = lines.next().map(str::trim).filter(|root| !root.is_empty())?;
+    let prefix = lines.next().map(str::trim).unwrap_or_default();
+    Some((PathBuf::from(root), prefix.to_string()))
+}
+
 /// Non-ignored worktree files (tracked + untracked), excluding `.locagens/`.
 /// Paths with a newline cannot go through `--stdin-paths` and are skipped.
 async fn worktree_files(project_path: &Path) -> Result<Vec<String>, String> {
@@ -250,7 +258,9 @@ async fn hash_files(project_path: &Path, files: &[String], write: bool) -> Resul
         if write {
             args.insert(1, "-w");
         }
-        let input = missing.iter().map(|index| files[*index].as_str()).collect::<Vec<_>>().join("\n").into_bytes();
+        // `--stdin-paths` resolves paths from the repository root, not the cwd.
+        let (_, prefix) = repo_location(project_path).await.ok_or("Not inside a git worktree")?;
+        let input = missing.iter().map(|index| format!("{prefix}{}", files[*index])).collect::<Vec<_>>().join("\n").into_bytes();
         let output = git_bytes(project_path, &args, &[], Some(input)).await?;
         let hashed: Vec<String> = String::from_utf8_lossy(&output).lines().map(str::to_string).collect();
         if hashed.len() != missing.len() {
@@ -358,16 +368,19 @@ async fn write_worktree_tree(project_path: &Path, id: &str) -> Result<String, St
     let files = worktree_files(project_path).await?;
     let shas = hash_files(project_path, &files, true).await?;
     let modes = executable_files(project_path).await;
+    let (root, prefix) = repo_location(project_path).await.ok_or("Not inside a git worktree")?;
+    // Tree entries carry repo-root-relative paths, so the tree is written
+    // from the repository root.
     let mut index_info = String::new();
     for (file, sha) in files.iter().zip(&shas) {
         let mode = if modes.contains(file) { "100755" } else { "100644" };
-        index_info.push_str(&format!("{mode} {sha}\t{file}\n"));
+        index_info.push_str(&format!("{mode} {sha}\t{prefix}{file}\n"));
     }
     let temp_index = std::env::temp_dir().join(format!("locagens-{id}.index"));
     let env = [("GIT_INDEX_FILE", temp_index.as_path())];
     let result = async {
-        git_bytes(project_path, &["update-index", "--add", "--index-info"], &env, Some(index_info.into_bytes())).await?;
-        let tree = git_bytes(project_path, &["write-tree"], &env, None).await?;
+        git_bytes(&root, &["update-index", "--add", "--index-info"], &env, Some(index_info.into_bytes())).await?;
+        let tree = git_bytes(&root, &["write-tree"], &env, None).await?;
         Ok::<String, String>(String::from_utf8_lossy(&tree).trim().to_string())
     }
     .await;
@@ -616,13 +629,16 @@ async fn snapshot_tree_entries(
     project_path: &Path,
     tree_sha: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let raw = git_bytes(project_path, &["ls-tree", "-r", "-z", tree_sha], &[], None).await?;
+    let (root, prefix) = repo_location(project_path).await.ok_or("Not inside a git worktree")?;
+    let raw = git_bytes(&root, &["ls-tree", "-r", "-z", tree_sha], &[], None).await?;
     Ok(raw
         .split(|byte| *byte == 0)
         .filter_map(|entry| std::str::from_utf8(entry).ok())
         .filter_map(|entry| {
             let (meta, path) = entry.split_once('\t')?;
             let sha = meta.split_whitespace().nth(2)?;
+            // Project-relative paths; entries outside the subtree are not ours.
+            let path = path.strip_prefix(prefix.as_str())?;
             Some((path.to_string(), sha.to_string()))
         })
         .collect())
@@ -727,6 +743,36 @@ mod tests {
         // Undo without a matching snapshot fails cleanly.
         assert!(undo_last_turn_for_path(&root, Some("missing")).await.is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_undo_work_for_a_project_inside_a_repo() {
+        let repo = std::env::temp_dir().join(format!("locagens-snap-sub-{}", uuid::Uuid::new_v4()));
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(repo.join("outside.txt"), "outside\n").unwrap();
+        std::fs::write(sub.join("tracked.txt"), "base\n").unwrap();
+        run_git(&repo, &["init", "-q"]);
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(sub.join("tracked.txt"), "pre-turn\n").unwrap();
+        let snapshot = create_git_snapshot_for_path(&sub, "run-sub")
+            .await
+            .unwrap()
+            .expect("a project inside a repo is snapshotted");
+        assert!(snapshot.tree_sha.is_some());
+
+        std::fs::write(sub.join("tracked.txt"), "post-turn\n").unwrap();
+        std::fs::write(sub.join("generated.txt"), "artifact\n").unwrap();
+        // Outside the project: never touched by undo.
+        std::fs::write(repo.join("outside.txt"), "edited outside\n").unwrap();
+
+        undo_last_turn_for_path(&sub, Some("run-sub")).await.unwrap();
+        assert_eq!(std::fs::read_to_string(sub.join("tracked.txt")).unwrap(), "pre-turn\n");
+        assert!(!sub.join("generated.txt").exists());
+        assert_eq!(std::fs::read_to_string(repo.join("outside.txt")).unwrap(), "edited outside\n");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]

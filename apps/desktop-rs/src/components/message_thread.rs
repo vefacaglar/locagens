@@ -37,6 +37,19 @@ pub enum Group {
     SubAgent { role: String, name: String, groups: Vec<Group> },
 }
 
+impl Group {
+    /// Stable key of the rendered row: the message id (a sub-agent group is
+    /// keyed by its first message), so only a changed message re-renders.
+    fn key(&self) -> String {
+        match self {
+            Group::User(message) | Group::Assistant { message, .. } => message.id.clone(),
+            Group::SubAgent { role, name, groups } => {
+                format!("{role}/{name}/{}", groups.first().map(Group::key).unwrap_or_default())
+            }
+        }
+    }
+}
+
 /// Tool calls serialized in an assistant message's `raw_response`.
 fn message_tool_calls(message: &RunMessage) -> Vec<Value> {
     message
@@ -197,15 +210,21 @@ pub fn is_auth_error(error: &str) -> bool {
 #[component]
 pub fn MessageThread() -> Element {
     let store: UiStore = use_context();
-    let messages = store.messages.read().clone();
-    let groups = build_groups(&messages);
+    // The memo re-runs per message update but only wakes this component when
+    // the grouped result differs; each row below is a memoized component, so
+    // a streaming delta re-renders just the streaming message (FR-063).
+    let thread = use_memo(move || {
+        let groups = build_groups(&store.messages.read());
+        let labels = model_label_flags(&groups);
+        (groups, labels)
+    });
+    let (groups, labels) = thread.read().clone();
     let is_empty = groups.is_empty();
     let run = store.active_run.read().clone();
     let has_active = run_active(run.as_ref());
     let streaming_review = run
         .as_ref()
         .is_some_and(|run| has_active && locagens_core::orchestrator::review::is_review_run(run));
-    let labels = model_label_flags(&groups);
     let failure = run
         .as_ref()
         .filter(|run| run.status == "failed")
@@ -224,7 +243,7 @@ pub fn MessageThread() -> Element {
                 EmptyThread {}
             }
             for (group, show_model) in groups.iter().zip(labels) {
-                { render_group(group, 0, show_model, streaming_review) }
+                GroupRow { key: "{group.key()}", group: group.clone(), depth: 0, show_model, streaming_review }
             }
             if let Some(error) = failure {
                 FailureBlock { error }
@@ -241,8 +260,11 @@ pub fn MessageThread() -> Element {
     }
 }
 
-fn render_group(group: &Group, depth: u8, show_model: bool, streaming_review: bool) -> Element {
-    match group {
+/// One message row. Props compare equal for an unchanged message, so Dioxus
+/// skips re-rendering it.
+#[component]
+fn GroupRow(group: Group, depth: u8, show_model: bool, streaming_review: bool) -> Element {
+    match &group {
         Group::User(message) => rsx! {
             div {
                 class: "msg-user",
@@ -777,7 +799,7 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
                 div {
                     class: "coder-body",
                     for group in groups.iter() {
-                        { render_group(group, depth + 1, false, false) }
+                        GroupRow { key: "{group.key()}", group: group.clone(), depth: depth + 1, show_model: false, streaming_review: false }
                     }
                 }
             }

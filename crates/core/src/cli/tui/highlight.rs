@@ -8,22 +8,29 @@ use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+use super::theme as tui_theme;
+
 /// Code blocks longer than this are shown unhighlighted.
 const MAX_HIGHLIGHT_LINES: usize = 600;
-const THEME_NAME: &str = "base16-eighties.dark";
+const DARK_THEME_NAME: &str = "base16-eighties.dark";
+/// Readable on a light terminal background.
+const LIGHT_THEME_NAME: &str = "InspiredGitHub";
 
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
+/// The syntect theme for the TUI theme: light for the light preset, dark
+/// otherwise (`NO_COLOR` never gets here, see `highlight_code`).
 fn theme() -> &'static Theme {
     static THEME: OnceLock<Theme> = OnceLock::new();
     THEME.get_or_init(|| {
+        let name = if tui_theme::current().is_light() { LIGHT_THEME_NAME } else { DARK_THEME_NAME };
         let mut themes = ThemeSet::load_defaults();
         themes
             .themes
-            .remove(THEME_NAME)
+            .remove(name)
             .unwrap_or_else(|| themes.themes.into_values().next().unwrap_or_default())
     })
 }
@@ -50,7 +57,7 @@ fn plain_lines(code: &str) -> Vec<Line<'static>> {
 /// long blocks come back unstyled.
 pub fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
     let lang = lang.trim();
-    if lang.is_empty() || code.lines().count() > MAX_HIGHLIGHT_LINES {
+    if tui_theme::current().plain || lang.is_empty() || code.lines().count() > MAX_HIGHLIGHT_LINES {
         return plain_lines(code);
     }
     let set = syntaxes();
