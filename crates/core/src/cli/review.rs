@@ -178,8 +178,34 @@ fn print_tool_progress(event: &Value) {
         .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
         .unwrap_or_default();
     for call in calls {
-        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool");
-        eprintln!("· {name}");
+        eprintln!("· {}", tool_progress_line(&call));
+    }
+}
+
+/// `Read src/a.rs`, `Searched TODO`, … for one call (the tool name when it
+/// has no shared label).
+fn tool_progress_line(call: &Value) -> String {
+    let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool");
+    let args = call
+        .pointer("/function/arguments")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .unwrap_or(Value::Null);
+    let (verb, target) = crate::tool_labels::describe_tool(name, &args);
+    format!("{} {target}", verb.english()).trim_end().to_string()
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::tool_progress_line;
+    use serde_json::json;
+
+    #[test]
+    fn progress_lines_name_the_target() {
+        let call = json!({"function": {"name": "read_file", "arguments": "{\"path\":\"src/a.rs\"}"}});
+        assert_eq!(tool_progress_line(&call), "Read src/a.rs");
+        let bare = json!({"function": {"name": "list_directory", "arguments": "{}"}});
+        assert_eq!(tool_progress_line(&bare), "Listed");
     }
 }
 
