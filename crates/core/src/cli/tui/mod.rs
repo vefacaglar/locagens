@@ -175,13 +175,29 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_char_at: Option<Instant> = None;
+    // Input is drawn as soon as the pending input is handled instead of on
+    // the next tick: waiting for the ticker (stretched to ~47 ms by the
+    // 15.6 ms Windows timer) made typing feel laggy.
+    let mut input_waiting = false;
     loop {
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
-                Some(Ok(event)) => handle_terminal_event(&mut driver, event, &mut last_char_at).await,
+                Some(Ok(event)) => {
+                    handle_terminal_event(&mut driver, event, &mut last_char_at).await;
+                    input_waiting = driver.app.dirty;
+                }
                 Some(Err(err)) => return Err(err),
                 None => break,
             },
+            // Pending on its first poll, so keys already queued (a burst or
+            // a paste) are handled first: one frame per burst, not per key.
+            _ = tokio::task::yield_now(), if input_waiting => {
+                input_waiting = false;
+                if driver.app.dirty {
+                    driver.app.dirty = false;
+                    terminal.draw(|frame| ui::draw(frame, &mut driver.app))?;
+                }
+            }
             Some(received) = driver.recv_run() => driver.on_run_recv(received).await,
             Some((query, files)) = files_rx.recv() => driver.app.set_file_matches(&query, &files),
             Some(()) = models_rx.recv() => driver.load_model_choices().await,

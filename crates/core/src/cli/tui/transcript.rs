@@ -2,7 +2,7 @@
 
 use super::theme;
 use super::diff::{diff_lines, FileStat};
-use super::markdown::render_markdown;
+use super::markdown::StreamedMarkdown;
 use super::wrap::{display_width, sanitize, truncate_to_width, wrap_text, wrap_with_prefix};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -65,6 +65,8 @@ pub struct Cell {
     pub agent: Option<String>,
     kind: CellKind,
     cache: Option<Cached>,
+    /// Assistant text: blocks already rendered while it streamed.
+    markdown: StreamedMarkdown,
 }
 
 impl Cell {
@@ -74,6 +76,7 @@ impl Cell {
             agent: None,
             kind,
             cache: None,
+            markdown: StreamedMarkdown::default(),
         }
     }
 
@@ -83,6 +86,7 @@ impl Cell {
             agent,
             kind,
             cache: None,
+            markdown: StreamedMarkdown::default(),
         }
     }
 
@@ -113,7 +117,7 @@ impl Cell {
         &self.cache.as_ref().expect("cache just filled").lines
     }
 
-    fn render(&self, width: usize, expanded: bool) -> Vec<Line<'static>> {
+    fn render(&mut self, width: usize, expanded: bool) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if let Some(agent) = &self.agent {
             lines.push(Line::from(Span::styled(
@@ -123,7 +127,7 @@ impl Cell {
         }
         match &self.kind {
             CellKind::User { text } => render_user(&mut lines, text, width),
-            CellKind::Assistant { text } => render_assistant(&mut lines, text, width),
+            CellKind::Assistant { text } => render_assistant(&mut lines, &mut self.markdown, text, width),
             CellKind::Reasoning { text } => render_reasoning(&mut lines, text, width, expanded),
             CellKind::Tool {
                 name,
@@ -189,8 +193,8 @@ fn band(mut line: Line<'static>, bg: Color, width: usize) -> Line<'static> {
     line
 }
 
-fn render_assistant(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
-    let mut body = render_markdown(text, width.saturating_sub(2));
+fn render_assistant(lines: &mut Vec<Line<'static>>, markdown: &mut StreamedMarkdown, text: &str, width: usize) {
+    let mut body = markdown.render(text, width.saturating_sub(2));
     for (index, line) in body.iter_mut().enumerate() {
         let prefix = if index == 0 {
             Span::styled("• ", dim())

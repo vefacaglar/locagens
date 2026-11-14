@@ -19,6 +19,100 @@ pub fn render_markdown(source: &str, width: usize) -> Vec<Line<'static>> {
     renderer.finish()
 }
 
+/// Markdown of a message that grows while it streams. The leading complete
+/// blocks are rendered once and kept; each change re-renders only the
+/// still-open tail, so a frame costs the tail, not the whole answer.
+#[derive(Default)]
+pub struct StreamedMarkdown {
+    width: usize,
+    /// The source of `lines`: a block-aligned prefix of the message.
+    source: String,
+    lines: Vec<Line<'static>>,
+}
+
+impl StreamedMarkdown {
+    /// Same lines as [`render_markdown`] for `source`.
+    pub fn render(&mut self, source: &str, width: usize) -> Vec<Line<'static>> {
+        let split = stable_prefix_len(source);
+        if self.width != width || !source[..split].starts_with(self.source.as_str()) {
+            *self = Self { width, ..Self::default() };
+        }
+        let done = &source[self.source.len()..split];
+        if !done.is_empty() {
+            append_blocks(&mut self.lines, render_markdown(done, width));
+            self.source.push_str(done);
+        }
+        let mut lines = self.lines.clone();
+        append_blocks(&mut lines, render_markdown(&source[split..], width));
+        lines
+    }
+}
+
+/// Every top-level block ends with one blank line, which `finish` trims.
+fn append_blocks(lines: &mut Vec<Line<'static>>, blocks: Vec<Line<'static>>) {
+    if blocks.is_empty() {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.extend(blocks);
+}
+
+/// Byte length of the leading part of `source` made of complete top-level
+/// blocks: it ends after a blank line, outside any code fence, before a
+/// line that cannot continue the previous block (no indent, list marker,
+/// quote or table row).
+fn stable_prefix_len(source: &str) -> usize {
+    let mut split = 0;
+    let mut fence: Option<(char, usize)> = None;
+    let mut after_blank = false;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let trimmed = line.trim_start();
+        let blank = trimmed.is_empty();
+        if fence.is_none() && after_blank && !blank && starts_new_block(line) {
+            split = start;
+        }
+        after_blank = blank;
+        if let Some(marker) = fence_marker(trimmed) {
+            fence = match fence {
+                None => Some(marker),
+                Some((ch, len)) if marker.0 == ch && marker.1 >= len && trimmed[marker.1..].trim().is_empty() => None,
+                open => open,
+            };
+        }
+    }
+    split
+}
+
+/// A line that starts a fresh top-level block rather than continuing a
+/// list, quote, table or indented code.
+fn starts_new_block(line: &str) -> bool {
+    let Some(first) = line.chars().next() else {
+        return false;
+    };
+    if first.is_whitespace() || matches!(first, '>' | '|') {
+        return false;
+    }
+    let rest = &line[first.len_utf8()..];
+    let bullet = matches!(first, '-' | '*' | '+') && (rest.is_empty() || rest.starts_with([' ', '\t', '\n', '\r']));
+    let ordered = first.is_ascii_digit() && {
+        let after_digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        after_digits.starts_with(['.', ')'])
+    };
+    !bullet && !ordered
+}
+
+/// `(char, run length)` of a ``` or ~~~ fence line.
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let ch = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = trimmed.chars().take_while(|c| *c == ch).count();
+    (run >= 3).then_some((ch, run))
+}
+
 /// An enclosing block that contributes a line prefix.
 enum Context {
     Quote,
@@ -505,5 +599,23 @@ mod tests {
     fn links_show_their_target() {
         let out = rendered("[docs](https://example.com)", 60);
         assert_eq!(out[0], "docs (https://example.com)");
+    }
+
+    #[test]
+    fn streamed_rendering_matches_a_full_render_at_every_step() {
+        let doc = "# Plan\n\nFirst **bold** paragraph that wraps over the width.\n\n\
+            - item one\n\n- item two\n  continued\n\n3. three\n4. four\n\n\
+            ```rust\nfn main() {\n\n    let x = 1;\n}\n```\n\nAfter the code — çok güzel.\n\n\
+            > quote\n\n> more quote\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n\
+            ~~~\nraw\n\nstill raw\n~~~\n\n    indented code\n\n    more\n\nThe end.\n";
+        let mut streamed = StreamedMarkdown::default();
+        for (end, _) in doc.char_indices().skip(1) {
+            let source = &doc[..end];
+            assert_eq!(streamed.render(source, 30), render_markdown(source, 30), "at byte {end}");
+        }
+        assert_eq!(streamed.render(doc, 30), render_markdown(doc, 30));
+        // A narrower width or rewritten text starts over.
+        assert_eq!(streamed.render(doc, 20), render_markdown(doc, 20));
+        assert_eq!(streamed.render("other text", 20), render_markdown("other text", 20));
     }
 }
