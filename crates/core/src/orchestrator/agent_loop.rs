@@ -403,6 +403,9 @@ impl AgentLoop {
                 if content.is_empty() {
                     return Err(AgentError::Failed("remember: content is empty.".into()));
                 }
+                if let Some(denied) = self.gate_remember(call_id, scope, category, &content).await? {
+                    return Ok(denied);
+                }
                 self.state
                     .db
                     .create_memory(scope, &self.project_path.display().to_string(), category, &content)
