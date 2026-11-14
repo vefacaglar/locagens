@@ -1,8 +1,9 @@
 //! Pure Rust streaming LLM client.
 //!
-//! Talks directly to the provider endpoints resolved from `pi`'s
-//! configuration (`~/.pi/agent/auth.json` for credentials, `models.json` /
-//! `models-store.json` for `baseUrl` + API protocol) via `reqwest`:
+//! Talks directly to the provider endpoints resolved by the provider engine
+//! (`locagens-config`: credentials from the agent-dir chain's `auth.json` /
+//! env vars, `baseUrl` + API protocol from built-ins, `models.json`,
+//! `config.toml` and the model stores) via `reqwest`:
 //!
 //! - **OpenAI-compatible** (`{baseUrl}/chat/completions`, `stream: true`):
 //!   parses `data: {...}` SSE chunks (`choices[0].delta.content`,

@@ -65,7 +65,9 @@ const MAX_ROUNDS: usize = 40;
 const SUB_AGENT_MAX_ROUNDS: usize = 24;
 /// Throttling for `message_updated` events while tokens stream in.
 const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(60);
-/// Persistence throttling for streaming `messages.jsonl` rewrites.
+/// How often the loop hands streamed text to the store. The store itself
+/// writes at most one `message_update` checkpoint every 5 s per message
+/// (QA-035), so this only bounds how fresh that checkpoint is.
 const STREAM_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 
 const TERMINAL_STATUSES: [&str; 3] = ["done", "failed", "cancelled"];
