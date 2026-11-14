@@ -87,14 +87,15 @@ pub fn Composer() -> Element {
     let mention_query = trigger.as_ref().filter(|t| t.kind == TriggerKind::File).map(|t| t.query.clone());
 
     // `@` mentions: fuzzy file list of the current project for the token.
-    let mention_files = use_resource(move || {
-        let query = mention_query.clone();
+    // The query is a reactive dependency: a plain captured value would not
+    // re-run the resource while typing (in a new chat nothing else does).
+    let mention_files = use_resource(use_reactive!(|(mention_query,)| {
         let project = store.current_project();
         async move {
-            let (Some(query), Some(project)) = (query, project) else { return Vec::new() };
+            let (Some(query), Some(project)) = (mention_query, project) else { return Vec::new() };
             locagens_core::api::projects::list_files(&core(), &project, Some(&query)).await.unwrap_or_default()
         }
-    });
+    }));
     // `+` → Mentions picker list.
     use_effect(move || {
         if *context_menu.read() != Some("mentions") {

@@ -92,15 +92,23 @@ pub fn estimate_history_tokens(history: &[LlmMessage]) -> usize {
         .sum()
 }
 
-/// The auto-compaction threshold: `config.toml`
+/// The history-token threshold for auto-compaction: `config.toml`
 /// (`model_auto_compact_token_limit` / `model_context_window`) wins, then 90 %
-/// of the provider catalog's context window minus the fixed request overhead
-/// (system prompt and tool specs), then [`AUTO_COMPACT_TOKEN_THRESHOLD`].
+/// of the provider catalog's context window, then
+/// [`AUTO_COMPACT_TOKEN_THRESHOLD`]. A configured or catalog limit bounds the
+/// whole prompt, so the fixed request overhead (system prompt and tool
+/// specs) is taken off it.
 pub fn auto_compact_threshold(context_window: Option<i64>, overhead_tokens: usize) -> usize {
     if let Some(limit) = crate::config_runtime::current().auto_compact_limit() {
-        return limit;
+        return threshold_for_limit(limit, overhead_tokens);
     }
     threshold_for_window(context_window, overhead_tokens)
+}
+
+/// A whole-prompt `limit` as a history threshold (pure, for tests).
+pub fn threshold_for_limit(limit: usize, overhead_tokens: usize) -> usize {
+    // Never so low that every round compacts.
+    limit.saturating_sub(overhead_tokens).max(limit / 4)
 }
 
 /// The catalog part of [`auto_compact_threshold`] (pure, for tests).
@@ -299,6 +307,9 @@ mod tests {
         assert_eq!(threshold_for_window(Some(1_000_000), 10_000), 890_000);
         // A system prompt bigger than the window still leaves a floor.
         assert_eq!(threshold_for_window(Some(8_000), 50_000), 2_000);
+        // A configured limit bounds the whole prompt, overhead included.
+        assert_eq!(threshold_for_limit(9_000, 5_000), 4_000);
+        assert_eq!(threshold_for_limit(9_000, 20_000), 2_250);
     }
 
     /// FR-004: every older message reaches the summarizer, in order.

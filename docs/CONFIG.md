@@ -42,7 +42,7 @@ process-wide access: `locagens_core::config_runtime::current()`.
 | `model_reasoning_summary` | `reasoning.summary` on OpenAI Responses requests (`auto`, `concise`, `detailed`; `none` omits it) |
 | `model_verbosity` | `text.verbosity` on OpenAI Responses requests |
 | `model_context_window` | Auto-compaction triggers at 90% of the window |
-| `model_auto_compact_token_limit` | Explicit compaction threshold (wins over the window); default is ~90k estimated tokens |
+| `model_auto_compact_token_limit` | Explicit compaction threshold for the whole prompt (system prompt and tools count toward it; wins over the window); default is ~90k estimated tokens |
 | `approval_policy`, `sandbox_mode` | Default run mode when none is chosen: `never` or `danger-full-access` = `auto`; `read-only` = `plan`; `untrusted` = `ask_permissions`; otherwise `accept_edits` |
 | `[sandbox_workspace_write]` | `network_access = true` lets sandboxed `run_command` and `exec_command` use the network (all modes and platforms; on Windows it skips the proxy). `writable_roots` (`~` expanded; missing dirs skipped) become extra writable directories in workspace-write mode on every backend (Windows: an allow-write ACE for the workspace capability SID; macOS: a Seatbelt `subpath`; Linux: a bwrap `--bind`). Codex's `exclude_tmpdir_env_var` / `exclude_slash_tmp` are ignored |
 | `[sandbox.network]` | `allowed_domains = ["registry.npmjs.org", "**.crates.io"]`: hosts sandboxed commands may reach through the per-command proxy (see docs/SANDBOX.md); read from the whole agent-dir chain |

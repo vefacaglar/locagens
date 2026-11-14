@@ -367,15 +367,15 @@ fn EmptyThread() -> Element {
 fn Starters(project: String) -> Element {
     let mut store: UiStore = use_context();
     let path = project.clone();
-    let dirty = use_resource(move || {
-        let path = path.clone();
+    // The path is a reactive dependency, so another project re-checks.
+    let dirty = use_resource(use_reactive!(|(path,)| {
         async move {
             locagens_core::api::projects::git_status(&crate::state_ui::core(), &path)
                 .await
                 .ok()
                 .is_some_and(|status| status.is_git && status.has_changes.unwrap_or(false))
         }
-    });
+    }));
     let dirty = dirty.read().unwrap_or(false);
     let t = |key| store.t(key);
     let mut starters: Vec<(&'static str, &'static str)> = vec![
