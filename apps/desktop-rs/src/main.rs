@@ -184,9 +184,15 @@ fn App() -> Element {
                             div {
                                 class: "chat-area",
                                 components::message_thread::MessageThread {}
-                                components::trust_banner::TrustBanner {}
-                                components::cards::PendingCards {}
-                                components::composer::Composer {}
+                                // Floats over the thread's bottom, so the thread
+                                // (and its scrollbar) runs to the window edge.
+                                div {
+                                    id: "chat-dock",
+                                    class: "chat-dock",
+                                    components::trust_banner::TrustBanner {}
+                                    components::cards::PendingCards {}
+                                    components::composer::Composer {}
+                                }
                             }
                         }
                     }

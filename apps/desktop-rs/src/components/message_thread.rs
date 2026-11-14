@@ -233,6 +233,7 @@ pub fn MessageThread() -> Element {
         .as_ref()
         .filter(|run| run.status == "failed")
         .map(|run| run.error_message.clone().unwrap_or_default());
+    let stopped = run.as_ref().is_some_and(|run| run.status == "cancelled") && !groups.is_empty();
     let changes = store
         .turn_diff
         .read()
@@ -251,6 +252,9 @@ pub fn MessageThread() -> Element {
             }
             if let Some(error) = failure {
                 FailureBlock { error }
+            }
+            if stopped {
+                div { class: "msg-meta stopped-note", role: "status", "{store.t(\"thread.stopped\")}" }
             }
             if let Some(((diff, _), run_id)) = changes {
                 super::changes::ChangesCard { key: "{run_id}", diff, run_id: run_id.clone() }

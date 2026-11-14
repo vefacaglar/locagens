@@ -1096,9 +1096,28 @@ pub const CHAT_SCROLL_SCRIPT: &str = r#"(() => {
     const b = box(), s = spacer();
     if (!b || !s) return;
     if (!pinned || !pinned.isConnected) { pinned = null; s.style.height = '0px'; return; }
-    // Height of the content from the pinned message down to the spacer.
+    // Height of the content from the pinned message down to the spacer;
+    // the dock covers the bottom of the box.
     const below = s.getBoundingClientRect().top - pinned.getBoundingClientRect().top;
-    s.style.height = Math.max(0, b.clientHeight - below - 40) + 'px';
+    s.style.height = Math.max(0, b.clientHeight - dockHeight() - below - 40) + 'px';
+  }
+  function dockHeight() {
+    const d = document.getElementById('chat-dock');
+    return d ? d.offsetHeight : 0;
+  }
+  // The thread's bottom padding follows the dock's height (composer growth,
+  // permission cards), so the last message is never hidden under it.
+  function watchDock() {
+    const d = document.getElementById('chat-dock');
+    if (!d || d.dataset.lcgnWatched) return;
+    d.dataset.lcgnWatched = '1';
+    const apply = () => {
+      const area = d.parentElement;
+      if (area) area.style.setProperty('--dock-h', d.offsetHeight + 'px');
+      scheduleFit();
+    };
+    new ResizeObserver(apply).observe(d);
+    apply();
   }
   function scheduleFit() {
     if (queued) return;
@@ -1110,6 +1129,7 @@ pub const CHAT_SCROLL_SCRIPT: &str = r#"(() => {
   let stuck = true;
   function watch() {
     const b = box();
+    watchDock();
     if (!b || b.dataset.lcgnWatched) return;
     b.dataset.lcgnWatched = '1';
     new MutationObserver(scheduleFit).observe(b, { childList: true, subtree: true, characterData: true });

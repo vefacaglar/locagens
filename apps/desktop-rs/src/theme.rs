@@ -576,13 +576,23 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 }
 
 /* ---------------- chat thread ---------------- */
-.chat-area { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-chat); }
+.chat-area { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-chat); }
 #chat-scroll {
-  flex: 1; overflow-y: auto; padding: 24px 28px 16px;
+  flex: 1; overflow-y: auto; padding: 24px 28px calc(var(--dock-h, 160px) + 16px);
   scrollbar-width: thin;
   display: flex; flex-direction: column; gap: 20px;
 }
 #chat-scroll > * { flex-shrink: 0; max-width: 800px; width: 100%; margin-left: auto; margin-right: auto; }
+/* Banner, cards and composer over the thread's bottom; the right strip stays
+   free so the thread's scrollbar is visible down to the window edge. */
+.chat-dock {
+  position: absolute; left: 0; right: 14px; bottom: 0;
+  display: flex; flex-direction: column;
+  padding-top: 24px;
+  background: linear-gradient(to bottom, transparent, var(--bg-chat) 24px);
+  pointer-events: none;
+}
+.chat-dock > * { pointer-events: auto; }
 /* Grows/shrinks from JS (window.lcgnChat) to let a sent message sit at the top. */
 #chat-scroll > .chat-tail-spacer { height: 0; margin-top: -20px; pointer-events: none; }
 .msg-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
@@ -596,6 +606,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; }
 .msg-assistant .bubble { padding: 2px 0; font-size: 14px; line-height: 1.65; word-break: break-word; }
 .msg-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-3); padding: 0 2px; }
+.stopped-note { color: var(--text-3); font-size: 12px; margin: 4px 0 12px; }
 .msg-meta .model-label { font-family: var(--font-mono); font-weight: 400; }
 .msg-empty {
   margin: auto; text-align: center; color: var(--text-3);

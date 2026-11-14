@@ -195,6 +195,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("thread.writing_patch", "Writing changes", "Değişiklikler yazılıyor"),
     ("thread.thought", "Thought · {0} words", "Düşünce · {0} kelime"),
     ("thread.copy", "Copy message", "Mesajı kopyala"),
+    ("thread.stopped", "You stopped this turn; the answer above may be incomplete.", "Bu turu durdurdun; yukarıdaki yanıt eksik olabilir."),
     ("tool.done", "done", "bitti"),
     ("tool.running", "running", "çalışıyor"),
     ("tool.awaiting_approval", "waiting for approval", "onay bekliyor"),
