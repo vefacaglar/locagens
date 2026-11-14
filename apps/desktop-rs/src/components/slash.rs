@@ -2,7 +2,6 @@
 //! `locagens_core::commands` table and busy rule; this module only maps the
 //! parsed command to what the desktop does, and feeds the `/` suggestions.
 
-use crate::i18n::{self, Lang};
 use locagens_core::commands::{self, CommandSpec, Frontend, SlashCommand};
 
 /// What the composer does with a `/` prompt.
@@ -17,9 +16,22 @@ pub enum SlashAction {
     /// `/plan` `/build` `/auto` `/chat`: the run mode to select.
     SetMode(&'static str),
     Help,
+    /// `/model [provider/id]`: open the picker, or pick that model.
+    Model(Option<String>),
+    /// `/thinking [level]`: set the reasoning effort (or open the picker).
+    Thinking(Option<String>),
+    /// `/diff`: the inspector's Changes section.
+    Diff,
+    /// `/mcp`, `/skills`: their settings tabs.
+    Mcp,
+    Skills,
+    /// `/sessions`: the palette on the chat list.
+    Sessions,
+    /// `/usage`: the Usage page.
+    Usage,
     /// Refused while a run is generating (the shared busy rule).
     Busy(String),
-    /// A known command the desktop does not offer (`/diff`).
+    /// A known command the desktop does not offer (`/exit`).
     Unavailable(String),
     Unknown(String),
 }
@@ -48,6 +60,13 @@ pub fn resolve(prompt: &str, generating: bool) -> Option<SlashAction> {
         SlashCommand::Auto => SlashAction::SetMode("auto"),
         SlashCommand::Chat => SlashAction::SetMode("chat"),
         SlashCommand::Help => SlashAction::Help,
+        SlashCommand::Model(arg) => SlashAction::Model(arg),
+        SlashCommand::Thinking(arg) => SlashAction::Thinking(arg),
+        SlashCommand::Diff => SlashAction::Diff,
+        SlashCommand::Mcp => SlashAction::Mcp,
+        SlashCommand::Skills => SlashAction::Skills,
+        SlashCommand::Sessions => SlashAction::Sessions,
+        SlashCommand::Usage => SlashAction::Usage,
         // Every other command is CLI-only (handled above).
         other => SlashAction::Unavailable(slash_name(&other)),
     })
@@ -66,17 +85,30 @@ pub fn command_names() -> String {
     commands::commands_for(Frontend::Desktop).map(|spec| format!("/{}", spec.name)).collect::<Vec<_>>().join(" ")
 }
 
-/// `/plan — switch to plan mode …; …`: the `/help` toast body.
-pub fn command_help(lang: Lang) -> String {
+/// `/plan — switch to plan mode …; …`: every desktop command with its
+/// description.
+#[cfg(test)]
+pub fn command_help(lang: crate::i18n::Lang) -> String {
     commands::commands_for(Frontend::Desktop)
-        .map(|spec| format!("{} — {}", spec.usage(), i18n::command_description(lang, spec)))
+        .map(|spec| format!("{} — {}", spec.usage(), crate::i18n::command_description(lang, spec)))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The reasoning effort named by `/thinking <level>` (`off` is the lowest
+/// level the model has), `None` when the model does not offer it.
+pub fn thinking_level(arg: &str, efforts: &[String]) -> Option<String> {
+    let arg = arg.trim().to_lowercase();
+    if arg == "off" || arg == "none" {
+        return efforts.first().cloned();
+    }
+    efforts.iter().find(|effort| **effort == arg).cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
 
     #[test]
     fn plain_text_is_not_a_command() {
@@ -99,9 +131,27 @@ mod tests {
     }
 
     #[test]
+    fn former_cli_only_commands_have_desktop_actions() {
+        assert_eq!(resolve("/diff", false), Some(SlashAction::Diff));
+        assert_eq!(resolve("/model p/m", false), Some(SlashAction::Model(Some("p/m".into()))));
+        assert_eq!(resolve("/model", false), Some(SlashAction::Model(None)));
+        assert_eq!(resolve("/thinking high", true), Some(SlashAction::Thinking(Some("high".into()))));
+        assert_eq!(resolve("/mcp", false), Some(SlashAction::Mcp));
+        assert_eq!(resolve("/skills", false), Some(SlashAction::Skills));
+        assert_eq!(resolve("/sessions", false), Some(SlashAction::Sessions));
+        assert_eq!(resolve("/usage", false), Some(SlashAction::Usage));
+    }
+
+    #[test]
+    fn thinking_levels_match_the_model() {
+        let efforts: Vec<String> = ["low", "medium", "high"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(thinking_level("HIGH", &efforts).as_deref(), Some("high"));
+        assert_eq!(thinking_level("off", &efforts).as_deref(), Some("low"));
+        assert_eq!(thinking_level("max", &efforts), None);
+    }
+
+    #[test]
     fn cli_only_and_unknown_commands_are_reported() {
-        assert_eq!(resolve("/diff", false), Some(SlashAction::Unavailable("/diff".into())));
-        assert_eq!(resolve("/model p/m", false), Some(SlashAction::Unavailable("/model".into())));
         assert_eq!(resolve("/quit", true), Some(SlashAction::Unavailable("/exit".into())));
         assert_eq!(resolve("/bogus x", false), Some(SlashAction::Unknown("/bogus".into())));
     }
@@ -122,16 +172,16 @@ mod tests {
         let names: Vec<&str> = suggestions("/").iter().map(|spec| spec.name).collect();
         assert_eq!(names, commands::commands_for(Frontend::Desktop).map(|spec| spec.name).collect::<Vec<_>>());
         let names: Vec<&str> = suggestions("/re").iter().map(|spec| spec.name).collect();
-        assert_eq!(names, vec!["review"]);
+        assert_eq!(names, vec!["review", "resume"]);
         assert!(suggestions("/review ").is_empty(), "arguments close the list");
-        assert!(suggestions("/diff").is_empty(), "CLI-only commands are not suggested");
+        assert!(suggestions("/exit").is_empty(), "CLI-only commands are not suggested");
         assert!(suggestions("hello").is_empty());
     }
 
     #[test]
     fn toast_texts_list_the_desktop_commands() {
         let names = command_names();
-        assert!(names.starts_with("/plan /build") && names.contains("/undo") && !names.contains("/diff"), "{names}");
+        assert!(names.starts_with("/model /thinking /plan") && names.contains("/undo") && !names.contains("/exit"), "{names}");
         let help = command_help(Lang::En);
         assert!(help.contains("/review [target] — code review"), "{help}");
         assert!(command_help(Lang::Tr).contains("/undo — "));

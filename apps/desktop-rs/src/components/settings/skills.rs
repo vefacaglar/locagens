@@ -1,5 +1,6 @@
 //! Skills tab: list, create / edit `SKILL.md`, delete.
 
+use crate::components::ConfirmButton;
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::services::skills::SkillSummary;
@@ -21,11 +22,11 @@ pub(super) fn SkillsTab() -> Element {
     let store: UiStore = use_context();
     let skills: Signal<Vec<SkillSummary>> = use_signal(Vec::new);
     let mut editor: Signal<Option<SkillEditor>> = use_signal(|| None);
-    let project_filter = store.selected_project.read().clone();
 
+    // Reloads when the selected project changes (FR-058).
     use_effect(move || {
         let mut skills = skills;
-        let project = project_filter.clone();
+        let project = store.selected_project.read().clone();
         spawn(async move {
             let state = core();
             if let Ok(response) = locagens_core::api::skills::list_skills(&state, project.as_deref()).await {
@@ -151,10 +152,8 @@ pub(super) fn SkillsTab() -> Element {
                 let name = skill.name.clone();
                 let source = skill.source.clone();
                 let description = skill.description.clone();
-                let body = skill.body.clone().unwrap_or_default();
                 let edit_name = name.clone();
                 let edit_source = source.clone();
-                let edit_body = body.clone();
                 let delete_name = name.clone();
                 let delete_source = source.clone();
                 rsx! {
@@ -175,17 +174,23 @@ pub(super) fn SkillsTab() -> Element {
                         }
                         button {
                             onclick: move |_| {
-                                editor.set(Some(SkillEditor {
-                                    name: Some(edit_name.clone()),
-                                    target: edit_source.clone(),
-                                    content: edit_body.clone(),
-                                }));
+                                // FR-051: edit the full SKILL.md (frontmatter
+                                // included), never the parsed, truncated body.
+                                let name = edit_name.clone();
+                                let target = edit_source.clone();
+                                let project = store.selected_project.peek().clone();
+                                spawn(async move {
+                                    match locagens_core::api::skills::skill_source(&core(), &name, project.as_deref()).await {
+                                        Ok(content) => editor.set(Some(SkillEditor { name: Some(name), target, content })),
+                                        Err(err) => store.toast(store.tf("toast.save_skill_failed", &[&err.to_string()])),
+                                    }
+                                });
                             },
                             "{store.t(\"common.edit\")}"
                         }
-                        button {
-                            class: "danger",
-                            onclick: move |_| {
+                        ConfirmButton {
+                            label: store.t("common.delete").to_string(),
+                            on_confirm: move |_| {
                                 let mut skills = skills;
                                 let delete_name = delete_name.clone();
                                 let target = delete_source.clone();
@@ -206,7 +211,6 @@ pub(super) fn SkillsTab() -> Element {
                                     }
                                 });
                             },
-                            "{store.t(\"common.delete\")}"
                         }
                     }
                 }

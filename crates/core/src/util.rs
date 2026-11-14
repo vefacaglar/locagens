@@ -116,3 +116,18 @@ pub fn writable_inside(base: &Path, relative: &str) -> Option<PathBuf> {
     let existing_canonical = std::fs::canonicalize(existing).map(normalize_canonical).ok()?;
     existing_canonical.starts_with(&base_canonical).then_some(joined)
 }
+
+/// Keeps a console child (git, hooks, MCP servers) from opening its own
+/// console window when the parent has none: the Windows desktop release build
+/// is a GUI-subsystem program, so every poll would flash a window otherwise.
+/// No effect on other platforms.
+pub fn hide_console_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}

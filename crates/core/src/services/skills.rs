@@ -222,6 +222,27 @@ pub fn list(project_path: Option<&str>) -> Vec<SkillSummary> {
     by_name.into_values().collect()
 }
 
+/// The raw `SKILL.md` text (frontmatter included, never truncated) of the
+/// skill `name` as [`list`] resolves it: a project skill wins over a user
+/// skill, the Locagens root over the pi root. Editors load this, since the
+/// listed `body` has no frontmatter and cannot be saved back.
+pub fn source(name: &str, project_path: Option<&str>) -> Option<String> {
+    let user = user_root();
+    let pi = pi_root();
+    let mut roots: Vec<PathBuf> = project_root(project_path).into_iter().collect();
+    roots.push(user.clone());
+    if pi != user {
+        roots.push(pi);
+    }
+    roots.into_iter().find_map(|root| {
+        std::fs::read_dir(&root).ok()?.flatten().find_map(|entry| {
+            let raw = std::fs::read_to_string(entry.path().join(SKILL_FILE)).ok()?;
+            let parsed = parse_skill_md(&raw)?;
+            (parsed.name == name).then(|| raw.strip_prefix('\u{FEFF}').unwrap_or(&raw).to_string())
+        })
+    })
+}
+
 /// Installs a SKILL.md into the user or project skills root, under <name>/SKILL.md.
 pub fn install(
     target: &str,

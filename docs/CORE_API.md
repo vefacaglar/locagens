@@ -196,6 +196,7 @@ pub async fn fetch_models(state, input: &FetchModelsInput) -> ApiResult<FetchMod
 pub async fn test_provider(state, input: &TestProviderInput) -> ApiResult<TestProviderResult>
 pub async fn get_pi_auth(state) -> ApiResult<Vec<Value>>                // auth.json status (keys never returned)
 pub async fn set_pi_auth(state, input: &SetPiAuthInput) -> ApiResult<()>
+pub fn login_providers(state) -> Vec<LoginProvider>   // every connectable provider + auth status (no keys)
 
 // OAuth login: xai, github-copilot, kimi-coding (device code) and openai
 // ("Sign in with ChatGPT"), openrouter (authorization URL).
@@ -246,7 +247,12 @@ credential to a `baseUrl` other than the provider's configured one.
 ```rust
 pub async fn list_permissions(state) -> ApiResult<Vec<PermissionRule>>
 pub async fn delete_permission(state, id: i64) -> ApiResult<()>
+pub async fn restore_permission(state, rule: &PermissionRule) -> ApiResult<PermissionRule>  // undo of a revoke
 pub async fn clear_permissions(state) -> ApiResult<()>
+// Answers prompt `prompt_id` (from `permission_requested.promptId`) only while
+// it is still the pending one; a stale answer is a conflict, never applied to
+// the next prompt.
+pub async fn answer_permission_prompt(state, run_id, prompt_id: u64, decision) -> ApiResult<()>
 ```
 
 ### `api::memory` — durable long-term memory
@@ -349,7 +355,31 @@ pub async fn get_skill(state, name, project_path) -> ApiResult<SkillSummary>
 pub async fn install_skill(state, input: InstallSkillInput) -> ApiResult<SkillSummary>
 pub async fn skills_folder(state, input: InstallSkillInput) -> ApiResult<SkillsFolder>
 pub async fn delete_skill(state, name, target: Option<&str>, project_path: Option<&str>) -> ApiResult<bool>  // target: "project" | "user"
+pub async fn skill_source(state, name, project_path) -> ApiResult<String>   // raw SKILL.md (project wins)
 ```
+
+### `api::queue` — queued mid-run messages
+
+```rust
+pub async fn queued_messages(state, run_id) -> ApiResult<Vec<String>>           // oldest first
+pub async fn withdraw_queued(state, run_id, content) -> ApiResult<bool>         // any position
+pub async fn withdraw_queued_message(handle: &RunHandle, content) -> bool       // newest only
+```
+
+At the end of a drive the core emits `queued_messages_undelivered { messages }`
+for queued text the turn never delivered; frontends put it back for resending.
+
+### `api::ui_state` — last model, effort and mode (`ui_state.json`)
+
+```rust
+pub fn load_ui_state() -> UiState                       // { model, effort, mode, recentModels }
+pub fn remember_model(provider_id, model, effort: Option<&str>) -> ApiResult<()>
+pub fn remember_effort(effort) -> ApiResult<()>
+pub fn remember_mode(mode) -> ApiResult<()>              // unknown modes are rejected
+```
+
+Shared by desktop and `lcgn`; the file format is documented in
+`services/ui_state.rs`.
 
 ### `api::review` — code review
 

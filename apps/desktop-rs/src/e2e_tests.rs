@@ -220,12 +220,12 @@ async fn composer_run_streams_prompts_for_permission_and_finishes() {
     let request = store.pending_permission.peek().clone().unwrap();
     assert_eq!(request["toolCall"]["function"]["name"], "run_command", "{request}");
     assert_eq!(run_status(store).as_deref(), Some("awaiting_permission"));
-    assert!(store.status_toast.peek().is_none(), "no error toast: {:?}", store.status_toast.peek());
+    assert!(store.toasts.peek().is_empty(), "no error toast: {:?}", store.toasts.peek());
 
     // Answer it through the permission card's handler (deny: nothing runs).
     let decided = dom.in_scope(ScopeId::APP, || {
         let busy = Signal::new(false);
-        spawn(cards::decide(store, run_id.clone(), "deny", busy));
+        spawn(cards::decide(store, request.clone(), "deny", busy));
         busy
     });
     pump_until(&mut dom, "the run to finish", || {

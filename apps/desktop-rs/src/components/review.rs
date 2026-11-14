@@ -2,7 +2,7 @@
 //! `/review` composer command and the header action that starts a review.
 
 use super::icons::{icon_check, icon_list_checks, icon_x};
-use crate::markdown::render_markdown;
+use crate::markdown::{render_markdown, render_markdown_cached};
 use crate::state_ui::{core, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::review::{review_of_message, start_review, StartReviewPayload};
@@ -38,6 +38,7 @@ pub const REVIEW_CSS: &str = r#"
 }
 .review-chip.p0, .review-chip.p1 { color: var(--err); }
 .review-chip.p2 { color: var(--warn); }
+.review-chip.p3 { color: var(--text-2); }
 .review-loc { font-family: var(--font-mono); font-size: 12px; color: var(--text-3); word-break: break-all; }
 .review-body { font-size: 13px; line-height: 1.55; word-break: break-word; }
 .review-body p { margin: 0 0 8px; }
@@ -82,14 +83,18 @@ pub fn verdict_ok(payload: &ReviewPayload) -> Option<bool> {
     if verdict.is_empty() {
         None
     } else {
-        Some(!verdict.contains("incorrect"))
+        // "patch is not correct" is a failure too (FR-065).
+        let negative = ["incorrect", "not correct", "not ok", "wrong", "fail"].iter().any(|word| verdict.contains(word));
+        Some(!negative)
     }
 }
 
 /// Body of an assistant message: the findings card for a review answer, a
 /// placeholder while a review streams its JSON, the markdown bubble otherwise.
+/// `streaming_review` comes from the thread, so this component does not
+/// re-render on every run update (FR-063).
 #[component]
-pub fn AssistantBody(message: RunMessage) -> Element {
+pub fn AssistantBody(message: RunMessage, streaming_review: bool) -> Element {
     let store: UiStore = use_context();
     if let Some(payload) = review_of_message(&message) {
         return rsx! { ReviewCard { payload } };
@@ -97,21 +102,12 @@ pub fn AssistantBody(message: RunMessage) -> Element {
     if message.content.is_empty() {
         return rsx! {};
     }
-    let streaming_review = store
-        .active_run
-        .read()
-        .as_ref()
-        .map(|run| {
-            locagens_core::orchestrator::review::is_review_run(run)
-                && super::run_active(Some(run))
-        })
-        .unwrap_or(false);
     let trimmed = message.content.trim_start();
     if streaming_review && (trimmed.starts_with('{') || trimmed.starts_with("```")) {
         return rsx! { div { class: "review-pending", "{store.t(\"review.writing\")}" } };
     }
     rsx! {
-        div { class: "bubble md", dangerous_inner_html: render_markdown(&message.content) }
+        div { class: "bubble md", dangerous_inner_html: render_markdown_cached(&message.content) }
     }
 }
 
@@ -197,11 +193,7 @@ pub fn start(store: &UiStore, target: ReviewTarget) {
         store.toast(store.t("toast.select_provider").to_string());
         return;
     }
-    let project_path = store
-        .selected_project
-        .read()
-        .clone()
-        .or_else(|| store.active_run.read().as_ref().map(|run| run.project_path.clone()));
+    let project_path = store.current_project();
     let effort = store.selected_effort.read().clone();
     let payload = StartReviewPayload {
         target,
@@ -291,6 +283,11 @@ mod tests {
             parse_review_output(r#"{"findings":[],"overall_correctness":"patch is incorrect"}"#),
         );
         assert_eq!(verdict_ok(&incorrect), Some(false));
+        let not_correct = ReviewPayload::new(
+            ReviewTarget::Uncommitted,
+            parse_review_output(r#"{"findings":[],"overall_correctness":"patch is not correct"}"#),
+        );
+        assert_eq!(verdict_ok(&not_correct), Some(false));
         let none = ReviewPayload::new(ReviewTarget::Uncommitted, parse_review_output("free text"));
         assert_eq!(verdict_ok(&none), None);
     }

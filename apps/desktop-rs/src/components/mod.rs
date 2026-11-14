@@ -2,10 +2,14 @@
 
 pub mod appearance;
 pub mod cards;
+pub mod changes;
 pub mod chat_header;
 pub mod composer;
 pub mod icons;
+pub mod keyboard;
 pub mod message_thread;
+pub mod model_picker;
+pub mod palette;
 pub mod resize;
 pub mod review;
 pub mod right_panel;
@@ -63,7 +67,9 @@ pub fn start_window_drag(event: Event<MouseData>) {
         return;
     }
     let point = event.screen_coordinates();
-    let window = dioxus::desktop::use_window();
+    // Not `use_window()`: this runs in an event handler, where hooks must
+    // not be called (FR-066).
+    let window = dioxus::desktop::window();
     if is_double_press(std::time::Instant::now(), (point.x, point.y)) {
         window.toggle_maximized();
     } else {
@@ -110,15 +116,72 @@ mod drag_tests {
     }
 }
 
-/// Shared bottom toast (`UiStore.status_toast`).
+/// Stacked bottom toasts (`UiStore.toasts`): wrapped, selectable text, each
+/// with its own timer and a close button (FR-062).
 #[component]
 pub fn Toast() -> Element {
     let store: crate::state_ui::UiStore = use_context();
-    let Some(message) = store.status_toast.read().clone() else {
-        return rsx! {};
-    };
+    let toasts = store.toasts.read().clone();
     rsx! {
-        div { class: "toast", role: "status", "{message}" }
+        div {
+            class: "toast-stack",
+            role: "status",
+            "aria-live": "polite",
+            for toast in toasts {
+                div {
+                    key: "{toast.id}",
+                    class: "toast",
+                    span { class: "toast-text", "{toast.text}" }
+                    button {
+                        class: "icon-btn toast-close",
+                        title: store.t("common.dismiss"),
+                        onclick: move |_| store.dismiss_toast(toast.id),
+                        {icons::icon_x()}
+                    }
+                }
+            }
+        }
+        // Assertive region for cards that block the run (UX-027).
+        div { class: "sr-only", "aria-live": "assertive", role: "alert", "{store.announcement.read()}" }
+    }
+}
+
+/// A destructive button that asks once more before acting (FR-066): the
+/// first click arms it ("Click again to confirm") for four seconds, the
+/// second runs `on_confirm`.
+#[component]
+pub fn ConfirmButton(label: String, on_confirm: EventHandler, class: Option<String>) -> Element {
+    let store: crate::state_ui::UiStore = use_context();
+    let mut armed = use_signal(|| false);
+    let is_armed = *armed.read();
+    let class = class.unwrap_or_else(|| "danger".to_string());
+    rsx! {
+        button {
+            class: if is_armed { "{class} armed" } else { "{class}" },
+            onclick: move |event: Event<MouseData>| {
+                event.stop_propagation();
+                if *armed.peek() {
+                    armed.set(false);
+                    on_confirm.call(());
+                } else {
+                    armed.set(true);
+                    spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                        armed.set(false);
+                    });
+                }
+            },
+            if is_armed { "{store.t(\"common.confirm_again\")}" } else { "{label}" }
+        }
+    }
+}
+
+/// `Ctrl+N` on Windows / Linux, `⌘N` on macOS, for tooltips.
+pub fn shortcut_label(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("\u{2318}{key}")
+    } else {
+        format!("Ctrl+{key}")
     }
 }
 

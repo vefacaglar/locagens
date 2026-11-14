@@ -1,9 +1,8 @@
 //! Settings page: every tab is wired in-process to `locagens_core::api` —
-//! Codex / Locagens auth & provider accounts, permissions, memory, skills, MCP servers,
-//! plugins and security.
+//! models & accounts (API keys, sign-in, model switches), permissions,
+//! memory, skills, MCP servers, plugins, security and appearance.
 
-
-use crate::state_ui::UiStore;
+use crate::state_ui::{AppPage, SettingsTab, UiStore};
 use dioxus::prelude::*;
 
 mod auth;
@@ -15,7 +14,6 @@ mod providers;
 mod security;
 mod skills;
 
-use self::auth::AuthTab;
 use self::mcp::McpTab;
 use self::memory::MemoryTab;
 use self::permissions::PermissionsTab;
@@ -24,10 +22,11 @@ use self::providers::ProvidersTab;
 use self::security::SecurityTab;
 use self::skills::SkillsTab;
 
+/// The page shows the tab named by `AppPage::Settings(tab)`, so opening
+/// Settings on another tab while it is open switches tabs (FR-058).
 #[component]
-pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
-    let mut tab = use_signal(|| initial_tab);
-    let store: UiStore = use_context();
+pub fn SettingsPage(tab: SettingsTab) -> Element {
+    let mut store: UiStore = use_context();
 
     rsx! {
         div {
@@ -40,27 +39,30 @@ pub fn SettingsPage(initial_tab: crate::state_ui::SettingsTab) -> Element {
             class: "settings-layout",
             nav {
                 class: "settings-nav",
-                for tab_item in crate::state_ui::SettingsTab::ALL.iter() {
+                role: "tablist",
+                for tab_item in SettingsTab::ALL {
                     button {
                         key: "{tab_item.label_key()}",
-                        class: if *tab_item == *tab.read() { "active" } else { "" },
-                        onclick: move |_| tab.set(*tab_item),
+                        class: if tab_item == tab { "active" } else { "" },
+                        role: "tab",
+                        "aria-selected": "{tab_item == tab}",
+                        onclick: move |_| store.page.set(AppPage::Settings(tab_item)),
                         "{store.t(tab_item.label_key())}"
                     }
                 }
             }
             div {
                 class: "settings-content",
-                match *tab.read() {
-                    crate::state_ui::SettingsTab::Providers => rsx! { ProvidersTab {} },
-                    crate::state_ui::SettingsTab::Auth => rsx! { AuthTab {} },
-                    crate::state_ui::SettingsTab::Permissions => rsx! { PermissionsTab {} },
-                    crate::state_ui::SettingsTab::Memory => rsx! { MemoryTab {} },
-                    crate::state_ui::SettingsTab::Skills => rsx! { SkillsTab {} },
-                    crate::state_ui::SettingsTab::Mcp => rsx! { McpTab {} },
-                    crate::state_ui::SettingsTab::Plugins => rsx! { PluginsTab {} },
-                    crate::state_ui::SettingsTab::Security => rsx! { SecurityTab {} },
-                    crate::state_ui::SettingsTab::Appearance => rsx! { super::appearance::AppearanceTab {} },
+                role: "tabpanel",
+                match tab {
+                    SettingsTab::Providers => rsx! { ProvidersTab {} },
+                    SettingsTab::Permissions => rsx! { PermissionsTab {} },
+                    SettingsTab::Memory => rsx! { MemoryTab {} },
+                    SettingsTab::Skills => rsx! { SkillsTab {} },
+                    SettingsTab::Mcp => rsx! { McpTab {} },
+                    SettingsTab::Plugins => rsx! { PluginsTab {} },
+                    SettingsTab::Security => rsx! { SecurityTab {} },
+                    SettingsTab::Appearance => rsx! { super::appearance::AppearanceTab {} },
                 }
             }
         }

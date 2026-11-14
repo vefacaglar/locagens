@@ -177,6 +177,8 @@ impl RunHandle {
             slot.pending = Some(PendingPermission { tool_call: prompt.tool_call.clone(), preview: prompt.preview.clone() });
             slot.sender = Some(sender);
             slot.prompt_id = prompt_id;
+            slot.agent_role = prompt.agent_role.clone();
+            slot.agent_name = prompt.agent_name.clone();
         }
         let cleanup = PromptCleanup { handle: self.clone(), db: db.clone(), prompt_id };
         db.patch_run(&self.run_id, |run| run.status = "awaiting_permission".into());
@@ -184,6 +186,7 @@ impl RunHandle {
         self.emit(json!({
             "type": "permission_requested",
             "runId": self.run_id,
+            "promptId": prompt_id,
             "toolCall": prompt.tool_call,
             "preview": prompt.preview,
             "agentRole": prompt.agent_role,
@@ -226,16 +229,34 @@ impl RunHandle {
         self.allow_run_tools.lock().expect("allow_run lock poisoned").contains(tool)
     }
 
-    /// `{ runId, toolCall, preview }` of the pending permission, if any.
+    /// `{ runId, promptId, toolCall, preview, agentRole, agentName }` of the
+    /// pending permission, if any (the same shape as `permission_requested`).
     pub async fn pending_permission(&self) -> Option<Value> {
         let slot = self.permission.lock().await;
         slot.pending.as_ref().map(|pending| {
             json!({
                 "runId": self.run_id,
+                "promptId": slot.prompt_id,
                 "toolCall": pending.tool_call,
                 "preview": pending.preview,
+                "agentRole": slot.agent_role,
+                "agentName": slot.agent_name,
             })
         })
+    }
+
+    /// Delivers `decision` to prompt `prompt_id` only while that prompt still
+    /// owns the slot, so a late or repeated answer never lands on the next
+    /// queued prompt. Returns `false` when the prompt is gone.
+    pub async fn answer_permission(&self, prompt_id: u64, decision: &str) -> bool {
+        let mut slot = self.permission.lock().await;
+        if slot.prompt_id != prompt_id || slot.pending.is_none() {
+            return false;
+        }
+        slot.pending = None;
+        let sender = slot.sender.take();
+        drop(slot);
+        sender.is_some_and(|sender| sender.send(decision.to_string()).is_ok())
     }
 
     /// `{ runId, questions }` of the pending question, if any.

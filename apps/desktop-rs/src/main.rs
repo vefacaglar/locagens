@@ -5,6 +5,10 @@
 //! `AppState` in a global for every component and spawned task, then launches
 //! the desktop runtime with the root `App` component.
 
+// FR-052: release builds are GUI programs on Windows (no console window).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod clipboard;
 mod components;
 #[cfg(test)]
 mod e2e_tests;
@@ -19,9 +23,23 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use state_ui::{set_core, AppPage};
 
+/// Smallest window that keeps the chat column usable (FR-061).
+const MIN_WINDOW: (f64, f64) = (760.0, 520.0);
+
 fn main() {
-    // 1. Bootstrap the core (opens the data store, runs startup tasks).
-    let state = locagens_core::api::bootstrap().expect("Failed to bootstrap the Locagens core");
+    // 1. Bootstrap the core (opens the data store, runs startup tasks). A GUI
+    //    build has no console, so a failure is shown in a dialog.
+    let state = match locagens_core::api::bootstrap() {
+        Ok(state) => state,
+        Err(err) => {
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Locagens")
+                .set_description(i18n::tf(prefs::load().language, "startup.failed", &[&format!("{err:#}")]))
+                .show();
+            std::process::exit(1);
+        }
+    };
     set_core(std::sync::Arc::new(state));
 
     // 2. Launch the Dioxus desktop runtime.
@@ -29,6 +47,7 @@ fn main() {
         .with_title("Locagens")
         .with_resizable(true)
         .with_inner_size(LogicalSize::new(1380.0, 860.0))
+        .with_min_inner_size(LogicalSize::new(MIN_WINDOW.0, MIN_WINDOW.1))
         .with_window_icon(logo::window_icon());
     // Custom title bar: the header strips drag the window and `WindowControls`
     // draws minimize / maximize / close (macOS keeps its traffic lights).
@@ -52,11 +71,47 @@ fn main() {
             .with_traffic_light_inset(LogicalPosition::new(14.0, 14.0));
     }
     let config = Config::new()
-        .with_disable_context_menu(true)
+        // The webview menu stays on so text fields keep copy / paste; the
+        // context-menu script hides it everywhere else (FR-066).
+        .with_disable_context_menu(false)
         .with_menu(None)
+        // FR-034: the window never navigates away from the app; web links
+        // (already filtered to http / https / mailto) open in the browser.
+        .with_navigation_handler(|_| false)
+        // FR-022: the event loop ends (window closed, quit): stop the exec
+        // sessions of every run before the process exits.
+        .with_custom_event_handler(|event, _| {
+            if matches!(event, dioxus::desktop::tao::event::Event::LoopDestroyed) {
+                shutdown_core();
+            }
+        })
         .with_window(window);
     dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
 }
+
+/// Runs `api::runs::shutdown` on its own thread and runtime (the event loop
+/// thread may already be inside the app's runtime) and waits for it.
+fn shutdown_core() {
+    let worker = std::thread::spawn(|| {
+        if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            runtime.block_on(locagens_core::api::runs::shutdown(&state_ui::core()));
+        }
+    });
+    let _ = worker.join();
+}
+
+/// Hides the webview's own context menu except in text fields and on a text
+/// selection, where copy and paste are needed.
+const CONTEXT_MENU_SCRIPT: &str = r#"(() => {
+  if (window.lcgnContextMenu) return;
+  window.lcgnContextMenu = true;
+  document.addEventListener('contextmenu', (e) => {
+    const t = e.target;
+    const editable = t && t.closest && t.closest('input, textarea, [contenteditable="true"]');
+    const selected = String(window.getSelection ? window.getSelection() : '').length > 0;
+    if (!editable && !selected) e.preventDefault();
+  });
+})();"#;
 
 /// Root component: builds the `UiStore` signals, provides it via context and
 /// renders the 3-column shell (sidebar / main column / inspector panel).
@@ -67,12 +122,16 @@ fn App() -> Element {
     let system_dark = store.system_dark;
     use_context_provider(|| store);
 
-    // Clipboard handler for code-block copy buttons, and chat scroll helpers.
+    // Chat scroll helpers, a11y basics and the context-menu rule.
     use_effect(|| {
-        dioxus::document::eval(markdown::COPY_SCRIPT);
         dioxus::document::eval(state_ui::CHAT_SCROLL_SCRIPT);
         dioxus::document::eval(state_ui::A11Y_SCRIPT);
+        dioxus::document::eval(CONTEXT_MENU_SCRIPT);
     });
+    // Copy buttons of rendered code blocks (FR-060).
+    use_future(clipboard::serve_code_copy_buttons);
+    // Keyboard layer: Esc, Ctrl+N/K/L/M/B/./,// (UX-019).
+    components::keyboard::use_keyboard_layer(store);
 
     // Load projects, runs and the provider catalog once at startup.
     use_hook(move || {
@@ -97,39 +156,25 @@ fn App() -> Element {
         }
     });
 
-    // Escape leaves Settings / Usage (open modals and popovers take Escape
-    // first, see the a11y script).
-    use_future(move || {
-        let mut page = store.page;
-        async move {
-            let mut keys = dioxus::document::eval(
-                r#"document.addEventListener('keydown', (e) => {
-                     if (e.key === 'Escape' && !document.querySelector('.modal-backdrop, .popover-backdrop')) dioxus.send(true);
-                   });"#,
-            );
-            while keys.recv::<bool>().await.is_ok() {
-                if *page.peek() != AppPage::Chat {
-                    page.set(AppPage::Chat);
-                }
-            }
-        }
-    });
-
     // The platform-native stylesheet (re-rendered when appearance changes).
     i18n::set_current(appearance.read().language);
     let stylesheet = theme::build_stylesheet_appearance(&appearance.read());
 
     let show_right_panel = *store.right_panel_open.read();
+    let show_sidebar = *store.sidebar_open.read();
     // The main column clears the window controls only while it is rightmost.
     let shell_inspector_class = if show_right_panel { "with-inspector" } else { "no-inspector" };
+    let shell_sidebar_class = if show_sidebar { "" } else { "no-sidebar" };
 
     rsx! {
         style { dangerous_inner_html: stylesheet }
         div {
-            class: "app-shell {theme::theme_class(store.is_dark())} {shell_inspector_class}",
+            class: "app-shell {theme::theme_class(store.is_dark())} {shell_inspector_class} {shell_sidebar_class}",
             style: "--sidebar-w: {store.layout.read().sidebar_width}px; --panel-w: {store.layout.read().right_panel_width}px;",
-            components::sidebar::Sidebar {}
-            components::resize::ResizeHandle { edge: components::resize::Edge::Sidebar }
+            if show_sidebar {
+                components::sidebar::Sidebar {}
+                components::resize::ResizeHandle { edge: components::resize::Edge::Sidebar }
+            }
             div {
                 class: "main-column",
                 match *store.page.read() {
@@ -146,7 +191,7 @@ fn App() -> Element {
                         }
                     }
                     AppPage::Settings(tab) => rsx! {
-                        components::settings::SettingsPage { initial_tab: tab }
+                        components::settings::SettingsPage { tab }
                     },
                     AppPage::UsageLogs => rsx! {
                         components::usage_logs::UsageLogsPage {}
@@ -160,6 +205,7 @@ fn App() -> Element {
                     components::right_panel::RightPanel {}
                 }
             }
+            components::palette::Overlays {}
             components::Toast {}
             if !cfg!(target_os = "macos") {
                 components::WindowControls {}

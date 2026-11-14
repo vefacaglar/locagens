@@ -1,6 +1,7 @@
 //! Memory tab: entries with create, edit and delete.
 
 use crate::state_ui::{core, UiStore};
+use crate::components::ConfirmButton;
 use dioxus::prelude::*;
 use locagens_core::db::Memory;
 
@@ -111,9 +112,9 @@ pub(super) fn MemoryTab() -> Element {
                                 },
                                 "{store.t(\"common.edit\")}"
                             }
-                            button {
-                                class: "danger",
-                                onclick: move |_| {
+                            ConfirmButton {
+                                label: store.t("common.delete").to_string(),
+                                on_confirm: move |_| {
                                     let mut memories = memories;
                                     spawn(async move {
                                         let state = core();
@@ -123,7 +124,6 @@ pub(super) fn MemoryTab() -> Element {
                                         memories.set(locagens_core::api::memory::list_memories(&state).await.unwrap_or_default());
                                     });
                                 },
-                                "{store.t(\"common.delete\")}"
                             }
                         }
                     }

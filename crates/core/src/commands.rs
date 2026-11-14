@@ -46,8 +46,8 @@ impl CommandSpec {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
-    spec("model", &[], "[provider/id]", "show or switch models", CLI),
-    spec("thinking", &[], "<level>", "reasoning effort (off..max)", CLI),
+    spec("model", &[], "[provider/id]", "show or switch models", ALL),
+    spec("thinking", &[], "<level>", "reasoning effort (off..max)", ALL),
     spec("plan", &[], "", "switch to plan mode (read-only)", ALL),
     spec("build", &[], "", "switch to build mode (edits applied)", ALL),
     spec("auto", &[], "", "switch to full access (no permission prompts)", ALL),
@@ -55,15 +55,15 @@ pub const COMMANDS: &[CommandSpec] = &[
     spec("new", &["clear"], "", "start a fresh session on the next message", ALL),
     spec("fork", &[], "", "fork the current session", ALL),
     spec("undo", &[], "", "undo the last turn (git snapshot)", ALL),
-    spec("diff", &[], "", "show the working-tree diff", CLI),
+    spec("diff", &[], "", "show the working-tree diff", ALL),
     spec("review", &[], "[target]", "code review: changes, a branch or a commit", ALL),
-    spec("mcp", &[], "", "list MCP servers and status", CLI),
-    spec("skills", &[], "", "list discovered skills", CLI),
-    spec("resume", &["sessions"], "", "pick a session of this folder to continue", CLI),
+    spec("mcp", &[], "", "list MCP servers and status", ALL),
+    spec("skills", &[], "", "list discovered skills", ALL),
+    spec("resume", &["sessions"], "", "pick a session of this folder to continue", ALL),
     spec("login", &[], "[provider]", "connect a provider (API key or sign-in)", CLI),
     spec("logout", &[], "<provider>", "remove a provider's stored credentials", CLI),
     spec("copy", &[], "[code]", "copy the last answer (or its last code block)", CLI),
-    spec("usage", &[], "", "usage and cost of this session", CLI),
+    spec("usage", &[], "", "usage and cost of this session", ALL),
     spec("help", &[], "", "show the available commands", ALL),
     spec("exit", &["quit"], "", "leave lcgn", CLI),
 ];
@@ -96,6 +96,49 @@ pub fn matching(query: &str, frontend: Frontend) -> Vec<&'static CommandSpec> {
 pub fn find(name: &str) -> Option<&'static CommandSpec> {
     let name = name.trim_start_matches('/').to_lowercase();
     COMMANDS.iter().find(|spec| spec.name == name || spec.aliases.contains(&name.as_str()))
+}
+
+/// What the composer is completing at the caret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerKind {
+    /// `/cmd` at the very start of the prompt, before any whitespace.
+    Slash,
+    /// An `@path` token ending at the caret.
+    File,
+}
+
+/// A completion trigger: its kind, the byte offset where the replaced text
+/// starts and the query typed so far (without the `/` or `@`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trigger {
+    pub kind: TriggerKind,
+    pub start: usize,
+    pub query: String,
+}
+
+/// Detects `/cmd` (only at the start, before any whitespace) or an `@file`
+/// token ending at byte offset `cursor` (clamped to a char boundary). Shared
+/// by the frontends so `/` and `@` behave the same everywhere (UX-020).
+pub fn detect_trigger(text: &str, cursor: usize) -> Option<Trigger> {
+    let mut cursor = cursor.min(text.len());
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let before = &text[..cursor];
+    if let Some(rest) = before.strip_prefix('/') {
+        if !rest.contains(char::is_whitespace) {
+            return Some(Trigger { kind: TriggerKind::Slash, start: 0, query: rest.to_string() });
+        }
+    }
+    let token_start = before
+        .rfind(char::is_whitespace)
+        .map(|i| i + before[i..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    before[token_start..].strip_prefix('@').map(|query| Trigger {
+        kind: TriggerKind::File,
+        start: token_start,
+        query: query.to_string(),
+    })
 }
 
 /// A parsed slash command.
@@ -262,13 +305,30 @@ mod tests {
     }
 
     #[test]
+    fn triggers_find_commands_and_mentions_at_the_caret() {
+        assert_eq!(detect_trigger("/rev", 4), Some(Trigger { kind: TriggerKind::Slash, start: 0, query: "rev".into() }));
+        assert_eq!(detect_trigger("/review base", 12), None, "arguments close the command list");
+        let text = "look at @src/ma and more";
+        assert_eq!(detect_trigger(text, 15), Some(Trigger { kind: TriggerKind::File, start: 8, query: "src/ma".into() }));
+        assert_eq!(detect_trigger(text, 24), None);
+        assert_eq!(detect_trigger("é @x", 5), Some(Trigger { kind: TriggerKind::File, start: 3, query: "x".into() }));
+        // A cursor inside a multi-byte char is clamped, never panics.
+        assert_eq!(detect_trigger("@é", 2), Some(Trigger { kind: TriggerKind::File, start: 0, query: String::new() }));
+        assert_eq!(detect_trigger("plain", 99), None);
+    }
+
+    #[test]
     fn frontends_offer_their_own_subset() {
         let cli: Vec<&str> = commands_for(Frontend::Cli).map(|c| c.name).collect();
         assert_eq!(cli.len(), COMMANDS.len(), "the CLI offers every command");
         let desktop: Vec<&str> = commands_for(Frontend::Desktop).map(|c| c.name).collect();
-        assert_eq!(desktop, ["plan", "build", "auto", "chat", "new", "fork", "undo", "review", "help"]);
+        // Every command but the terminal-only `/exit`, `/login`, `/logout`
+        // and `/copy` has a desktop equivalent (UX-021).
+        assert_eq!(desktop.len(), COMMANDS.len() - 4);
+        assert!(!desktop.contains(&"exit"));
         assert!(SlashCommand::Undo.supported_by(Frontend::Desktop));
-        assert!(!SlashCommand::Diff.supported_by(Frontend::Desktop));
+        assert!(SlashCommand::Diff.supported_by(Frontend::Desktop));
+        assert!(!SlashCommand::Exit.supported_by(Frontend::Desktop));
         assert!(!SlashCommand::Unknown("/x".into()).supported_by(Frontend::Cli));
     }
 
@@ -282,9 +342,9 @@ mod tests {
         assert_eq!(names, vec!["resume"]);
         assert!(matching("zzz", Frontend::Cli).is_empty());
         // The desktop never suggests CLI-only commands; a leading slash is fine.
-        assert!(matching("m", Frontend::Desktop).is_empty());
+        assert!(matching("ex", Frontend::Desktop).is_empty());
         let names: Vec<&str> = matching("/u", Frontend::Desktop).iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["undo", "build", "auto"]);
+        assert_eq!(names, vec!["undo", "usage", "build", "auto", "resume"]);
         assert_eq!(COMMANDS[0].usage(), "/model [provider/id]");
         assert_eq!(find("PLAN").unwrap().usage(), "/plan");
     }

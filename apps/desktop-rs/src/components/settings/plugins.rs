@@ -1,6 +1,7 @@
 //! Plugins tab: install, toggle and uninstall.
 
 use crate::state_ui::{core, UiStore};
+use crate::components::ConfirmButton;
 use dioxus::prelude::*;
 use locagens_core::api::plugins::ToggleInput;
 use locagens_core::services::plugins::InstallPayload;
@@ -174,9 +175,9 @@ pub(super) fn PluginsTab() -> Element {
                             },
                             if enabled { "{store.t(\"common.disable\")}" } else { "{store.t(\"common.enable\")}" }
                         }
-                        button {
-                            class: "danger",
-                            onclick: move |_| {
+                        ConfirmButton {
+                            label: store.t("plugins.uninstall").to_string(),
+                            on_confirm: move |_| {
                                 let mut data = data;
                                 let delete_id = delete_id.clone();
                                 spawn(async move {
@@ -189,7 +190,6 @@ pub(super) fn PluginsTab() -> Element {
                                     }
                                 });
                             },
-                            "{store.t(\"plugins.uninstall\")}"
                         }
                     }
                 }

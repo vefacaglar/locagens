@@ -82,7 +82,8 @@ pub fn AppearanceTab() -> Element {
                         r#type: "text",
                         placeholder: t("appearance.font_placeholder"),
                         value: "{current.ui_font_custom}",
-                        oninput: move |event| {
+                        // Saved on change, not per keystroke (FR-064).
+                        onchange: move |event| {
                             let value = event.value();
                             update(&|a| a.ui_font_custom = value.clone());
                         },
@@ -104,7 +105,7 @@ pub fn AppearanceTab() -> Element {
                         r#type: "text",
                         placeholder: t("appearance.font_placeholder"),
                         value: "{current.code_font_custom}",
-                        oninput: move |event| {
+                        onchange: move |event| {
                             let value = event.value();
                             update(&|a| a.code_font_custom = value.clone());
                         },
@@ -151,6 +152,7 @@ fn segmented<T: Copy + PartialEq + 'static>(
                         button {
                             key: "{index}",
                             class: if value == current { "active" } else { "" },
+                            "aria-pressed": "{value == current}",
                             onclick: move |_| on_pick(value),
                             "{label}"
                         }

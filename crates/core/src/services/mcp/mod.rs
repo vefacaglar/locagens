@@ -758,6 +758,7 @@ async fn rpc_stdio(config: &McpServerConfig, method: &str, params: &Value) -> Re
         .filter(|command| !command.trim().is_empty())
         .ok_or_else(|| format!("MCP server '{}' has no command.", config.name))?;
     let mut cmd = Command::new(&command);
+    crate::util::hide_console_window(cmd.as_std_mut());
     if let Some(args) = &config.args {
         cmd.args(args);
     }

@@ -3,6 +3,16 @@
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 
+/// i18n key of a sandbox status (FR-065: no raw ids).
+fn sandbox_status_key(status: &str) -> &'static str {
+    match status {
+        "ready" => "security.status_ready",
+        "unavailable" => "security.status_unavailable",
+        "needs_setup" | "not_installed" | "setup_required" => "security.status_setup",
+        _ => "security.status_degraded",
+    }
+}
+
 /// Security: workspace policy and command sandbox status, with the Windows
 /// sandbox setup action when it is available.
 #[component]
@@ -34,7 +44,7 @@ pub(super) fn SecurityTab() -> Element {
                         " · {store.t(\"security.status\")}: "
                         span {
                             class: if security.sandbox.status == "ready" { "badge ok" } else { "badge warn" },
-                            "{security.sandbox.status}"
+                            "{store.t(sandbox_status_key(&security.sandbox.status))}"
                         }
                     }
                     for (index, warning) in security.sandbox.warnings.iter().enumerate() {
@@ -58,10 +68,9 @@ pub(super) fn SecurityTab() -> Element {
                         class: "panel-section-title", "{store.t(\"security.policy\")}"
                     }
                     div { "{store.t(\"security.network\")}: " span { class: "mono", "{security.policy.command_network}" } }
-                    div { "{store.t(\"security.writes_only\")}: " span { class: "mono", "{security.policy.workspace_writes_only}" } }
                     div {
-                        "{store.t(\"security.bind\")}: " span { class: "mono", "{security.api.bind_address}" }
-                        " · {store.t(\"security.authenticated\")}: " span { class: "mono", "{security.api.authenticated}" }
+                        "{store.t(\"security.writes_only\")}: "
+                        span { class: "mono", if security.policy.workspace_writes_only { "{store.t(\"common.yes\")}" } else { "{store.t(\"common.no\")}" } }
                     }
                 }
                 if security.sandbox.can_install {

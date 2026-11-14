@@ -91,31 +91,72 @@ impl Default for Appearance {
     }
 }
 
-/// Reads the appearance object out of a settings file; any problem (missing
-/// file, bad JSON, no `appearance` key) yields the defaults.
+/// Field-by-field read: each value that does not parse keeps its default.
+fn appearance_from(value: &serde_json::Value) -> Appearance {
+    let mut appearance = Appearance::default();
+    let field = |key: &str| value.get(key).cloned();
+    macro_rules! take {
+        ($key:literal, $field:ident) => {
+            if let Some(parsed) = field($key).and_then(|v| serde_json::from_value(v).ok()) {
+                appearance.$field = parsed;
+            }
+        };
+    }
+    take!("language", language);
+    take!("theme", theme);
+    take!("ui_font", ui_font);
+    take!("ui_font_custom", ui_font_custom);
+    take!("code_font", code_font);
+    take!("code_font_custom", code_font_custom);
+    take!("code_ligatures", code_ligatures);
+    take!("font_size", font_size);
+    appearance
+}
+
+/// Reads the appearance object out of a settings file; a missing file, bad
+/// JSON or no `appearance` key yields the defaults.
 pub fn load_from(path: &Path) -> Appearance {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|root| root.get(SETTINGS_KEY).cloned())
-        .and_then(|value| serde_json::from_value(value).ok())
+        .and_then(|root| root.get(SETTINGS_KEY).map(appearance_from))
         .unwrap_or_default()
+}
+
+/// The settings root to update: the parsed object, or `{}` after keeping a
+/// copy of a file that is not a JSON object.
+fn read_root_for_update(path: &Path) -> serde_json::Value {
+    let Ok(text) = std::fs::read_to_string(path) else { return serde_json::json!({}) };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(root) if root.is_object() => root,
+        _ => {
+            if !text.trim().is_empty() {
+                let _ = std::fs::write(path.with_extension("json.broken"), &text);
+            }
+            serde_json::json!({})
+        }
+    }
+}
+
+/// Writes `root` through a sibling temp file and a rename.
+fn write_root(path: &Path, root: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(root).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Writes the appearance object into the settings file, keeping every other
 /// key that is already there.
 pub fn save_to(path: &Path, appearance: &Appearance) -> std::io::Result<()> {
-    let mut root = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_root_for_update(path);
     root[SETTINGS_KEY] = serde_json::to_value(appearance).map_err(std::io::Error::other)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
-    std::fs::write(path, text)
+    write_root(path, &root)
 }
 
 /// Default and allowed widths (px) of the resizable side columns.
@@ -160,17 +201,9 @@ pub fn load_layout_from(path: &Path) -> Layout {
 
 /// Writes the layout object, keeping every other key in the file.
 pub fn save_layout_to(path: &Path, layout: &Layout) -> std::io::Result<()> {
-    let mut root = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut root = read_root_for_update(path);
     root["layout"] = serde_json::to_value(layout.clamped()).map_err(std::io::Error::other)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
-    std::fs::write(path, text)
+    write_root(path, &root)
 }
 
 pub fn load_layout() -> Layout {
@@ -238,6 +271,25 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(load_from(&path), Appearance::default());
         assert_eq!(load_from(&path.with_file_name("missing.json")), Appearance::default());
+    }
+
+    #[test]
+    fn one_unknown_value_resets_only_its_field() {
+        let path = temp_file("partial");
+        std::fs::write(&path, r#"{"appearance": {"language": "tr", "theme": "neon", "font_size": "large"}}"#).unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.language, Lang::Tr);
+        assert_eq!(loaded.theme, ThemeChoice::Dark);
+        assert_eq!(loaded.font_size, FontSize::Large);
+    }
+
+    #[test]
+    fn a_broken_file_is_kept_before_it_is_replaced() {
+        let path = temp_file("broken");
+        std::fs::write(&path, "{ not json").unwrap();
+        save_to(&path, &Appearance::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(path.with_extension("json.broken")).unwrap(), "{ not json");
+        assert_eq!(load_from(&path), Appearance::default());
     }
 
     #[test]

@@ -70,7 +70,6 @@ pub fn relative_age(iso: &str, lang: crate::i18n::Lang) -> String {
 #[component]
 pub fn Sidebar() -> Element {
     let store: UiStore = use_context();
-    let mut show_add_modal = use_signal(|| false);
     let mut open_run_menu: Signal<Option<String>> = use_signal(|| None);
     let mut open_project_menu: Signal<Option<String>> = use_signal(|| None);
     let mut search_open = use_signal(|| false);
@@ -131,20 +130,12 @@ pub fn Sidebar() -> Element {
                     ondoubleclick: move |event| event.stop_propagation(),
                     button {
                         class: "toolbar-btn",
-                        title: store.t("sidebar.toggle"),
+                        title: store.tf("sidebar.toggle", &[&shortcut_label("B")]),
                         onmousedown: move |event| event.stop_propagation(),
+                        // FR-058: this hides the sidebar (the header brings it back).
                         onclick: move |_| {
-                            if !on_chat {
-                                let mut store = store;
-                                store.page.set(crate::state_ui::AppPage::Chat);
-                            } else {
-                                let closing = *search_open.read();
-                                if closing {
-                                    let mut store = store;
-                                    store.search_query.set(String::new());
-                                }
-                                search_open.set(!closing);
-                            }
+                            let mut store = store;
+                            store.sidebar_open.set(false);
                         },
                         {icon_sidebar()}
                     }
@@ -196,7 +187,11 @@ pub fn Sidebar() -> Element {
                 class: "sidebar-top-controls",
                 button {
                     class: "new-conv-btn",
-                    onclick: move |_| new_chat(&store),
+                    title: store.tf("sidebar.new_chat_title", &[&shortcut_label("N")]),
+                    onclick: move |_| {
+                        new_chat(&store);
+                        crate::state_ui::focus_composer();
+                    },
                     span { class: "sidebar-nav-icon", {icon_plus()} }
                     span { "{store.t(\"conversation.new\")}" }
                 }
@@ -247,7 +242,7 @@ pub fn Sidebar() -> Element {
                             class: "subtle icon-btn",
                             title: store.t("sidebar.add_project"),
                             onmousedown: move |event| event.stop_propagation(),
-                            onclick: move |_| show_add_modal.set(true),
+                            onclick: move |_| open_folder(store),
                             {icon_folder_plus()}
                         }
                     }
@@ -322,6 +317,7 @@ pub fn Sidebar() -> Element {
                                             let mut store = store;
                                             store.selected_project.set(Some(path_new.clone()));
                                             new_chat(&store);
+                                            crate::state_ui::focus_composer();
                                         },
                                         {icon_plus()}
                                     }
@@ -329,13 +325,12 @@ pub fn Sidebar() -> Element {
                                         div {
                                             class: "row-context-menu",
                                             onclick: move |event| event.stop_propagation(),
-                                            button {
-                                                class: "danger",
-                                                onclick: move |_| {
+                                            ConfirmButton {
+                                                label: store.t("sidebar.remove_workspace").to_string(),
+                                                on_confirm: move |_| {
                                                     open_project_menu.set(None);
                                                     delete_project(&store, &path_delete.clone());
                                                 },
-                                                "{store.t(\"sidebar.remove_workspace\")}"
                                             }
                                         }
                                     }
@@ -373,7 +368,10 @@ pub fn Sidebar() -> Element {
                         class: "subtle icon-btn",
                         title: store.t("sidebar.new_conversation"),
                         onmousedown: move |event| event.stop_propagation(),
-                        onclick: move |_| new_chat(&store),
+                        onclick: move |_| {
+                            new_chat(&store);
+                            crate::state_ui::focus_composer();
+                        },
                         {icon_plus()}
                     }
                 }
@@ -410,9 +408,6 @@ pub fn Sidebar() -> Element {
                 }
             }
         }
-        if *show_add_modal.read() {
-            AddProjectModal { on_close: move || show_add_modal.set(false) }
-        }
     }
 }
 
@@ -429,7 +424,8 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
     let run_title = run.title.clone();
     let model = run.model.clone();
     let status = run.status.clone();
-    let is_live = status == "generating" || status == "created";
+    // FR-054: a run waiting for the user shows the warn dot too.
+    let is_live = crate::state_ui::run_is_active(&status);
     let age_source = if run.updated_at.is_empty() { run.created_at.clone() } else { run.updated_at.clone() };
     let age = relative_age(&age_source, store.lang());
     let is_active = active_run_id == Some(run.id.as_str());
@@ -451,6 +447,7 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
                 let mut store = store;
                 store.page.set(crate::state_ui::AppPage::Chat);
                 store.select_run(run_id_select.clone());
+                crate::state_ui::focus_composer();
             },
             span { class: "run-title", "{run_title}" }
             if is_live {
@@ -484,13 +481,12 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
                         },
                         "{store.t(\"sidebar.fork\")}"
                     }
-                    button {
-                        class: "danger",
-                        onclick: move |_| {
+                    ConfirmButton {
+                        label: store.t("common.delete").to_string(),
+                        on_confirm: move |_| {
                             open_run_menu.set(None);
                             delete_run(&store, &run_id_delete.clone());
                         },
-                        "{store.t(\"common.delete\")}"
                     }
                 }
             }
@@ -498,100 +494,40 @@ fn run_item(store: &UiStore, run: &Run, active_run_id: Option<&str>, mut open_ru
     }
 }
 
-/// Modal to register a project: manual path input or native folder picker.
-#[component]
-fn AddProjectModal(on_close: EventHandler) -> Element {
-    let store: UiStore = use_context();
-    let mut path = use_signal(String::new);
-    let busy = use_signal(|| false);
-
-    rsx! {
-        div {
-            class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
-            div {
-                class: "modal",
-                role: "dialog",
-                "aria-modal": "true",
-                onclick: move |event| event.stop_propagation(),
-                h3 { "{store.t(\"sidebar.add_project_title\")}" }
-                label { "{store.t(\"sidebar.project_folder\")}" }
-                div {
-                    class: "composer-row-top",
-                    input {
-                        placeholder: r"C:\path\to\project",
-                        value: "{path.read()}",
-                        oninput: move |event| path.set(event.value()),
-                    }
-                    button {
-                        disabled: *busy.read(),
-                        onclick: move |_| {
-                            let mut path = path;
-                            spawn(async move {
-                                if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await {
-                                    path.set(folder.path().to_string_lossy().to_string());
-                                }
-                            });
-                        },
-                        "{store.t(\"common.browse\")}"
-                    }
+/// Opens the native folder picker and registers the chosen folder as a
+/// project, then selects it (UX-004, FR-058). One click, no modal.
+pub fn open_folder(store: UiStore) {
+    spawn(async move {
+        let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else { return };
+        let path = folder.path().to_string_lossy().to_string();
+        let state = crate::state_ui::core();
+        let input = locagens_core::api::projects::CreateProjectInput { path: Some(path), name: None };
+        match locagens_core::api::projects::create_project(&state, input).await {
+            Ok(project) => {
+                let mut store = store;
+                if let Ok(projects) = locagens_core::api::projects::list_projects(&state).await {
+                    store.projects.set(projects);
                 }
-                div {
-                    class: "modal-actions",
-                    button { onclick: move |_| on_close.call(()), "{store.t(\"common.cancel\")}" }
-                    button {
-                        class: "primary",
-                        disabled: *busy.read() || path.read().trim().is_empty(),
-                        onclick: move |_| {
-                            let store = store;
-                            let mut busy = busy;
-                            let raw = path.read().trim().to_string();
-                            busy.set(true);
-                            spawn(async move {
-                                let state = crate::state_ui::core();
-                                let result = locagens_core::api::projects::create_project(
-                                    &state,
-                                    locagens_core::api::projects::CreateProjectInput {
-                                        path: Some(raw.clone()),
-                                        name: None,
-                                    },
-                                )
-                                .await;
-                                match result {
-                                    Ok(_project) => {
-                                        store.refresh_projects();
-                                        on_close.call(());
-                                    }
-                                    Err(err) => store.toast(store.tf("toast.add_project_failed", &[&err.to_string()])),
-                                }
-                                busy.set(false);
-                            });
-                        },
-                        "{store.t(\"sidebar.add_project_title\")}"
-                    }
-                }
+                store.reset_conversation();
+                store.selected_project.set(Some(project.path));
+                store.page.set(crate::state_ui::AppPage::Chat);
+                crate::state_ui::focus_composer();
             }
+            Err(err) => store.toast(store.tf("toast.add_project_failed", &[&err.to_string()])),
         }
-    }
+    });
 }
 
-/// Clears the active conversation so the composer starts a fresh run.
-fn new_chat(store: &UiStore) {
+/// Clears the active conversation so the composer starts a fresh run in the
+/// current project.
+pub(crate) fn new_chat(store: &UiStore) {
+    // `selected_project` already follows the opened chat (FR-050).
     let mut store = *store;
-    store.active_run_id.set(None);
-    store.active_run.set(None);
-    store.messages.set(Vec::new());
-    store.plan.set(None);
-    store.run_usage.set(None);
-    store.context_usage.set(None);
-    store.pending_permission.set(None);
-    store.pending_question.set(None);
-    store.turn_diff.set(None);
-    store.spawned_agents.set(Vec::new());
+    store.reset_conversation();
     store.page.set(crate::state_ui::AppPage::Chat);
 }
 
-/// Registers nothing — removes a project registration.
+/// Removes a project registration (the folder itself is untouched).
 fn delete_project(store: &UiStore, path: &str) {
     let mut store = *store;
     let path = path.to_string();
@@ -602,11 +538,7 @@ fn delete_project(store: &UiStore, path: &str) {
         }
         let projects = locagens_core::api::projects::list_projects(&state).await.unwrap_or_default();
         store.projects.set(projects);
-        let still_registered = store
-            .projects
-            .read()
-            .iter()
-            .any(|project| project.path == path);
+        let still_registered = store.projects.read().iter().any(|project| project.path == path);
         if !still_registered && store.selected_project.read().as_deref() == Some(path.as_str()) {
             store.selected_project.set(store.projects.read().first().map(|project| project.path.clone()));
         }
@@ -632,22 +564,16 @@ fn fork_run_action(store: &UiStore, run_id: &str) {
 
 /// Deletes a run through the api facade, which cancels an active run first.
 fn delete_run(store: &UiStore, run_id: &str) {
-    let mut store = *store;
+    let store = *store;
     let run_id = run_id.to_string();
     spawn(async move {
         let state = crate::state_ui::core();
-        let _ = locagens_core::api::runs::delete_run(&state, &run_id).await;
-        if store.active_run_id.read().as_deref() == Some(run_id.as_str()) {
-            store.active_run_id.set(None);
-            store.active_run.set(None);
-            store.messages.set(Vec::new());
-            store.plan.set(None);
-            store.run_usage.set(None);
-            store.context_usage.set(None);
-            store.pending_permission.set(None);
-            store.pending_question.set(None);
-            store.turn_diff.set(None);
-            store.spawned_agents.set(Vec::new());
+        if let Err(err) = locagens_core::api::runs::delete_run(&state, &run_id).await {
+            store.toast(store.tf("toast.delete_failed", &[&err.to_string()]));
+            return;
+        }
+        if store.active_run_id.peek().as_deref() == Some(run_id.as_str()) {
+            store.reset_conversation();
         }
         store.refresh_runs();
     });
