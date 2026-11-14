@@ -2,7 +2,7 @@
 //! status dot, `project / conversation` breadcrumb and
 //! icon buttons for stop, theme and the inspector panel.
 
-use super::icons::{icon_folder, icon_moon, icon_panel_right, icon_stop, icon_sun};
+use super::icons::{icon_folder, icon_moon, icon_panel_right, icon_sidebar, icon_stop, icon_sun};
 use super::*;
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
@@ -16,11 +16,8 @@ pub fn ChatHeader() -> Element {
         .as_ref()
         .map(|run| run.title.clone())
         .unwrap_or_else(|| store.t("conversation.new").to_string());
-    let project_path = run
-        .as_ref()
-        .map(|run| run.project_path.clone())
-        .or_else(|| store.selected_project.read().clone())
-        .unwrap_or_default();
+    let project_path = store.current_project().unwrap_or_default();
+    let sidebar_open = *store.sidebar_open.read();
     let status = run
         .as_ref()
         .map(|run| run.status.clone())
@@ -47,6 +44,18 @@ pub fn ChatHeader() -> Element {
             onmousedown: start_window_drag,
             div {
                 class: "chat-header-meta",
+                if !sidebar_open {
+                    button {
+                        class: "icon-btn",
+                        title: store.tf("sidebar.show", &[&shortcut_label("B")]),
+                        onmousedown: move |e| e.stop_propagation(),
+                        onclick: move |_| {
+                            let mut store = store;
+                            store.sidebar_open.set(true);
+                        },
+                        {icon_sidebar()}
+                    }
+                }
                 {status_dot(&status)}
                 if !project_path.is_empty() {
                     span {
@@ -101,7 +110,7 @@ pub fn ChatHeader() -> Element {
                 }
                 button {
                     class: if inspector_open { "icon-btn on" } else { "icon-btn" },
-                    title: store.t("header.inspector"),
+                    title: store.tf("header.inspector", &[&if cfg!(target_os = "macos") { "\u{2318}\u{2325}B".to_string() } else { "Ctrl+Alt+B".to_string() }]),
                     onclick: move |_| {
                         let mut store = store;
                         let open = *store.right_panel_open.read();

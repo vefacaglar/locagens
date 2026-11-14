@@ -1,13 +1,16 @@
 //! Message thread: renders user messages, assistant Markdown answers with
-//! collapsible reasoning, tool-call cards and sub-agent groups.
+//! collapsible reasoning, tool-call rows and sub-agent groups, plus the end
+//! of the thread: the live status row, a failed run's error block and the
+//! "what changed" card.
 
 use super::icons::*;
 use super::*;
-use crate::markdown::{parse_diff, summarize_args, DiffLine};
 use crate::i18n::{self, Lang};
-use crate::state_ui::UiStore;
+use crate::markdown::{parse_diff, summarize_args, DiffLine};
+use crate::state_ui::{AppPage, SettingsTab, UiStore};
 use dioxus::prelude::*;
 use locagens_core::db::RunMessage;
+use locagens_core::tool_labels::{describe_tool, tool_outcome, ToolOutcome, ToolVerb};
 use serde_json::Value;
 
 /// One serialized tool call of an assistant message plus its paired tool
@@ -20,6 +23,12 @@ pub struct ToolCallView {
     pub response: Option<RunMessage>,
 }
 
+impl ToolCallView {
+    fn outcome(&self) -> ToolOutcome {
+        tool_outcome(self.response.as_ref().map(|response| response.content.as_str()))
+    }
+}
+
 /// Rendered groups of messages.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Group {
@@ -28,11 +37,19 @@ pub enum Group {
     SubAgent { role: String, name: String, groups: Vec<Group> },
 }
 
+/// Tool calls serialized in an assistant message's `raw_response`.
+fn message_tool_calls(message: &RunMessage) -> Vec<Value> {
+    message
+        .raw_response
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+        .unwrap_or_default()
+}
+
 /// Groups the persisted message list into renderable units.
 pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
     // Map tool responses by call id.
-    let mut tool_responses: std::collections::HashMap<String, RunMessage> =
-        std::collections::HashMap::new();
+    let mut tool_responses: std::collections::HashMap<String, RunMessage> = std::collections::HashMap::new();
     for message in messages.iter().filter(|message| message.role == "tool") {
         if let Some(call_id) = message.raw_response.as_deref() {
             tool_responses.insert(call_id.to_string(), message.clone());
@@ -66,27 +83,17 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
             continue;
         }
         match message.role.as_str() {
-            "user" | "system" => {
-                if message.role == "user" {
-                    groups.push(Group::User(message.clone()));
-                }
+            "user" => {
+                groups.push(Group::User(message.clone()));
                 index += 1;
             }
             "assistant" => {
-                let tool_calls: Vec<ToolCallView> = message
-                    .raw_response
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
-                    .unwrap_or_default()
+                let tool_calls: Vec<ToolCallView> = message_tool_calls(message)
                     .into_iter()
                     .filter_map(|call| {
                         let id = call.get("id").and_then(Value::as_str)?.to_string();
                         let response = tool_responses.get(&id).cloned();
-                        let name = call
-                            .pointer("/function/name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("tool")
-                            .to_string();
+                        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool").to_string();
                         let arguments = call
                             .pointer("/function/arguments")
                             .and_then(Value::as_str)
@@ -95,10 +102,7 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
                         Some(ToolCallView { id, name, arguments, response })
                     })
                     .collect();
-                groups.push(Group::Assistant {
-                    message: message.clone(),
-                    tool_calls,
-                });
+                groups.push(Group::Assistant { message: message.clone(), tool_calls });
                 index += 1;
             }
             _ => index += 1,
@@ -107,54 +111,129 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
     groups
 }
 
+/// Whether each top-level group shows the model label (UX-025): only the
+/// first assistant message of a turn, or one whose model differs from the
+/// previous assistant message.
+pub fn model_label_flags(groups: &[Group]) -> Vec<bool> {
+    let mut last_model: Option<Option<String>> = None;
+    groups
+        .iter()
+        .map(|group| match group {
+            Group::User(_) => {
+                last_model = None;
+                false
+            }
+            Group::Assistant { message, .. } => {
+                let show = last_model.as_ref() != Some(&message.model);
+                last_model = Some(message.model.clone());
+                show
+            }
+            Group::SubAgent { .. } => false,
+        })
+        .collect()
+}
+
+/// The newest main-agent tool call that has no result yet: `(id, name, args)`.
+pub fn running_tool(messages: &[RunMessage]) -> Option<(String, String, Value)> {
+    let answered: std::collections::HashSet<&str> =
+        messages.iter().filter(|m| m.role == "tool").filter_map(|m| m.raw_response.as_deref()).collect();
+    messages.iter().rev().filter(|m| m.role == "assistant").find_map(|message| {
+        message_tool_calls(message).into_iter().rev().find_map(|call| {
+            let id = call.get("id").and_then(Value::as_str)?.to_string();
+            if answered.contains(id.as_str()) {
+                return None;
+            }
+            let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool").to_string();
+            let args = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|arguments| serde_json::from_str(arguments).ok())
+                .unwrap_or(Value::Null);
+            Some((id, name, args))
+        })
+    })
+}
+
+/// Translated tool verb (`Ran`, `Edited` …); unknown tools keep their name.
+pub fn verb_label(verb: &ToolVerb, lang: Lang) -> String {
+    match verb.key() {
+        Some(key) => i18n::t(lang, verb_key(key)).to_string(),
+        None => verb.english(),
+    }
+}
+
+fn verb_key(key: &str) -> &'static str {
+    match key {
+        "ran" => "verb.ran",
+        "sent_input" => "verb.sent_input",
+        "read" => "verb.read",
+        "listed" => "verb.listed",
+        "searched" => "verb.searched",
+        "wrote" => "verb.wrote",
+        "edited" => "verb.edited",
+        "applied_patch" => "verb.applied_patch",
+        "deleted" => "verb.deleted",
+        "created_dir" => "verb.created_dir",
+        "moved" => "verb.moved",
+        "fetched" => "verb.fetched",
+        "spawned_agents" => "verb.spawned_agents",
+        "spawned_agent" => "verb.spawned_agent",
+        "loaded_skill" => "verb.loaded_skill",
+        "asked" => "verb.asked",
+        "titled_chat" => "verb.titled_chat",
+        "updated_plan" => "verb.updated_plan",
+        _ => "verb.remembered",
+    }
+}
+
+/// Whether an error message is about credentials (offers "Models & accounts").
+pub fn is_auth_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    ["401", "403", "unauthorized", "not authenticated", "api key", "authentication", "invalid_api_key", "forbidden"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 #[component]
 pub fn MessageThread() -> Element {
     let store: UiStore = use_context();
     let messages = store.messages.read().clone();
     let groups = build_groups(&messages);
     let is_empty = groups.is_empty();
-    let has_active = run_active(store.active_run.read().as_ref());
-    let project_name = store
-        .selected_project
+    let run = store.active_run.read().clone();
+    let has_active = run_active(run.as_ref());
+    let streaming_review = run
+        .as_ref()
+        .is_some_and(|run| has_active && locagens_core::orchestrator::review::is_review_run(run));
+    let labels = model_label_flags(&groups);
+    let failure = run
+        .as_ref()
+        .filter(|run| run.status == "failed")
+        .map(|run| run.error_message.clone().unwrap_or_default());
+    let changes = store
+        .turn_diff
         .read()
-        .as_deref()
-        .and_then(|path| std::path::Path::new(path).file_name())
-        .map(|name| name.to_string_lossy().to_string());
-    let empty_title = match project_name {
-        Some(name) => store.tf("empty.title_in", &[&name]),
-        None => store.t("empty.title").to_string(),
-    };
+        .clone()
+        .filter(|_| !has_active)
+        .zip(run.as_ref().map(|run| run.id.clone()));
 
     rsx! {
         div {
             id: "chat-scroll",
             if is_empty {
-                div {
-                    class: "msg-empty",
-                    {logo_mark()}
-                    div { class: "big", "{empty_title}" }
-                    div { "{store.t(\"empty.subtitle\")}" }
-                    { starter_cards(&store) }
-                }
+                EmptyThread {}
             }
-            for group in groups.iter() {
-                { render_group(&store, group, 0) }
+            for (group, show_model) in groups.iter().zip(labels) {
+                { render_group(group, 0, show_model, streaming_review) }
+            }
+            if let Some(error) = failure {
+                FailureBlock { error }
+            }
+            if let Some(((diff, _), run_id)) = changes {
+                super::changes::ChangesCard { key: "{run_id}", diff, run_id: run_id.clone() }
             }
             if has_active && !groups.is_empty() {
-                div {
-                    class: "msg-meta",
-                    {status_dot("generating")}
-                    "{store.t(\"thread.working\")}"
-                }
-                if let Some(progress) = store.patch_progress.read().clone() {
-                    div {
-                        class: "msg-meta patch-progress",
-                        "{store.t(\"thread.writing_patch\")}"
-                        for file in patch_progress_files(&progress, store.lang()) {
-                            span { class: "mono", " · {file}" }
-                        }
-                    }
-                }
+                StatusRow {}
             }
             // Sized by `window.lcgnChat` so a just-sent message can sit at the top.
             div { id: "chat-tail-spacer", class: "chat-tail-spacer" }
@@ -162,7 +241,7 @@ pub fn MessageThread() -> Element {
     }
 }
 
-fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
+fn render_group(group: &Group, depth: u8, show_model: bool, streaming_review: bool) -> Element {
     match group {
         Group::User(message) => rsx! {
             div {
@@ -171,7 +250,7 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
                 "data-mid": "{message.id}",
                 div { class: "bubble", "{message.content}" }
                 if !message.content.is_empty() {
-                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
+                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone(), reuse: depth == 0 }
                 }
             }
         },
@@ -179,55 +258,266 @@ fn render_group(_store: &UiStore, group: &Group, depth: usize) -> Element {
             div {
                 class: "msg-assistant",
                 key: "{message.id}",
-                div {
-                    class: "msg-meta",
-                    span { class: "model-label", "{message.model.clone().unwrap_or_else(|| \"assistant\".to_string())}" }
+                if show_model {
+                    div {
+                        class: "msg-meta",
+                        span { class: "model-label", "{message.model.clone().unwrap_or_default()}" }
+                    }
                 }
                 if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
-                    ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
+                    ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap_or_default() }
                 }
-                super::review::AssistantBody { message: message.clone() }
+                super::review::AssistantBody { message: message.clone(), streaming_review }
                 if !tool_calls.is_empty() {
-                    ToolActivity { calls: tool_calls.clone(), depth: depth as u8 }
+                    ToolActivity { calls: tool_calls.clone() }
                 }
-                if !message.content.is_empty() {
-                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
+                if !message.content.is_empty() && depth == 0 {
+                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone(), reuse: false }
                 }
             }
         },
         Group::SubAgent { role, name, groups } => rsx! {
-            SubAgentCard { role: role.clone(), name: name.clone(), groups: groups.clone(), depth: depth as u8 }
+            SubAgentCard { role: role.clone(), name: name.clone(), groups: groups.clone(), depth }
         },
     }
 }
 
-/// Hero empty state: headline, subtitle and clickable starter cards that
-/// pre-fill the composer prompt.
-fn starter_cards(store: &UiStore) -> Element {
+/// What the empty thread offers: connect a provider (UX-001), open a folder
+/// (UX-004), or contextual starters.
+#[component]
+fn EmptyThread() -> Element {
+    let mut store: UiStore = use_context();
+    let no_provider = *store.providers_loaded.read() && store.visible_catalog().is_empty();
+    let no_folder = store.projects.read().is_empty() && store.current_project().is_none();
+    if no_provider {
+        return rsx! {
+            div {
+                class: "msg-empty",
+                {logo_mark()}
+                div { class: "big", "{store.t(\"empty.connect_title\")}" }
+                div { "{store.t(\"empty.connect_body\")}" }
+                button {
+                    class: "primary empty-cta",
+                    onclick: move |_| store.page.set(AppPage::Settings(SettingsTab::Providers)),
+                    "{store.t(\"empty.connect_button\")}"
+                }
+                div { class: "empty-hint", "{store.t(\"empty.connect_hint\")}" }
+            }
+        };
+    }
+    if no_folder {
+        return rsx! {
+            div {
+                class: "msg-empty",
+                {logo_mark()}
+                div { class: "big", "{store.t(\"empty.folder_title\")}" }
+                div { "{store.t(\"empty.folder_body\")}" }
+                button {
+                    class: "primary empty-cta",
+                    onclick: move |_| super::sidebar::open_folder(store),
+                    "{store.t(\"empty.folder_button\")}"
+                }
+            }
+        };
+    }
+    let project = store.current_project().unwrap_or_default();
+    let name = std::path::Path::new(&project).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+    let title = if name.is_empty() { store.t("empty.title").to_string() } else { store.tf("empty.title_in", &[&name]) };
+    rsx! {
+        div {
+            class: "msg-empty",
+            {logo_mark()}
+            div { class: "big", "{title}" }
+            div { "{store.t(\"empty.subtitle\")}" }
+            Starters { key: "{project}", project: project.clone() }
+        }
+    }
+}
+
+/// Starter cards for `project`: "Review my uncommitted changes" (runs
+/// `/review`) first when the tree is dirty, then up to three recent chats of
+/// the project as "Continue: <title> · 2h" (UX-004).
+#[component]
+fn Starters(project: String) -> Element {
+    let mut store: UiStore = use_context();
+    let path = project.clone();
+    let dirty = use_resource(move || {
+        let path = path.clone();
+        async move {
+            locagens_core::api::projects::git_status(&crate::state_ui::core(), &path)
+                .await
+                .ok()
+                .is_some_and(|status| status.is_git && status.has_changes.unwrap_or(false))
+        }
+    });
+    let dirty = dirty.read().unwrap_or(false);
     let t = |key| store.t(key);
-    let starters = [
+    let mut starters: Vec<(&'static str, &'static str)> = vec![
         (t("starter.explore.title"), t("starter.explore.prompt")),
-        (t("starter.review.title"), t("starter.review.prompt")),
         (t("starter.tests.title"), t("starter.tests.prompt")),
         (t("starter.plan.title"), t("starter.plan.prompt")),
     ];
+    if !dirty {
+        starters.insert(1, (t("starter.review.title"), t("starter.review.prompt")));
+    }
+    let recent: Vec<(String, String, String)> = store
+        .runs
+        .read()
+        .iter()
+        .filter(|run| run.project_path == project)
+        .take(3)
+        .map(|run| {
+            let age_source = if run.updated_at.is_empty() { run.created_at.clone() } else { run.updated_at.clone() };
+            (run.id.clone(), run.title.clone(), super::sidebar::relative_age(&age_source, store.lang()))
+        })
+        .collect();
     rsx! {
         div {
             class: "starter-grid",
-            for (index, (title, prompt)) in starters.iter().enumerate() {
-                {
-                    let prompt = prompt.to_string();
-                    let mut store = *store;
-                    rsx! {
-                        button {
-                            key: "starter-{index}",
-                            class: "starter-card",
-                            onclick: move |_| store.prompt.set(prompt.clone()),
-                            "{title}"
-                        }
+            if dirty {
+                button {
+                    class: "starter-card",
+                    onclick: move |_| {
+                        super::composer::run_command_line(store, "/review");
+                    },
+                    "{store.t(\"starter.review_changes\")}"
+                }
+            }
+            for (index, (title, prompt)) in starters.into_iter().enumerate() {
+                button {
+                    key: "starter-{index}",
+                    class: "starter-card",
+                    onclick: move |_| {
+                        store.prompt.set(prompt.to_string());
+                        crate::state_ui::focus_composer();
+                    },
+                    "{title}"
+                }
+            }
+        }
+        if !recent.is_empty() {
+            div {
+                class: "recent-chats",
+                for (run_id, title, age) in recent {
+                    button {
+                        key: "{run_id}",
+                        class: "recent-chat",
+                        onclick: move |_| store.select_run(run_id.clone()),
+                        "{store.tf(\"empty.continue\", &[&title, &age])}"
                     }
                 }
             }
+        }
+    }
+}
+
+/// One live line under the thread while a run works (UX-010): what it is
+/// doing, for how long, and how to stop it. Waiting states do not pulse.
+#[component]
+fn StatusRow() -> Element {
+    let store: UiStore = use_context();
+    let mut since: Signal<Option<(String, std::time::Instant)>> = use_signal(|| None);
+    let mut tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tick += 1;
+        }
+    });
+    let _ = tick.read();
+    let lang = store.lang();
+    let status = store.active_run.read().as_ref().map(|run| run.status.clone()).unwrap_or_default();
+    let running = running_tool(&store.messages.read());
+    let progress = store.patch_progress.read().clone();
+
+    // Elapsed time of the current tool call (reset when the call changes).
+    let key = running.as_ref().map(|(id, _, _)| id.clone()).unwrap_or_default();
+    if since.peek().as_ref().map(|(id, _)| id.as_str()) != Some(key.as_str()) {
+        since.set(Some((key.clone(), std::time::Instant::now())));
+    }
+    let elapsed = since.peek().as_ref().map(|(_, at)| at.elapsed().as_secs()).unwrap_or(0);
+    let elapsed_label = format_elapsed(elapsed);
+
+    let (dot, text) = match status.as_str() {
+        "awaiting_permission" => ("awaiting_permission", store.t("status_row.approval").to_string()),
+        "awaiting_input" => ("awaiting_input", store.t("status_row.answer").to_string()),
+        _ => {
+            let text = if let Some(progress) = progress.as_ref() {
+                let files = patch_progress_files(progress, lang).join(", ");
+                store.tf("status_row.writing", &[&files])
+            } else if let Some((_, name, args)) = running.as_ref() {
+                let (verb, target) = describe_tool(name, args);
+                let label = if verb == ToolVerb::Ran {
+                    store.tf("status_row.running_command", &[&target])
+                } else {
+                    format!("{} {target}", verb_label(&verb, lang)).trim().to_string()
+                };
+                format!("{label} · {elapsed_label}")
+            } else {
+                store.t("status_row.thinking").to_string()
+            };
+            ("generating", format!("{text} · {}", store.t("status_row.esc")))
+        }
+    };
+    rsx! {
+        div {
+            class: "msg-meta status-row",
+            role: "status",
+            "aria-live": "polite",
+            {status_dot(dot)}
+            span { class: "status-text", "{text}" }
+        }
+    }
+}
+
+/// `45s`, `1m 12s`.
+pub fn format_elapsed(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// A failed run's reason, kept at the end of the thread (UX-008): rendered
+/// from the run's persisted `error_message`, so reopening the chat shows it.
+#[component]
+fn FailureBlock(error: String) -> Element {
+    let mut store: UiStore = use_context();
+    let mut copied = use_signal(|| false);
+    let auth = is_auth_error(&error);
+    let text = if error.trim().is_empty() { store.t("failure.no_reason").to_string() } else { error.clone() };
+    rsx! {
+        div {
+            class: "failure-block",
+            role: "alert",
+            div { class: "failure-title", {icon_x()} "{store.t(\"failure.title\")}" }
+            pre { class: "failure-text", "{text}" }
+            div {
+                class: "changes-actions",
+                button {
+                    onclick: move |_| {
+                        let error = error.clone();
+                        spawn(async move {
+                            if crate::clipboard::copy_text(&error).await {
+                                copied.set(true);
+                                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                                copied.set(false);
+                            } else {
+                                store.toast(store.t("toast.copy_failed").to_string());
+                            }
+                        });
+                    },
+                    if *copied.read() { "{store.t(\"failure.copied\")}" } else { "{store.t(\"failure.copy\")}" }
+                }
+                if auth {
+                    button {
+                        onclick: move |_| store.page.set(AppPage::Settings(SettingsTab::Providers)),
+                        "{store.t(\"failure.open_accounts\")}"
+                    }
+                }
+            }
+            div { class: "failure-hint", "{store.t(\"failure.hint\")}" }
         }
     }
 }
@@ -242,6 +532,7 @@ fn ReasoningPanel(reasoning: String) -> Element {
             class: "collapsible reasoning-panel",
             button {
                 class: "collapsible-header",
+                "aria-expanded": "{open.read()}",
                 onclick: move |_| {
                     let mut open = open;
                     let is_open = *open.read();
@@ -260,13 +551,15 @@ fn ReasoningPanel(reasoning: String) -> Element {
     }
 }
 
-/// Footer under an assistant answer: relative age plus a copy button, both
-/// quiet until the message is hovered.
+/// Footer under a message: relative age, Copy, and for user messages
+/// `Reuse` (puts the text back into the composer, UX-025). Quiet until the
+/// message is hovered or focused.
 #[component]
-fn MessageFooter(text: String, created_at: String) -> Element {
-    let store: UiStore = use_context();
+fn MessageFooter(text: String, created_at: String, reuse: bool) -> Element {
+    let mut store: UiStore = use_context();
     let mut copied = use_signal(|| false);
     let age = super::sidebar::relative_age(&created_at, store.lang());
+    let reuse_text = text.clone();
     rsx! {
         div {
             class: "msg-footer",
@@ -275,16 +568,30 @@ fn MessageFooter(text: String, created_at: String) -> Element {
                 class: "icon-btn",
                 title: store.t("thread.copy"),
                 onclick: move |_| {
-                    // The text travels as a JSON string literal, never concatenated raw.
-                    let literal = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".to_string());
-                    dioxus::document::eval(&format!("navigator.clipboard.writeText({literal})"));
-                    copied.set(true);
+                    let text = text.clone();
                     spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                        copied.set(false);
+                        // FR-060: the check mark only after a real copy.
+                        if crate::clipboard::copy_text(&text).await {
+                            copied.set(true);
+                            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                            copied.set(false);
+                        } else {
+                            store.toast(store.t("toast.copy_failed").to_string());
+                        }
                     });
                 },
                 if *copied.read() { {icon_check()} } else { {icon_copy()} }
+            }
+            if reuse {
+                button {
+                    class: "subtle small",
+                    title: store.t("thread.reuse_title"),
+                    onclick: move |_| {
+                        store.prompt.set(reuse_text.clone());
+                        crate::state_ui::focus_composer();
+                    },
+                    "{store.t(\"thread.reuse\")}"
+                }
             }
         }
     }
@@ -297,11 +604,12 @@ fn chevron(open: bool) -> Element {
     }
 }
 
-/// One-line summary of a turn's tool calls ("Ran 3 commands, edited 2 files").
+/// One-line summary of a turn's tool calls ("Ran 3 commands, edited 2 files
+/// · 1 failed").
 fn activity_summary(calls: &[ToolCallView], lang: Lang) -> String {
-    let count = |names: &[&str]| calls.iter().filter(|call| names.contains(&call.name.as_str())).count();
-    let commands = count(&["run_command", "exec_command", "write_stdin"]);
-    let edits = count(&["write_file", "edit_file", "apply_patch", "delete_file", "move_file"]);
+    let count = |test: fn(&str) -> bool| calls.iter().filter(|call| test(&call.name)).count();
+    let commands = count(locagens_core::tool_labels::is_command_tool);
+    let edits = count(locagens_core::tool_labels::is_edit_tool);
     let other = calls.len() - commands - edits;
     let phrase = |n: usize, one: &'static str, many: &'static str, template: &'static str| {
         let noun = i18n::t(lang, if n == 1 { one } else { many });
@@ -324,22 +632,30 @@ fn activity_summary(calls: &[ToolCallView], lang: Lang) -> String {
             part.replace_range(..first.len_utf8(), &lower);
         }
     }
-    parts.join(", ")
+    let mut summary = parts.join(", ");
+    let failed = calls.iter().filter(|call| call.outcome() == ToolOutcome::Failed).count();
+    if failed > 0 {
+        summary.push_str(" · ");
+        summary.push_str(&i18n::tf(lang, "act.failed", &[&failed.to_string()]));
+    }
+    summary
 }
 
 /// Agent activity of one assistant turn, collapsed into a muted one-line row
-/// that expands into the individual tool cards.
+/// that expands into the individual tool rows. A failed call opens it.
 #[component]
-fn ToolActivity(calls: Vec<ToolCallView>, depth: u8) -> Element {
+fn ToolActivity(calls: Vec<ToolCallView>) -> Element {
     let store: UiStore = use_context();
     let running = calls.iter().any(|call| call.response.is_none());
-    let mut open = use_signal(|| running);
+    let failed = calls.iter().any(|call| call.outcome() == ToolOutcome::Failed);
+    let mut open = use_signal(|| running || failed);
     let summary = activity_summary(&calls, store.lang());
     rsx! {
         div {
             class: "tool-group",
             button {
-                class: "activity-row",
+                class: if failed { "activity-row has-failure" } else { "activity-row" },
+                "aria-expanded": "{open.read()}",
                 onclick: move |_| {
                     let is_open = *open.read();
                     open.set(!is_open);
@@ -349,50 +665,45 @@ fn ToolActivity(calls: Vec<ToolCallView>, depth: u8) -> Element {
             }
             if *open.read() {
                 for call in calls.iter() {
-                    ToolGroupCard { call: call.clone(), depth }
+                    ToolGroupCard { key: "{call.id}", call: call.clone() }
                 }
             }
         }
     }
 }
 
-/// One tool call: name, summarized args, status badge and collapsible output.
+/// One tool call: status glyph, "Ran `cargo test`", a badge only when it
+/// failed or was denied (UX-008), and the collapsible output.
 #[component]
-fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
+fn ToolGroupCard(call: ToolCallView) -> Element {
     let store: UiStore = use_context();
-    let open = use_signal(|| false);
-    let done = call.response.is_some();
-    let status_text = if done { store.t("tool.done") } else { store.t("tool.running") };
-    let args_summary = summarize_args(&call.arguments);
-    let response_text = call
-        .response
-        .as_ref()
-        .map(|response| response.content.clone())
-        .unwrap_or_default();
+    let outcome = call.outcome();
+    let open = use_signal(|| outcome == ToolOutcome::Failed);
+    let (verb, target) = describe_tool(&call.name, &call.arguments);
+    let verb_text = verb_label(&verb, store.lang());
+    let target = if target.is_empty() && verb.key().is_none() { summarize_args(&call.arguments) } else { target };
+    let response_text = call.response.as_ref().map(|response| response.content.clone()).unwrap_or_default();
+    let dot = match outcome {
+        ToolOutcome::Running => "generating",
+        ToolOutcome::Ok => "done",
+        ToolOutcome::Failed => "failed",
+        ToolOutcome::Denied => "cancelled",
+    };
 
     // A diff preview for file-mutating tools.
     let diff_text: Option<String> = match call.name.as_str() {
-        "write_file" => call.arguments.get("content").and_then(Value::as_str).map(|content| {
-            crate::markdown::pseudo_diff(None, Some(content))
-        }),
+        "write_file" => call.arguments.get("content").and_then(Value::as_str).map(|content| crate::markdown::pseudo_diff(None, Some(content))),
         "edit_file" => {
             let old = call.arguments.get("old_text").and_then(Value::as_str);
             let new = call.arguments.get("new_text").and_then(Value::as_str);
             old.map(|old| crate::markdown::pseudo_diff(Some(old), Some(new.unwrap_or(""))))
         }
-        _ => {
-            if crate::markdown::looks_like_diff(&response_text) {
-                Some(response_text.clone())
-            } else {
-                None
-            }
-        }
+        _ => crate::markdown::looks_like_diff(&response_text).then(|| response_text.clone()),
     };
 
     rsx! {
         div {
-            class: "tool-card",
-            key: "{call.id}",
+            class: if outcome == ToolOutcome::Failed { "tool-card failed" } else { "tool-card" },
             div {
                 class: "tool-head",
                 role: "button",
@@ -404,12 +715,14 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
                     open.set(!is_open);
                 },
                 {chevron(*open.read())}
-                span { class: "tool-name", "{call.name}" }
-                span { class: "tool-args", "{args_summary}" }
-                span {
-                    class: "tool-status",
-                    {status_dot(if done { "done" } else { "generating" })}
-                    "{status_text}"
+                {status_dot(dot)}
+                span { class: "tool-name", "{verb_text}" }
+                span { class: "tool-args", title: "{target}", "{target}" }
+                match outcome {
+                    ToolOutcome::Failed => rsx! { span { class: "badge err", "{store.t(\"tool.failed\")}" } },
+                    ToolOutcome::Denied => rsx! { span { class: "badge", "{store.t(\"tool.denied\")}" } },
+                    ToolOutcome::Running => rsx! { span { class: "tool-status", "{store.t(\"tool.running\")}" } },
+                    ToolOutcome::Ok => rsx! {},
                 }
             }
             if *open.read() {
@@ -420,7 +733,7 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
                     }
                     if !response_text.is_empty() {
                         div { class: "tool-output", "{response_text}" }
-                    } else if done {
+                    } else if outcome != ToolOutcome::Running {
                         div { class: "tool-output", "{store.t(\"tool.no_output\")}" }
                     }
                 }
@@ -429,12 +742,16 @@ fn ToolGroupCard(call: ToolCallView, depth: u8) -> Element {
     }
 }
 
-/// Sub-agent (explorer / worker) group with nested message groups.
+/// Sub-agent group with nested message groups. Built-in roles get their
+/// label; custom roles (`agents/*.toml`) show their own name (FR-065).
 #[component]
 fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> Element {
     let store: UiStore = use_context();
     let open = use_signal(|| true);
-    let is_explorer = role == "explorer";
+    let role_label = match role.as_str() {
+        "explorer" | "worker" => store.t(i18n::role_key(&role)).to_string(),
+        other => other.to_string(),
+    };
     rsx! {
         div {
             class: "coder-group",
@@ -450,7 +767,8 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
                 },
                 span {
                     class: "badge",
-                    if is_explorer { {icon_search()} "{store.t(\"agent.explorer\")}" } else { {icon_wrench()} "{store.t(\"agent.worker\")}" }
+                    if role == "explorer" { {icon_search()} } else { {icon_wrench()} }
+                    "{role_label}"
                 }
                 span { "{name}" }
                 span { class: "spacer", {chevron(*open.read())} }
@@ -459,45 +777,11 @@ fn SubAgentCard(role: String, name: String, groups: Vec<Group>, depth: u8) -> El
                 div {
                     class: "coder-body",
                     for group in groups.iter() {
-                        { render_group_owned(group, depth + 1) }
+                        { render_group(group, depth + 1, false, false) }
                     }
                 }
             }
         }
-    }
-}
-
-/// Same as `render_group` but with an owned group reference (for loops).
-fn render_group_owned(group: &Group, depth: u8) -> Element {
-    // Delegate to the plain renderer; depth is only used for nesting style.
-    match group {
-        Group::User(message) => rsx! {
-            div {
-                class: "msg-user",
-                key: "{message.id}",
-                "data-mid": "{message.id}",
-                div { class: "bubble", "{message.content}" }
-                if !message.content.is_empty() {
-                    MessageFooter { text: message.content.clone(), created_at: message.created_at.clone() }
-                }
-            }
-        },
-        Group::Assistant { message, tool_calls } => rsx! {
-            div {
-                class: "msg-assistant",
-                key: "{message.id}",
-                if !message.reasoning_content.clone().unwrap_or_default().is_empty() {
-                    ReasoningPanel { reasoning: message.reasoning_content.clone().unwrap() }
-                }
-                super::review::AssistantBody { message: message.clone() }
-                if !tool_calls.is_empty() {
-                    ToolActivity { calls: tool_calls.clone(), depth }
-                }
-            }
-        },
-        Group::SubAgent { role, name, groups } => rsx! {
-            SubAgentCard { role: role.clone(), name: name.clone(), groups: groups.clone(), depth: depth + 1 }
-        },
     }
 }
 
@@ -546,6 +830,8 @@ fn patch_progress_files(event: &serde_json::Value, lang: crate::i18n::Lang) -> V
 
 #[cfg(test)]
 mod patch_progress_tests {
+    use super::*;
+
     #[test]
     fn labels_files_with_line_counts() {
         let event = serde_json::json!({ "files": [
@@ -556,5 +842,58 @@ mod patch_progress_tests {
             super::patch_progress_files(&event, crate::i18n::Lang::En),
             vec!["src/a.rs +3 \u{2212}1".to_string(), "old.txt (deleted)".to_string()]
         );
+    }
+
+    fn message(role: &str, model: Option<&str>) -> RunMessage {
+        RunMessage { id: format!("{role}-{model:?}"), role: role.into(), model: model.map(str::to_string), ..Default::default() }
+    }
+
+    #[test]
+    fn model_label_only_on_the_first_answer_of_a_turn_or_on_a_change() {
+        let groups = vec![
+            Group::User(message("user", None)),
+            Group::Assistant { message: message("assistant", Some("m1")), tool_calls: vec![] },
+            Group::Assistant { message: message("assistant", Some("m1")), tool_calls: vec![] },
+            Group::Assistant { message: message("assistant", Some("m2")), tool_calls: vec![] },
+            Group::User(message("user", None)),
+            Group::Assistant { message: message("assistant", Some("m2")), tool_calls: vec![] },
+        ];
+        assert_eq!(model_label_flags(&groups), vec![false, true, false, true, false, true]);
+    }
+
+    #[test]
+    fn running_tool_is_the_newest_call_without_result() {
+        let calls = serde_json::json!([
+            { "id": "a", "function": { "name": "read_file", "arguments": "{\"path\":\"x\"}" } },
+            { "id": "b", "function": { "name": "run_command", "arguments": "{\"command\":\"cargo test\"}" } }
+        ]);
+        let assistant = RunMessage { role: "assistant".into(), raw_response: Some(calls.to_string()), ..Default::default() };
+        let done_a = RunMessage { role: "tool".into(), raw_response: Some("a".into()), ..Default::default() };
+        let (id, name, args) = running_tool(&[assistant.clone(), done_a]).unwrap();
+        assert_eq!((id.as_str(), name.as_str(), args["command"].as_str()), ("b", "run_command", Some("cargo test")));
+        let done_b = RunMessage { role: "tool".into(), raw_response: Some("b".into()), ..Default::default() };
+        let done_a = RunMessage { role: "tool".into(), raw_response: Some("a".into()), ..Default::default() };
+        assert!(running_tool(&[assistant, done_a, done_b]).is_none());
+    }
+
+    #[test]
+    fn auth_errors_are_recognized() {
+        assert!(is_auth_error("Provider returned 401 Unauthorized"));
+        assert!(is_auth_error("provider \"x\" is not authenticated"));
+        assert!(!is_auth_error("connection reset by peer"));
+        assert_eq!(format_elapsed(45), "45s");
+        assert_eq!(format_elapsed(72), "1m 12s");
+    }
+
+    #[test]
+    fn failed_calls_are_counted_in_the_summary() {
+        let failed = ToolCallView {
+            id: "1".into(),
+            name: "run_command".into(),
+            arguments: Value::Null,
+            response: Some(RunMessage { content: "Tool error: exit 1".into(), ..Default::default() }),
+        };
+        let ok = ToolCallView { id: "2".into(), name: "edit_file".into(), arguments: Value::Null, response: Some(RunMessage::default()) };
+        assert_eq!(activity_summary(&[failed, ok], Lang::En), "Ran 1 command, edited 1 file · 1 failed");
     }
 }

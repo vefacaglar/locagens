@@ -1,189 +1,165 @@
-//! Composer: prompt textarea (Enter to send, Shift+Enter newline), file
-//! attachments, @file / @symbol quick-inserts, mode / provider / model /
-//! effort selectors and the Send / Continue / Queue action.
+//! Composer: queued-message strip, prompt textarea (Enter to send,
+//! Shift+Enter newline, `Up` recalls), keyboard `/` and `@` completion at the
+//! caret, file attachments, the model picker, mode selector and the Send /
+//! Continue / Queue action.
 
 use super::icons::*;
+use super::model_picker::{effective_effort, model_efforts, ModelPicker};
 use super::slash::{self, SlashAction};
-use crate::state_ui::{core, UiStore};
+use crate::state_ui::{core, mode_key, AppPage, Overlay, QueuedMessage, SettingsTab, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload};
-use locagens_core::pi_providers::ProviderMetadata;
+use locagens_core::commands::{detect_trigger, TriggerKind};
 
-/// i18n key of the display label for a reasoning-effort value.
-fn effort_key(effort: &str) -> &'static str {
-    match effort {
-        "minimal" => "effort.minimal",
-        "low" => "effort.low",
-        "medium" => "effort.medium",
-        "high" => "effort.high",
-        "xhigh" => "effort.xhigh",
-        "max" => "effort.max",
-        _ => "effort.medium",
-    }
-}
-
-/// Supported reasoning-effort levels for a model: the provider's catalog
-/// `modelSettings[model].reasoningEfforts` when present, capability fallbacks
-/// otherwise. An empty list means the model has no effort control.
-fn model_efforts(provider: Option<&ProviderMetadata>, model_id: &str) -> Vec<String> {
-    if let Some(efforts) = provider
-        .and_then(|p| p.model_settings.as_ref())
-        .and_then(|ms| ms.get(model_id))
-        .and_then(|entry| entry.get("reasoningEfforts"))
-        .and_then(|v| v.as_array())
-    {
-        return efforts
-            .iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect();
-    }
-    locagens_core::pi_providers::model_reasoning_efforts(model_id, None, None)
-}
-
-/// The effective effort for a model: the selected one when supported,
-/// otherwise the model's default ("medium" or the first supported level).
-/// `None` means the model has no effort control at all.
-fn effective_effort<'a>(selected: &'a str, efforts: &'a [String]) -> Option<&'a str> {
-    if efforts.is_empty() {
-        return None;
-    }
-    if efforts.iter().any(|e| e == selected) {
-        return Some(selected);
-    }
-    if efforts.iter().any(|e| e == "medium") {
-        return Some("medium");
-    }
-    efforts.first().map(String::as_str)
-}
-
-/// Right-side hover flyout for choosing a model's reasoning effort.
-fn render_effort_flyout(
-    mut store: UiStore,
-    model_id: String,
-    efforts: Vec<String>,
-    active_effort: &str,
-    flyout_pos: (f64, f64),
-    mut hovered_model: Signal<Option<String>>,
-    mut context_menu: Signal<Option<&'static str>>,
-) -> Element {
-    rsx! {
-        div {
-            class: "composer-flyout-right",
-            style: "left: {flyout_pos.0}px; top: min({flyout_pos.1}px, calc(100vh - 190px));",
-            onclick: move |e| e.stop_propagation(),
-            div {
-                class: "composer-flyout-card",
-                for effort in efforts.iter() {
-                    {
-                        let val = effort.as_str();
-                        let label = store.t(effort_key(val));
-                        let is_active = val == active_effort;
-                        let m_pick = model_id.clone();
-                        let val_pick = val.to_string();
-                        rsx! {
-                            button {
-                                key: "effort-{val}",
-                                class: if is_active { "ccm-item active" } else { "ccm-item" },
-                                onclick: move |e| {
-                                    e.stop_propagation();
-                                    store.selected_model.set(m_pick.clone());
-                                    store.selected_effort.set(val_pick.clone());
-                                    hovered_model.set(None);
-                                    context_menu.set(None);
-                                },
-                                span { class: "ccm-item-label", "{label}" }
-                                if is_active { {icon_check()} }
-                            }
-                        }
-                    }
-                }
-            }
+/// Byte offset of UTF-16 offset `utf16` in `text` (the webview reports the
+/// caret in UTF-16 code units), clamped to the text.
+pub fn utf16_to_byte(text: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if units >= utf16 {
+            return byte;
         }
+        units += ch.len_utf16();
     }
+    text.len()
+}
+
+/// Replaces `text[start..end]` (bytes) with `insert`; returns the new text
+/// and the caret after the insertion in UTF-16 units.
+pub fn splice(text: &str, start: usize, end: usize, insert: &str) -> (String, usize) {
+    let (start, end) = (start.min(text.len()), end.min(text.len()).max(start.min(text.len())));
+    let mut out = String::with_capacity(text.len() + insert.len());
+    out.push_str(&text[..start]);
+    out.push_str(insert);
+    let caret = out.encode_utf16().count();
+    out.push_str(&text[end..]);
+    (out, caret)
+}
+
+/// Reports the composer caret (UTF-16 `selectionStart`) after every input,
+/// key, click or focus in the textarea.
+const CARET_SCRIPT: &str = r#"
+const report = (e) => {
+  const t = e.target;
+  if (t && t.matches && t.matches('.composer textarea')) dioxus.send(t.selectionStart || 0);
+};
+for (const kind of ['input', 'keyup', 'click', 'focus', 'select']) document.addEventListener(kind, report, true);
+"#;
+
+/// Puts the caret at UTF-16 offset `at` once the new value has rendered.
+fn place_caret(at: usize) {
+    const SCRIPT: &str = "requestAnimationFrame(() => requestAnimationFrame(() => { const t = document.querySelector('.composer textarea'); if (t) { t.focus(); t.setSelectionRange(AT, AT); } }));";
+    dioxus::document::eval(&SCRIPT.replace("AT", &at.to_string()));
+}
+
+/// One completion entry under the caret.
+#[derive(Clone, Debug, PartialEq)]
+enum Completion {
+    Command { name: &'static str, usage: String, takes_args: bool },
+    File(String),
 }
 
 #[component]
 pub fn Composer() -> Element {
-    let store: UiStore = use_context();
+    let mut store: UiStore = use_context();
     let busy = use_signal(|| false);
-    let project_files: Signal<Vec<String>> = use_signal(Vec::new);
-    let mut file_query = use_signal(String::new);
     let mut context_menu: Signal<Option<&'static str>> = use_signal(|| None);
-    let mut hovered_model: Signal<Option<String>> = use_signal(|| None);
-    let mut hovered_flyout_pos: Signal<(f64, f64)> = use_signal(|| (0.0, 0.0));
     let skills: Signal<Vec<locagens_core::services::skills::SkillSummary>> = use_signal(Vec::new);
+    let mut file_query = use_signal(String::new);
+    let picker_files: Signal<Vec<String>> = use_signal(Vec::new);
+    // Caret in UTF-16 units, and the prompt text whose menu Esc dismissed.
+    let mut caret = use_signal(|| 0usize);
+    let mut dismissed: Signal<Option<String>> = use_signal(|| None);
+    let mut highlighted = use_signal(|| 0usize);
 
-    // Live fuzzy filter: whenever the @file picker is open, re-fetch the file
-    // list with the current query attached (fuzzy-ranked by the core API).
+    use_future(move || async move {
+        let mut channel = dioxus::document::eval(CARET_SCRIPT);
+        while let Ok(position) = channel.recv::<usize>().await {
+            if *caret.peek() != position {
+                caret.set(position);
+            }
+        }
+    });
+
+    let prompt_text = store.prompt.read().clone();
+    let caret_byte = utf16_to_byte(&prompt_text, *caret.read());
+    let trigger = detect_trigger(&prompt_text, caret_byte).filter(|_| dismissed.read().as_deref() != Some(prompt_text.as_str()));
+    let mention_query = trigger.as_ref().filter(|t| t.kind == TriggerKind::File).map(|t| t.query.clone());
+
+    // `@` mentions: fuzzy file list of the current project for the token.
+    let mention_files = use_resource(move || {
+        let query = mention_query.clone();
+        let project = store.current_project();
+        async move {
+            let (Some(query), Some(project)) = (query, project) else { return Vec::new() };
+            locagens_core::api::projects::list_files(&core(), &project, Some(&query)).await.unwrap_or_default()
+        }
+    });
+    // `+` → Mentions picker list.
     use_effect(move || {
         if *context_menu.read() != Some("mentions") {
             return;
         }
         let query = file_query.read().trim().to_string();
-        let path = store.selected_project.read().clone().unwrap_or_default();
-        let mut project_files = project_files;
+        let path = store.current_project().unwrap_or_default();
+        let mut picker_files = picker_files;
         spawn(async move {
-            let state = core();
-            let files = locagens_core::api::projects::list_files(&state, &path, Some(&query))
-                .await
-                .unwrap_or_default();
-            project_files.set(files);
+            let files = locagens_core::api::projects::list_files(&core(), &path, Some(&query)).await.unwrap_or_default();
+            picker_files.set(files);
         });
     });
 
-    let providers = store.visible_catalog();
-    let selected_provider = store.selected_provider.read().clone();
-    let current_provider = providers.iter().find(|p| p.id == selected_provider);
-    let selected_model = store.selected_model.read().clone();
-    let selected_effort = store.selected_effort.read().clone();
-    let selected_mode = store.selected_mode.read().clone();
-    let prompt_text = store.prompt.read().clone();
-    // `/` suggestions from the shared command table while typing a command.
-    let slash_suggestions = slash::suggestions(&prompt_text);
+    let completions: Vec<Completion> = match trigger.as_ref().map(|t| t.kind) {
+        Some(TriggerKind::Slash) => slash::suggestions(&prompt_text[..caret_byte.min(prompt_text.len())])
+            .into_iter()
+            .map(|spec| Completion::Command { name: spec.name, usage: spec.usage(), takes_args: spec.args.starts_with('<') })
+            .collect(),
+        Some(TriggerKind::File) => mention_files.read().clone().unwrap_or_default().into_iter().take(8).map(Completion::File).collect(),
+        None => Vec::new(),
+    };
+    let menu_open = !completions.is_empty() && context_menu.read().is_none();
+    let index = (*highlighted.read()).min(completions.len().saturating_sub(1));
 
-    let provider_models: Vec<String> = providers
-        .iter()
-        .find(|provider: &&ProviderMetadata| provider.id == selected_provider)
-        .map(|provider| provider.models.clone())
-        .unwrap_or_default();
-
-    let provider_label = providers
-        .iter()
-        .find(|p| p.id == selected_provider)
-        .map(|p| p.display_name.clone())
-        .unwrap_or_else(|| {
-            if selected_provider.is_empty() {
-                store.t("common.provider").to_string()
-            } else {
-                selected_provider.clone()
+    // Accepts a completion: a command is inserted (or run when it takes no
+    // argument and `run` is set), a file replaces the `@token`.
+    let completions_for_keys = completions.clone();
+    let trigger_for_keys = trigger.clone();
+    let mut accept = move |completion: Completion, run: bool| {
+        let text = store.prompt.peek().clone();
+        let end = utf16_to_byte(&text, *caret.peek());
+        match completion {
+            Completion::Command { name, takes_args, .. } => {
+                if run && !takes_args {
+                    run_command_line(store, &format!("/{name}"));
+                } else {
+                    let (next, at) = splice(&text, 0, end, &format!("/{name} "));
+                    store.prompt.set(next);
+                    place_caret(at);
+                }
             }
-        });
-    let model_label = if selected_model.is_empty() {
-        store.t("common.model").to_string()
-    } else {
-        selected_model.clone()
-    };
-    // Reasoning effort shown muted next to the model when it supports one.
-    let effort_hint: Option<String> = {
-        let efforts = model_efforts(current_provider, &selected_model);
-        if efforts.is_empty() {
-            None
-        } else {
-            let active = effective_effort(&selected_effort, &efforts).unwrap_or("medium");
-            Some(store.t(effort_key(active)).to_string())
+            Completion::File(path) => {
+                let start = trigger_for_keys.as_ref().map(|t| t.start).unwrap_or(end);
+                let (next, at) = splice(&text, start, end, &format!("@{path} "));
+                store.prompt.set(next);
+                place_caret(at);
+            }
         }
+        highlighted.set(0);
     };
-    let mode_label = match selected_mode.as_str() {
-        "plan" => store.t("mode.plan"),
-        "auto" => store.t("mode.auto"),
-        _ => store.t("mode.build"),
+    let accept_click = accept.clone();
+
+    let selected_mode = store.selected_mode.read().clone();
+    let mode_label = store.t(mode_key(&selected_mode));
+    let mode_class = match selected_mode.as_str() {
+        "auto" => "composer-select-btn mode-btn mode-auto",
+        "plan" => "composer-select-btn mode-btn mode-plan",
+        _ => "composer-select-btn mode-btn",
     };
 
     let run = store.active_run.read().clone();
     let run_status = run.as_ref().map(|run| run.status.clone());
     let is_generating = run_status.as_deref() == Some("generating");
-    let is_awaiting =
-        matches!(run_status.as_deref(), Some("awaiting_permission") | Some("awaiting_input"));
+    let is_awaiting = matches!(run_status.as_deref(), Some("awaiting_permission") | Some("awaiting_input"));
     let has_run = run.is_some();
     let send_label = if is_generating {
         store.t("composer.queue")
@@ -192,63 +168,109 @@ pub fn Composer() -> Element {
     } else {
         store.t("composer.send")
     };
-
-    // Hovered-model effort flyout data: looked up once per render so the
-    // floating effort submenu can be rendered as a sibling of the scrollable
-    // model list (it must not scroll or clip with the list).
-    let hovered_flyout: Option<(String, Vec<String>, String)> = hovered_model
-        .read()
-        .as_ref()
-        .and_then(|hovered_id| {
-            let efforts = model_efforts(current_provider, hovered_id);
-            if efforts.is_empty() {
-                None
-            } else {
-                let active = effective_effort(&selected_effort, &efforts)
-                    .unwrap_or("medium")
-                    .to_string();
-                Some((hovered_id.clone(), efforts, active))
-            }
-        });
+    // UX-001 / UX-004: nothing to run on yet.
+    let no_provider = *store.providers_loaded.read() && store.visible_catalog().is_empty();
+    let no_folder = store.projects.read().is_empty() && store.current_project().is_none();
+    let blocked_reason = if no_provider {
+        Some(store.t("composer.connect_first"))
+    } else if no_folder {
+        Some(store.t("composer.folder_first"))
+    } else {
+        None
+    };
+    let placeholder = if no_folder { store.t("composer.folder_first") } else { store.t("composer.placeholder") };
+    let queued: Vec<String> = {
+        let active = store.active_run_id.read().clone();
+        store.queued.read().iter().filter(|queued| Some(&queued.run_id) == active.as_ref()).map(|queued| queued.text.clone()).collect()
+    };
 
     rsx! {
+        if !queued.is_empty() {
+            div {
+                class: "queued-strip",
+                role: "region",
+                "aria-label": store.t("queue.title"),
+                div { class: "queued-head", "{store.t(\"queue.title\")}" }
+                for (position, text) in queued.iter().enumerate() {
+                    {
+                        let text_remove = text.clone();
+                        rsx! {
+                            div {
+                                key: "{position}",
+                                class: "queued-item",
+                                span { class: "queued-text", title: "{text}", "{text}" }
+                                button {
+                                    class: "icon-btn",
+                                    title: store.t("queue.remove"),
+                                    onclick: move |_| withdraw(store, text_remove.clone()),
+                                    {icon_x()}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         div {
-            class: "composer",
-            // Click-outside-to-close backdrop for open menus / flyouts.
+            class: if selected_mode == "auto" { "composer mode-auto" } else { "composer" },
+            // Click-outside-to-close backdrop for open menus.
             if context_menu.read().is_some() {
                 div {
                     class: "popover-backdrop",
                     onclick: move |e| {
                         e.stop_propagation();
                         context_menu.set(None);
-                        hovered_model.set(None);
                     },
                 }
             }
-            // Slash-command suggestions (shared table, translated descriptions).
-            if context_menu.read().is_none() && !slash_suggestions.is_empty() {
+            // `/` and `@` completions at the caret (keyboard: ↑↓ Tab Enter Esc).
+            if menu_open {
                 div {
                     class: "composer-context-menu slash-menu",
-                    div { class: "ccm-header", "{store.t(\"composer.commands\")}" }
+                    role: "listbox",
+                    id: "composer-completions",
+                    div {
+                        class: "ccm-header",
+                        if matches!(completions.first(), Some(Completion::File(_))) { "{store.t(\"composer.mentions\")}" } else { "{store.t(\"composer.commands\")}" }
+                    }
                     div {
                         class: "ccm-list",
-                        for spec in slash_suggestions.iter() {
+                        for (position, completion) in completions.iter().enumerate() {
                             {
-                                let insert = format!("/{} ", spec.name);
-                                let usage = spec.usage();
-                                let description = crate::i18n::command_description(store.lang(), spec);
-                                rsx! {
-                                    button {
-                                        key: "cmd-{spec.name}",
-                                        class: "ccm-item",
-                                        title: "{description}",
-                                        onclick: move |_| {
-                                            let mut store = store;
-                                            store.prompt.set(insert.clone());
-                                        },
-                                        span { class: "ccm-cmd-usage", "{usage}" }
-                                        span { class: "ccm-cmd-desc", "{description}" }
+                                let item = completion.clone();
+                                let mut accept = accept_click.clone();
+                                let class = if position == index { "ccm-item active" } else { "ccm-item" };
+                                match completion {
+                                    Completion::Command { name, usage, .. } => {
+                                        let description = locagens_core::commands::find(name)
+                                            .map(|spec| crate::i18n::command_description(store.lang(), spec))
+                                            .unwrap_or_default();
+                                        rsx! {
+                                            button {
+                                                key: "cmd-{name}",
+                                                class: "{class}",
+                                                role: "option",
+                                                "aria-selected": "{position == index}",
+                                                title: "{description}",
+                                                onmouseenter: move |_| highlighted.set(position),
+                                                onclick: move |_| accept(item.clone(), true),
+                                                span { class: "ccm-cmd-usage", "{usage}" }
+                                                span { class: "ccm-cmd-desc", "{description}" }
+                                            }
+                                        }
                                     }
+                                    Completion::File(path) => rsx! {
+                                        button {
+                                            key: "file-{path}",
+                                            class: "{class}",
+                                            role: "option",
+                                            "aria-selected": "{position == index}",
+                                            title: "{path}",
+                                            onmouseenter: move |_| highlighted.set(position),
+                                            onclick: move |_| accept(item.clone(), false),
+                                            span { class: "ccm-item-label mono", "{path}" }
+                                        }
+                                    },
                                 }
                             }
                         }
@@ -257,23 +279,64 @@ pub fn Composer() -> Element {
             }
             // Full-width borderless prompt input.
             textarea {
-                placeholder: store.t("composer.placeholder"),
+                placeholder: placeholder,
+                "aria-label": store.t("composer.placeholder"),
+                "aria-controls": "composer-completions",
+                "aria-expanded": "{menu_open}",
+                disabled: blocked_reason.is_some(),
                 value: "{prompt_text}",
                 rows: "2",
                 oninput: move |event| {
-                    let mut store = store;
                     store.prompt.set(event.value());
+                    dismissed.set(None);
                 },
                 onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Enter && !event.modifiers().shift() {
+                    let key = event.key();
+                    if menu_open {
+                        let last = completions_for_keys.len().saturating_sub(1);
+                        match key {
+                            Key::ArrowDown => {
+                                event.prevent_default();
+                                let next = (*highlighted.peek() + 1).min(last);
+                                highlighted.set(next);
+                                return;
+                            }
+                            Key::ArrowUp => {
+                                event.prevent_default();
+                                let next = highlighted.peek().saturating_sub(1);
+                                highlighted.set(next);
+                                return;
+                            }
+                            Key::Tab | Key::Enter if !event.modifiers().shift() => {
+                                event.prevent_default();
+                                if let Some(item) = completions_for_keys.get((*highlighted.peek()).min(last)).cloned() {
+                                    accept(item, key == Key::Enter);
+                                }
+                                return;
+                            }
+                            Key::Escape => {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                dismissed.set(Some(store.prompt.peek().clone()));
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if key == Key::Enter && !event.modifiers().shift() {
                         event.prevent_default();
                         submit(&store, busy);
+                    } else if key == Key::ArrowUp && store.prompt.peek().is_empty() {
+                        // Recall the previous prompt (UX-019).
+                        if let Some(last) = store.prompt_history.peek().last().cloned() {
+                            event.prevent_default();
+                            let at = last.encode_utf16().count();
+                            store.prompt.set(last);
+                            place_caret(at);
+                        }
                     }
                 },
-                onclick: move |_| {
-                    context_menu.set(None);
-                    hovered_model.set(None);
-                },
+                onclick: move |_| context_menu.set(None),
             }
             div {
                 class: "composer-row-bottom",
@@ -283,9 +346,9 @@ pub fn Composer() -> Element {
                     button {
                         class: "composer-plus-btn",
                         title: store.t("composer.add_context"),
+                        disabled: blocked_reason.is_some(),
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("root") { None } else { Some("root") };
-                            hovered_model.set(None);
                             context_menu.set(next);
                         },
                         {icon_plus()}
@@ -301,16 +364,10 @@ pub fn Composer() -> Element {
                                     class: "ccm-item",
                                     onclick: move |_| {
                                         context_menu.set(None);
-                                        let mut store = store;
                                         spawn(async move {
                                             if let Some(files) = rfd::AsyncFileDialog::new().pick_files().await {
-                                                let references: Vec<String> = files
-                                                    .iter()
-                                                    .map(|file| format!("@{} ", file.path().to_string_lossy()))
-                                                    .collect();
-                                                store.prompt.with_mut(|prompt| {
-                                                    prompt.push_str(&references.join(""));
-                                                });
+                                                let references: String = files.iter().map(|file| format!("@{} ", file.path().to_string_lossy())).collect();
+                                                insert_at_caret(store, caret, &references);
                                             }
                                         });
                                     },
@@ -321,11 +378,9 @@ pub fn Composer() -> Element {
                                     class: "ccm-item",
                                     onclick: move |_| {
                                         context_menu.set(None);
-                                        let mut store = store;
                                         spawn(async move {
                                             if let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await {
-                                                let insert = format!("@{} ", folder.path().to_string_lossy());
-                                                store.prompt.with_mut(|prompt| prompt.push_str(&insert));
+                                                insert_at_caret(store, caret, &format!("@{} ", folder.path().to_string_lossy()));
                                             }
                                         });
                                     },
@@ -344,11 +399,10 @@ pub fn Composer() -> Element {
                                 button {
                                     class: "ccm-item",
                                     onclick: move |_| {
-                                        let path = store.selected_project.read().clone().unwrap_or_default();
+                                        let path = store.current_project().unwrap_or_default();
                                         let mut skills = skills;
                                         spawn(async move {
-                                            let state = core();
-                                            let list = locagens_core::api::skills::list_skills(&state, Some(&path))
+                                            let list = locagens_core::api::skills::list_skills(&core(), Some(&path))
                                                 .await
                                                 .map(|response| response.skills)
                                                 .unwrap_or_default();
@@ -378,14 +432,17 @@ pub fn Composer() -> Element {
                                     r#type: "text",
                                     placeholder: store.t("composer.filter_files"),
                                     value: "{file_query.read()}",
+                                    onmounted: move |event| async move {
+                                        let _ = event.set_focus(true).await;
+                                    },
                                     oninput: move |event| file_query.set(event.value()),
                                 }
                                 div {
                                     class: "ccm-list",
-                                    if project_files.read().is_empty() {
+                                    if picker_files.read().is_empty() {
                                         div { class: "ccm-empty", "{store.t(\"composer.no_files\")}" }
                                     }
-                                    for (index, file) in project_files.read().iter().take(10).enumerate() {
+                                    for (index, file) in picker_files.read().iter().take(10).enumerate() {
                                         {
                                             let file = file.clone();
                                             rsx! {
@@ -394,10 +451,8 @@ pub fn Composer() -> Element {
                                                     class: "ccm-item",
                                                     title: "{file}",
                                                     onclick: move |_| {
-                                                        let mut store = store;
-                                                        let insert = format!("@{file} ");
-                                                        store.prompt.with_mut(|prompt| prompt.push_str(&insert));
                                                         context_menu.set(None);
+                                                        insert_at_caret(store, caret, &format!("@{file} "));
                                                     },
                                                     "{file}"
                                                 }
@@ -434,10 +489,8 @@ pub fn Composer() -> Element {
                                                     class: "ccm-item",
                                                     title: "{skill_title}",
                                                     onclick: move |_| {
-                                                        let mut store = store;
-                                                        let insert = format!("${skill_name} ");
-                                                        store.prompt.with_mut(|prompt| prompt.push_str(&insert));
                                                         context_menu.set(None);
+                                                        insert_at_caret(store, caret, &format!("${skill_name} "));
                                                     },
                                                     "{skill_name}"
                                                 }
@@ -451,165 +504,7 @@ pub fn Composer() -> Element {
                         }}
                     }
                 }
-                // Provider selector.
-                div {
-                    class: "composer-dropdown",
-                    button {
-                        class: if *context_menu.read() == Some("provider") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: store.t("common.provider"),
-                        onclick: move |_| {
-                            let next = if *context_menu.read() == Some("provider") { None } else { Some("provider") };
-                            hovered_model.set(None);
-                            context_menu.set(next);
-                        },
-                        span { "{provider_label}" }
-                        {icon_chevron_down()}
-                    }
-                    if *context_menu.read() == Some("provider") {
-                        div {
-                            class: "composer-context-menu",
-                            onclick: move |e| e.stop_propagation(),
-                            div { class: "ccm-header", "{store.t(\"common.provider\")}" }
-                            div {
-                                class: "ccm-list",
-                                if providers.is_empty() {
-                                    div { class: "ccm-empty", "{store.t(\"composer.no_providers\")}" }
-                                }
-                                for provider in providers.iter() {
-                                    {
-                                        let pid = provider.id.clone();
-                                        let pname = provider.display_name.clone();
-                                        let first_model = provider.models.first().cloned();
-                                        let is_active = pid == selected_provider;
-                                        rsx! {
-                                            button {
-                                                key: "prov-{pid}",
-                                                class: if is_active { "ccm-item active" } else { "ccm-item" },
-                                                onclick: move |_| {
-                                                    let mut store = store;
-                                                    store.selected_provider.set(pid.clone());
-                                                    // Reset the model to the provider's first model.
-                                                    if let Some(first) = first_model.clone() {
-                                                        store.selected_model.set(first);
-                                                    }
-                                                    context_menu.set(None);
-                                                },
-                                                span { class: "ccm-item-label", "{pname}" }
-                                                if is_active { {icon_check()} }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Model selector.
-                div {
-                    class: "composer-dropdown",
-                    button {
-                        class: if *context_menu.read() == Some("model") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: store.t("common.model"),
-                        onclick: move |_| {
-                            let next = if *context_menu.read() == Some("model") { None } else { Some("model") };
-                            if next.is_some() {
-                                // Pick up credentials added elsewhere (CLI, pi, Settings).
-                                store.refresh_providers();
-                            }
-                            hovered_model.set(None);
-                            context_menu.set(next);
-                        },
-                        span { class: "ccm-model-name", "{model_label}" }
-                        if let Some(effort) = effort_hint.clone() {
-                            span { class: "ccm-model-effort", "{effort}" }
-                        }
-                        {icon_chevron_down()}
-                    }
-                    if *context_menu.read() == Some("model") {
-                        div {
-                            class: "composer-context-menu model-menu",
-                            onclick: move |e| e.stop_propagation(),
-                            onmouseleave: move |_| hovered_model.set(None),
-                            div { class: "ccm-header", "{store.t(\"common.model\")}" }
-                            div {
-                                class: "ccm-list model-list",
-                                onscroll: move |_| hovered_model.set(None),
-                                if provider_models.is_empty() {
-                                    if selected_model.is_empty() {
-                                        div { class: "ccm-empty", "{store.t(\"composer.no_models\")}" }
-                                    } else {
-                                        div { class: "ccm-empty", "{selected_model}" }
-                                    }
-                                }
-                                for model in provider_models.iter() {
-                                    {
-                                        let m = model.clone();
-                                        let m_enter = m.clone();
-                                        let m_click = m.clone();
-                                        let is_active = *model == selected_model;
-                                        let is_hovered = hovered_model.read().as_deref() == Some(m.as_str());
-                                        let efforts = model_efforts(current_provider, &m);
-                                        let active_eff =
-                                            effective_effort(&selected_effort, &efforts).map(str::to_string);
-                                        let m_eff_click = active_eff.clone();
-                                        let show_effort = active_eff.is_some();
-                                        let effort_label = show_effort
-                                            .then(|| {
-                                                effective_effort(&selected_effort, &efforts)
-                                                    .unwrap_or("medium")
-                                            })
-                                            .map(|effort| store.t(effort_key(effort)))
-                                            .unwrap_or("");
-                                        rsx! {
-                                            div {
-                                                key: "model-{m}",
-                                                class: "ccm-submenu-row",
-                                                onmouseenter: move |event: MouseEvent| {
-                                                    if show_effort {
-                                                        let elem = event.element_coordinates();
-                                                        let client = event.client_coordinates();
-                                                        let x = (client.x - elem.x + 271.0).max(0.0);
-                                                        let y = (client.y - elem.y.clamp(0.0, 30.0) - 6.0).max(12.0);
-                                                        hovered_flyout_pos.set((x, y));
-                                                        hovered_model.set(Some(m_enter.clone()));
-                                                    } else {
-                                                        hovered_model.set(None);
-                                                    }
-                                                },
-                                                button {
-                                                    class: if is_active || is_hovered { "ccm-item active" } else { "ccm-item" },
-                                                    onclick: move |_| {
-                                                        let mut store = store;
-                                                        store.selected_model.set(m_click.clone());
-                                                        if let Some(eff) = m_eff_click.clone() {
-                                                            store.selected_effort.set(eff);
-                                                        }
-                                                        hovered_model.set(None);
-                                                        context_menu.set(None);
-                                                    },
-                                                    span {
-                                                        class: "ccm-item-label",
-                                                        span { class: "ccm-model-name", "{m}" }
-                                                        if show_effort {
-                                                            span { class: "ccm-model-effort", "{effort_label}" }
-                                                        }
-                                                    }
-                                                    if is_active { {icon_check()} }
-                                                    if show_effort {
-                                                        span { class: "ccm-row-chevron", {icon_chevron_right()} }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some((flyout_model, flyout_efforts, flyout_active)) = hovered_flyout {
-                                {render_effort_flyout(store, flyout_model, flyout_efforts, &flyout_active, *hovered_flyout_pos.read(), hovered_model, context_menu)}
-                            }
-                        }
-                    }
-                }
+                ModelPicker {}
                 span { class: "composer-spacer" }
                 // Run tokens and cost, quiet, next to the controls.
                 if let Some(usage) = store.run_usage.read().as_ref() {
@@ -625,15 +520,15 @@ pub fn Composer() -> Element {
                         )}
                     }
                 }
-                // Execution mode selector.
+                // Execution mode selector (UX-012: Plan in accent, Full Access in warn).
                 div {
                     class: "composer-dropdown",
                     button {
-                        class: if *context_menu.read() == Some("mode") { "composer-select-btn open" } else { "composer-select-btn" },
-                        title: store.t("composer.mode_title"),
+                        class: if *context_menu.read() == Some("mode") { format!("{mode_class} open") } else { mode_class.to_string() },
+                        title: store.tf("composer.mode_title", &[&super::shortcut_label(".")]),
+                        "aria-haspopup": "menu",
                         onclick: move |_| {
                             let next = if *context_menu.read() == Some("mode") { None } else { Some("mode") };
-                            hovered_model.set(None);
                             context_menu.set(next);
                         },
                         {icon_shield()}
@@ -642,24 +537,30 @@ pub fn Composer() -> Element {
                     }
                     if *context_menu.read() == Some("mode") {
                         div {
-                            class: "composer-context-menu align-right",
+                            class: "composer-context-menu align-right mode-menu",
+                            role: "menu",
                             onclick: move |e| e.stop_propagation(),
                             div { class: "ccm-header", "{store.t(\"composer.mode\")}" }
                             div {
                                 class: "ccm-list",
-                                for (val, label) in [("accept_edits", store.t("mode.build")), ("plan", store.t("mode.plan")), ("auto", store.t("mode.auto"))] {
+                                for (val, description) in [("accept_edits", "mode.build_desc"), ("plan", "mode.plan_desc"), ("auto", "mode.auto_desc")] {
                                     {
                                         let is_active = val == selected_mode;
                                         rsx! {
                                             button {
                                                 key: "mode-{val}",
-                                                class: if is_active { "ccm-item active" } else { "ccm-item" },
+                                                class: if is_active { "ccm-item mode-item active" } else { "ccm-item mode-item" },
+                                                role: "menuitemradio",
+                                                "aria-checked": "{is_active}",
                                                 onclick: move |_| {
-                                                    let mut store = store;
-                                                    store.selected_mode.set(val.to_string());
+                                                    store.pick_mode(val);
                                                     context_menu.set(None);
                                                 },
-                                                span { class: "ccm-item-label", "{label}" }
+                                                span {
+                                                    class: "ccm-item-label",
+                                                    span { class: if val == "auto" { "mode-name warn" } else { "mode-name" }, "{store.t(mode_key(val))}" }
+                                                    span { class: "mode-desc", "{store.t(description)}" }
+                                                }
                                                 if is_active { {icon_check()} }
                                             }
                                         }
@@ -678,8 +579,7 @@ pub fn Composer() -> Element {
                                 return;
                             };
                             spawn(async move {
-                                let state = core();
-                                let _ = locagens_core::api::runs::cancel_run(&state, &run_id).await;
+                                let _ = locagens_core::api::runs::cancel_run(&core(), &run_id).await;
                             });
                         },
                         {icon_stop()}
@@ -687,8 +587,10 @@ pub fn Composer() -> Element {
                 }
                 button {
                     class: "composer-send-btn",
-                    disabled: *busy.read() || is_awaiting || prompt_text.trim().is_empty(),
-                    title: if is_awaiting {
+                    disabled: *busy.read() || is_awaiting || prompt_text.trim().is_empty() || blocked_reason.is_some(),
+                    title: if let Some(reason) = blocked_reason {
+                        reason.to_string()
+                    } else if is_awaiting {
                         store.t("composer.resolve_first").to_string()
                     } else {
                         send_label.to_string()
@@ -701,6 +603,40 @@ pub fn Composer() -> Element {
     }
 }
 
+/// Inserts `text` at the caret (not at the end, UX-020).
+fn insert_at_caret(store: UiStore, caret: Signal<usize>, text: &str) {
+    let mut store = store;
+    let current = store.prompt.peek().clone();
+    let at = utf16_to_byte(&current, *caret.peek());
+    let (next, position) = splice(&current, at, at, text);
+    store.prompt.set(next);
+    place_caret(position);
+}
+
+/// Withdraws a queued message before the model takes it (UX-011).
+fn withdraw(store: UiStore, text: String) {
+    let mut store = store;
+    let Some(run_id) = store.active_run_id.peek().clone() else { return };
+    spawn(async move {
+        let removed = locagens_core::api::queue::withdraw_queued_message(&core(), &run_id, &text).await.unwrap_or(false);
+        let entry = QueuedMessage { run_id: run_id.clone(), text: text.clone() };
+        store.queued.with_mut(|queue| {
+            if let Some(index) = queue.iter().position(|queued| *queued == entry) {
+                queue.remove(index);
+            }
+        });
+        if removed {
+            store.prompt.with_mut(|prompt| {
+                if prompt.trim().is_empty() {
+                    *prompt = text;
+                }
+            });
+        } else {
+            store.toast(store.t("queue.already_sent").to_string());
+        }
+    });
+}
+
 /// Sends the prompt: a slash command, or create_run (no active run),
 /// continue_run (finished run) or queue_message (a generating run). Attaches
 /// the event stream that was subscribed before the drive task started.
@@ -710,12 +646,7 @@ pub(crate) fn submit(store: &UiStore, busy: Signal<bool>) {
     if prompt.is_empty() || *busy.read() {
         return;
     }
-
-    // Client-side slash commands (shared table and busy rule) run before any
-    // run is started.
-    let generating = store.active_run.read().as_ref().is_some_and(|run| run.status == "generating");
-    if let Some(action) = slash::resolve(&prompt, generating) {
-        run_slash(store, action);
+    if run_command_line(store, &prompt) {
         return;
     }
     // A pending card must be resolved first.
@@ -726,28 +657,34 @@ pub(crate) fn submit(store: &UiStore, busy: Signal<bool>) {
     start_turn(store, prompt, busy);
 }
 
+/// Runs `line` when it is a slash command (shared table and busy rule);
+/// `false` when it is a plain prompt.
+pub fn run_command_line(store: UiStore, line: &str) -> bool {
+    let generating = store.active_run.peek().as_ref().is_some_and(|run| run.status == "generating");
+    match slash::resolve(line, generating) {
+        Some(action) => {
+            run_slash(store, action);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Executes a slash command on the desktop.
 fn run_slash(mut store: UiStore, action: SlashAction) {
+    let clears_prompt = !matches!(action, SlashAction::Busy(_) | SlashAction::Unavailable(_) | SlashAction::Unknown(_));
+    if clears_prompt {
+        store.prompt.set(String::new());
+    }
     match action {
         SlashAction::Reset => {
-            store.active_run_id.set(None);
-            store.active_run.set(None);
-            store.messages.set(Vec::new());
-            store.plan.set(None);
-            store.run_usage.set(None);
-            store.context_usage.set(None);
-            store.pending_permission.set(None);
-            store.pending_question.set(None);
-            store.turn_diff.set(None);
-            store.spawned_agents.set(Vec::new());
-            store.prompt.set(String::new());
+            store.reset_conversation();
+            crate::state_ui::focus_composer();
         }
         SlashAction::Fork => {
             if let Some(run_id) = store.active_run_id.read().clone() {
-                store.prompt.set(String::new());
                 spawn(async move {
-                    let state = core();
-                    match locagens_core::api::runs::fork_run(&state, &run_id, None).await {
+                    match locagens_core::api::runs::fork_run(&core(), &run_id, None).await {
                         Ok(forked) => {
                             store.refresh_runs();
                             store.select_run(forked.id);
@@ -761,35 +698,50 @@ fn run_slash(mut store: UiStore, action: SlashAction) {
             }
         }
         SlashAction::Undo => {
-            let run_id = store.active_run_id.read().clone();
-            let project = store
-                .selected_project
-                .read()
-                .clone()
-                .or_else(|| store.active_run.read().as_ref().map(|run| run.project_path.clone()));
-            if let Some(project) = project {
-                store.prompt.set(String::new());
-                spawn(async move {
-                    let state = core();
-                    match locagens_core::api::projects::undo_last_turn(&state, &project, run_id.as_deref()).await {
-                        Ok(snapshot) => store.toast(store.tf("toast.restored", &[&snapshot.id])),
-                        Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
-                    }
-                });
-            } else {
+            let Some(run_id) = store.active_run_id.read().clone() else {
                 store.toast(store.t("toast.select_project").to_string());
-            }
+                return;
+            };
+            spawn(async move {
+                match super::changes::undo_turn(store, &run_id).await {
+                    Ok(snapshot) => store.toast(super::changes::undo_summary(&store, &snapshot)),
+                    Err(err) => store.toast(store.tf("toast.undo_failed", &[&err])),
+                }
+            });
         }
         SlashAction::Review(argument) => super::review::start_from_command(&store, &argument),
-        SlashAction::SetMode(mode) => {
-            store.selected_mode.set(mode.to_string());
-            store.prompt.set(String::new());
-            store.toast(store.tf("toast.mode_set", &[mode]));
+        // UX-012: the mode control shows the change; no toast.
+        SlashAction::SetMode(mode) => store.pick_mode(mode),
+        SlashAction::Help => store.overlay.set(Overlay::Shortcuts),
+        SlashAction::Model(None) => store.model_picker_open.set(true),
+        SlashAction::Model(Some(key)) => {
+            let catalog = store.visible_catalog();
+            let found = locagens_core::services::ui_state::split_model_key(&key)
+                .filter(|(provider, model)| catalog.iter().any(|p| p.id == *provider && p.models.iter().any(|m| m == model)));
+            match found {
+                Some((provider, model)) => store.pick_model(provider, model, None),
+                None => store.toast(store.tf("toast.unknown_model", &[&key])),
+            }
         }
-        SlashAction::Help => {
-            store.prompt.set(String::new());
-            store.toast(store.tf("toast.commands", &[&slash::command_help(store.lang())]));
+        SlashAction::Thinking(level) => {
+            let provider = store.selected_provider.peek().clone();
+            let model = store.selected_model.peek().clone();
+            let catalog = store.visible_catalog();
+            let efforts = model_efforts(catalog.iter().find(|p| p.id == provider), &model);
+            match level.as_deref().map(|level| slash::thinking_level(level, &efforts)) {
+                None => store.model_picker_open.set(true),
+                Some(Some(effort)) => store.pick_effort(&effort),
+                Some(None) => {
+                    let levels = if efforts.is_empty() { store.t("toast.no_effort").to_string() } else { efforts.join(", ") };
+                    store.toast(store.tf("toast.unknown_effort", &[&levels]));
+                }
+            }
         }
+        SlashAction::Diff => super::changes::open_changes(store),
+        SlashAction::Mcp => store.page.set(AppPage::Settings(SettingsTab::Mcp)),
+        SlashAction::Skills => store.page.set(AppPage::Settings(SettingsTab::Skills)),
+        SlashAction::Sessions => store.overlay.set(Overlay::Palette { chats_only: true }),
+        SlashAction::Usage => store.page.set(AppPage::UsageLogs),
         SlashAction::Busy(name) => store.toast(store.tf("toast.command_busy", &[&name])),
         SlashAction::Unavailable(name) => store.toast(store.tf("toast.command_cli_only", &[&name])),
         SlashAction::Unknown(head) => {
@@ -809,7 +761,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
     }
     let mode = store.selected_mode.read().clone();
     let effort = store.selected_effort.read().clone();
-    let project_path = store.selected_project.read().clone();
+    let project_path = store.current_project();
 
     // Clamp the effort to the selected model's supported levels.
     let providers_catalog = store.providers_catalog.read().clone();
@@ -822,15 +774,20 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
 
     let mut busy = busy;
     busy.set(true);
+    store.prompt_history.with_mut(|history| {
+        history.retain(|old| old != &prompt);
+        history.push(prompt.clone());
+    });
 
     if status.as_deref() == Some("generating") {
-        // Mid-run: queue the message on the active run's inbox.
+        // Mid-run: queue the message on the active run's inbox; it shows in
+        // the queued strip until the model picks it up (UX-011).
         let run_id = run.as_ref().map(|run| run.id.clone()).unwrap_or_default();
         spawn(async move {
-            let state = core();
-            match locagens_core::api::runs::queue_message(&state, &run_id, &prompt).await {
+            match locagens_core::api::runs::queue_message(&core(), &run_id, &prompt).await {
                 Ok(()) => {
                     store.prompt.set(String::new());
+                    store.queued.with_mut(|queue| queue.push(QueuedMessage { run_id, text: prompt.clone() }));
                 }
                 Err(err) => store.toast(store.tf("toast.queue_failed", &[&err.to_string()])),
             }
@@ -861,9 +818,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
                     store.spawned_agents.set(Vec::new());
                     // Show the appended user message at once instead of
                     // waiting for the first streamed event.
-                    let msgs = locagens_core::api::runs::list_messages(&state, &run_id)
-                        .await
-                        .unwrap_or_default();
+                    let msgs = locagens_core::api::runs::list_messages(&state, &run_id).await.unwrap_or_default();
                     crate::state_ui::pin_sent_message(&msgs);
                     store.messages.set(msgs);
                     if let Ok(updated_run) = locagens_core::api::runs::get_run(&state, &run_id).await {
@@ -899,22 +854,14 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
         match locagens_core::api::runs::create_run(&state, &payload).await {
             Ok(started) => {
                 let run_id = started.run.id.clone();
+                store.reset_conversation();
                 store.prompt.set(String::new());
                 store.active_run_id.set(Some(run_id.clone()));
                 store.active_run.set(Some(started.run));
                 // Load the initial user message so it appears immediately.
-                let initial_msgs = locagens_core::api::runs::list_messages(&state, &run_id)
-                    .await
-                    .unwrap_or_default();
+                let initial_msgs = locagens_core::api::runs::list_messages(&state, &run_id).await.unwrap_or_default();
                 crate::state_ui::pin_sent_message(&initial_msgs);
                 store.messages.set(initial_msgs);
-                store.plan.set(None);
-                store.run_usage.set(None);
-                store.context_usage.set(None);
-                store.pending_permission.set(None);
-                store.pending_question.set(None);
-                store.turn_diff.set(None);
-                store.spawned_agents.set(Vec::new());
                 store.attach_event_stream(run_id, started.events);
                 store.refresh_runs();
             }
@@ -922,4 +869,29 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
         }
         busy.set(false);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf16_offsets_map_to_byte_offsets() {
+        assert_eq!(utf16_to_byte("abc", 2), 2);
+        assert_eq!(utf16_to_byte("éa", 1), 2);
+        // An emoji is two UTF-16 units and four bytes.
+        assert_eq!(utf16_to_byte("\u{1F600}x", 2), 4);
+        assert_eq!(utf16_to_byte("ab", 99), 2);
+    }
+
+    #[test]
+    fn splice_replaces_the_token_and_reports_the_caret() {
+        let (text, caret) = splice("see @sr now", 4, 7, "@src/main.rs ");
+        assert_eq!(text, "see @src/main.rs  now");
+        assert_eq!(caret, 17);
+        let (text, caret) = splice("é", 2, 2, "@x ");
+        assert_eq!((text.as_str(), caret), ("é@x ", 4));
+        let (text, _) = splice("/re", 0, 3, "/review ");
+        assert_eq!(text, "/review ");
+    }
 }

@@ -38,8 +38,8 @@ pub enum AppPage {
 /// rest list what the core exposes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
+    /// Models & accounts: API keys, sign-ins and per-model switches (UX-001).
     Providers,
-    Auth,
     Permissions,
     Memory,
     Skills,
@@ -50,9 +50,8 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 9] = [
+    pub const ALL: [SettingsTab; 8] = [
         SettingsTab::Providers,
-        SettingsTab::Auth,
         SettingsTab::Permissions,
         SettingsTab::Memory,
         SettingsTab::Skills,
@@ -66,7 +65,6 @@ impl SettingsTab {
     pub fn label_key(self) -> &'static str {
         match self {
             SettingsTab::Providers => "tab.providers",
-            SettingsTab::Auth => "tab.auth",
             SettingsTab::Permissions => "tab.permissions",
             SettingsTab::Memory => "tab.memory",
             SettingsTab::Skills => "tab.skills",
@@ -141,9 +139,25 @@ pub fn event_scope(active: Option<&str>, stream_run: &str) -> EventScope {
 }
 
 /// Event types that still matter for a run that is not in view: they only
-/// touch the sidebar list (status dot, title).
+/// touch the sidebar list (status dot, title) or raise a toast that the run
+/// waits for the user (FR-054).
 pub fn applies_in_background(kind: &str) -> bool {
-    matches!(kind, "status_changed" | "run_title_changed" | "run_completed" | "run_failed")
+    matches!(
+        kind,
+        "status_changed" | "run_title_changed" | "run_completed" | "run_failed" | "permission_requested" | "question_requested"
+    )
+}
+
+/// Whether a permission card still shows the request `answered` (same prompt
+/// id when the core sends one, else the same payload). Answering clears the
+/// card only then, so the next queued prompt that already arrived survives
+/// (FR-048).
+pub fn is_same_request(shown: Option<&Value>, answered: &Value) -> bool {
+    let Some(shown) = shown else { return false };
+    match (shown.get("promptId"), answered.get("promptId")) {
+        (Some(a), Some(b)) => a == b,
+        _ => shown == answered,
+    }
 }
 
 /// Latest event-stream generation per run, so re-attaching a run (or opening
@@ -185,6 +199,105 @@ fn streams() -> std::sync::MutexGuard<'static, StreamRegistry> {
     STREAMS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// One toast line; each has its own timer, so a later toast never cuts an
+/// earlier one short (FR-062).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToastItem {
+    pub id: u64,
+    pub text: String,
+}
+
+/// Toasts shown at once; the oldest goes first when a new one arrives.
+pub const MAX_TOASTS: usize = 3;
+
+/// Appends `item`, dropping the oldest entries beyond `MAX_TOASTS`.
+pub fn push_toast(list: &mut Vec<ToastItem>, item: ToastItem) {
+    list.push(item);
+    let overflow = list.len().saturating_sub(MAX_TOASTS);
+    list.drain(..overflow);
+}
+
+/// How long a toast stays: 4 s, plus reading time for long text (max 12 s).
+pub fn toast_duration(text: &str) -> std::time::Duration {
+    let extra = text.chars().count().saturating_sub(60) as u64 * 40;
+    std::time::Duration::from_millis((4000 + extra).min(12_000))
+}
+
+/// A message queued on a generating run, shown above the composer until the
+/// model picks it up (UX-011).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueuedMessage {
+    pub run_id: String,
+    pub text: String,
+}
+
+/// Drops the first queued entry of `run_id` that the model just received as
+/// user message `content`; `true` when one matched.
+pub fn take_delivered(queue: &mut Vec<QueuedMessage>, run_id: &str, content: &str) -> bool {
+    let content = content.trim();
+    match queue.iter().position(|queued| queued.run_id == run_id && queued.text.trim() == content) {
+        Some(index) => {
+            queue.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The run's undelivered queued texts, removed from `queue` and joined by
+/// blank lines (put back into the composer when the run stops).
+pub fn take_undelivered(queue: &mut Vec<QueuedMessage>, run_id: &str) -> Option<String> {
+    let (mine, rest): (Vec<_>, Vec<_>) = queue.drain(..).partition(|queued| queued.run_id == run_id);
+    *queue = rest;
+    let texts: Vec<String> = mine.into_iter().map(|queued| queued.text).collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
+}
+
+/// Full-window overlays opened from the keyboard layer (UX-019).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    /// Command palette; `chats_only` opens it on the chat list (`/sessions`).
+    Palette { chats_only: bool },
+    /// Shortcuts and commands sheet (`Ctrl+/`, `/help`).
+    Shortcuts,
+}
+
+/// Modes the desktop offers; others (`ask_permissions`) are CLI-only.
+pub const DESKTOP_MODES: [&str; 4] = ["accept_edits", "plan", "auto", "chat"];
+
+/// `Ctrl+.`: Build and Plan alternate; Full Access and Chat step back to
+/// Build, so the keyboard never switches prompts off by accident (UX-012).
+pub fn next_mode(mode: &str) -> &'static str {
+    match mode {
+        "accept_edits" => "plan",
+        _ => "accept_edits",
+    }
+}
+
+/// i18n key of a mode's label.
+pub fn mode_key(mode: &str) -> &'static str {
+    match mode {
+        "plan" => "mode.plan",
+        "auto" => "mode.auto",
+        "chat" => "mode.chat",
+        _ => "mode.build",
+    }
+}
+
+/// The model to select at start: the remembered `provider/model` when the
+/// catalog still offers it, else the first visible model.
+pub fn default_model(catalog: &[ProviderMetadata], remembered: Option<(&str, &str)>) -> Option<(String, String)> {
+    if let Some((provider, model)) = remembered {
+        let offered = catalog.iter().any(|p| p.id == provider && p.models.iter().any(|m| m == model));
+        if offered {
+            return Some((provider.to_string(), model.to_string()));
+        }
+    }
+    let first = catalog.first()?;
+    Some((first.id.clone(), first.models.first()?.clone()))
+}
+
 /// Bundle of every reactive signal, handed to components via context.
 /// `Copy` so event-handler closures can capture it freely.
 #[derive(Clone, Copy)]
@@ -210,6 +323,8 @@ pub struct UiStore {
     pub pending_permission: Signal<Option<Value>>,
     pub pending_question: Signal<Option<Value>>,
     pub providers_catalog: Signal<Vec<ProviderMetadata>>,
+    /// Whether the catalog has loaded once (the first-run panel waits for it).
+    pub providers_loaded: Signal<bool>,
     /// `provider/model` ids switched off in Settings → Providers.
     pub hidden_models: Signal<std::collections::HashSet<String>>,
     /// Bumped when usage lands or a run ends; the usage page reloads on it.
@@ -220,8 +335,21 @@ pub struct UiStore {
     pub selected_mode: Signal<String>,
     pub right_panel_open: Signal<bool>,
     pub right_panel_tab: Signal<RightPanelTab>,
-    pub status_toast: Signal<Option<String>>,
+    /// Visible toasts, oldest first.
+    pub toasts: Signal<Vec<ToastItem>>,
     pub prompt: Signal<String>,
+    /// Whether the left sidebar is shown (`Ctrl+B`, the toolbar toggle).
+    pub sidebar_open: Signal<bool>,
+    /// Messages queued on generating runs, not yet picked up.
+    pub queued: Signal<Vec<QueuedMessage>>,
+    /// Palette / shortcuts overlay.
+    pub overlay: Signal<Overlay>,
+    /// Whether the composer's model picker is open (`Ctrl+M`, `/model`).
+    pub model_picker_open: Signal<bool>,
+    /// Prompts sent from this window, newest last (`Up` recalls them).
+    pub prompt_history: Signal<Vec<String>>,
+    /// Text of the assertive live region (a card that blocks the run).
+    pub announcement: Signal<String>,
     /// Aggregate workspace diff of the current turn: `(diff, files_changed)`.
     pub turn_diff: Signal<Option<(String, usize)>>,
     /// Live `spawn_agent` / `spawn_agents` registrations not yet visible as
@@ -235,6 +363,15 @@ pub struct UiStore {
 /// Creates every `UiStore` signal (a hook: call it once, from the root
 /// component; the end-to-end test builds its store the same way).
 pub fn use_ui_store() -> UiStore {
+    // UX-003 / FR-057: reopen on the last effort and mode (the model is
+    // matched against the catalog once it loads).
+    let remembered = use_hook(api::ui_state::load_ui_state);
+    let effort = remembered.effort.clone().unwrap_or_else(|| "medium".to_string());
+    let mode = remembered
+        .mode
+        .clone()
+        .filter(|mode| DESKTOP_MODES.contains(&mode.as_str()))
+        .unwrap_or_else(|| "accept_edits".to_string());
     UiStore {
         appearance: use_signal(prefs::load),
         layout: use_signal(prefs::load_layout),
@@ -253,16 +390,23 @@ pub fn use_ui_store() -> UiStore {
         pending_permission: use_signal(|| None),
         pending_question: use_signal(|| None),
         providers_catalog: use_signal(Vec::new),
+        providers_loaded: use_signal(|| false),
         hidden_models: use_signal(Default::default),
         usage_epoch: use_signal(|| 0),
         selected_provider: use_signal(String::new),
         selected_model: use_signal(String::new),
-        selected_effort: use_signal(|| "medium".to_string()),
-        selected_mode: use_signal(|| "accept_edits".to_string()),
+        selected_effort: use_signal(|| effort),
+        selected_mode: use_signal(|| mode),
         right_panel_open: use_signal(|| false),
         right_panel_tab: use_signal(|| RightPanelTab::Plan),
-        status_toast: use_signal(|| None),
+        toasts: use_signal(Vec::new),
         prompt: use_signal(String::new),
+        sidebar_open: use_signal(|| true),
+        queued: use_signal(Vec::new),
+        overlay: use_signal(|| Overlay::None),
+        model_picker_open: use_signal(|| false),
+        prompt_history: use_signal(Vec::new),
+        announcement: use_signal(String::new),
         turn_diff: use_signal(|| None),
         spawned_agents: use_signal(Vec::new),
         patch_progress: use_signal(|| None),
@@ -330,21 +474,91 @@ impl UiStore {
         }
     }
 
-    /// Loads the provider catalog and picks a default model when none is set.
+    /// Loads the provider catalog and, when nothing is selected yet, picks
+    /// the remembered model (UX-003) or else the first visible one.
     async fn load_providers(&self) {
         let mut store = *self;
         let Ok(providers) = api::providers::list_providers(&core()).await else { return };
         store.hidden_models.set(api::providers::hidden_models(&core()));
         store.providers_catalog.set(providers);
-        let first = store.visible_catalog().into_iter().next();
-        if let Some(provider) = first {
-            if store.selected_provider.read().is_empty() {
-                store.selected_provider.set(provider.id.clone());
-            }
-            if store.selected_model.read().is_empty() {
-                store.selected_model.set(provider.models.first().cloned().unwrap_or_default());
-            }
+        store.providers_loaded.set(true);
+        if !store.selected_provider.peek().is_empty() && !store.selected_model.peek().is_empty() {
+            return;
         }
+        let catalog = store.visible_catalog();
+        let remembered = api::ui_state::load_ui_state();
+        if let Some((provider, model)) = default_model(&catalog, remembered.provider_and_model()) {
+            store.selected_provider.set(provider);
+            store.selected_model.set(model);
+        }
+    }
+
+    /// The user picked a model (and maybe an effort): select and remember it.
+    pub fn pick_model(&self, provider_id: &str, model: &str, effort: Option<&str>) {
+        let mut store = *self;
+        store.selected_provider.set(provider_id.to_string());
+        store.selected_model.set(model.to_string());
+        if let Some(effort) = effort {
+            store.selected_effort.set(effort.to_string());
+        }
+        let _ = api::ui_state::remember_model(provider_id, model, effort);
+    }
+
+    /// The user picked a reasoning effort.
+    pub fn pick_effort(&self, effort: &str) {
+        let mut store = *self;
+        store.selected_effort.set(effort.to_string());
+        let _ = api::ui_state::remember_effort(effort);
+    }
+
+    /// The user picked a mode; the mode control itself shows the change.
+    pub fn pick_mode(&self, mode: &str) {
+        let mut store = *self;
+        store.selected_mode.set(mode.to_string());
+        let _ = api::ui_state::remember_mode(mode);
+    }
+
+    /// The folder the chat works in: the open run's, else the selected
+    /// project (FR-050). Every project-scoped action uses this.
+    pub fn current_project(&self) -> Option<String> {
+        self.active_run
+            .read()
+            .as_ref()
+            .map(|run| run.project_path.clone())
+            .filter(|path| !path.is_empty())
+            .or_else(|| self.selected_project.read().clone())
+    }
+
+    /// [`Self::current_project`] without subscribing (for background tasks).
+    pub fn current_project_peek(&self) -> Option<String> {
+        self.active_run
+            .peek()
+            .as_ref()
+            .map(|run| run.project_path.clone())
+            .filter(|path| !path.is_empty())
+            .or_else(|| self.selected_project.peek().clone())
+    }
+
+    /// Clears the open conversation (new chat, `/new`, a deleted run).
+    pub fn reset_conversation(&self) {
+        let mut store = *self;
+        store.active_run_id.set(None);
+        store.active_run.set(None);
+        store.messages.set(Vec::new());
+        store.plan.set(None);
+        store.run_usage.set(None);
+        store.context_usage.set(None);
+        store.pending_permission.set(None);
+        store.pending_question.set(None);
+        store.turn_diff.set(None);
+        store.spawned_agents.set(Vec::new());
+        store.patch_progress.set(None);
+    }
+
+    /// Writes `text` into the assertive live region (screen readers).
+    pub fn announce(&self, text: String) {
+        let mut store = *self;
+        store.announcement.set(text);
     }
 
     /// The provider catalog without hidden models; providers left with no
@@ -407,6 +621,10 @@ impl UiStore {
 
     /// Loads a run's full details into the store and subscribes to its event
     /// stream when it is still active.
+    ///
+    /// The stream is subscribed BEFORE the messages are read (FR-056): events
+    /// that land while loading wait in the receiver and are applied after
+    /// the load, so nothing between the two is lost.
     pub fn select_run(&self, run_id: String) {
         let mut store = *self;
         store.active_run_id.set(Some(run_id.clone()));
@@ -420,8 +638,9 @@ impl UiStore {
             let state = core();
             // Another selection may land while the loads below are awaited;
             // the guard after them drops this load if it did.
-            // 1. Run + messages + plan + usage + pending requests.
             let run = api::runs::get_run(&state, &run_id).await.ok();
+            let live = run.as_ref().is_some_and(|run| run_is_active(&run.status));
+            let rx = if live { Some(api::runs::subscribe_run_events(&state, &run_id).await) } else { None };
             let messages = api::runs::list_messages(&state, &run_id).await.unwrap_or_default();
             let plan = api::runs::run_plan(&state, &run_id).await.unwrap_or(None);
             let usage = api::runs::run_usage(&state, &run_id).await.ok();
@@ -431,6 +650,11 @@ impl UiStore {
                 return;
             }
             if let Some(run) = run {
+                // FR-050: the project follows the opened conversation.
+                if !run.project_path.is_empty() {
+                    store.selected_project.set(Some(run.project_path.clone()));
+                }
+                store.adopt_run_selection(&run);
                 store.active_run.set(Some(run));
             }
             store.messages.set(messages);
@@ -442,19 +666,27 @@ impl UiStore {
                 store.pending_question.set(pending.question_request);
             }
             scroll_chat_to_bottom();
-
-            // 2. Live event subscription for active runs.
-            let active = store
-                .active_run
-                .read()
-                .as_ref()
-                .map(|run| matches!(run.status.as_str(), "created" | "generating" | "awaiting_permission" | "awaiting_input"))
-                .unwrap_or(false);
-            if active {
-                let rx = api::runs::subscribe_run_events(&state, &run_id).await;
+            if let Some(rx) = rx {
                 store.attach_event_stream(run_id, rx);
             }
         });
+    }
+
+    /// FR-057: continuing a conversation keeps its model, effort and mode
+    /// unless the user picks others. Review runs keep the composer's mode.
+    fn adopt_run_selection(&self, run: &Run) {
+        let mut store = *self;
+        if !run.provider_id.is_empty() && !run.model.is_empty() {
+            store.selected_provider.set(run.provider_id.clone());
+            store.selected_model.set(run.model.clone());
+        }
+        if let Some(effort) = run.reasoning_effort.clone().filter(|effort| !effort.is_empty()) {
+            store.selected_effort.set(effort);
+        }
+        let review = locagens_core::orchestrator::review::is_review_run(run);
+        if !review && DESKTOP_MODES.contains(&run.mode.as_str()) {
+            store.selected_mode.set(run.mode.clone());
+        }
     }
 
     /// Starts processing a run's event stream (used both for runs selected
@@ -533,6 +765,10 @@ impl UiStore {
                         }
                     });
                     if !updated {
+                        // A queued message reached the model: drop it from the strip.
+                        if message.role == "user" && message.agent_role.is_none() {
+                            store.queued.with_mut(|queue| take_delivered(queue, run_id, &message.content));
+                        }
                         store.messages.with_mut(|messages| messages.push(message));
                     }
                     follow_chat();
@@ -558,10 +794,23 @@ impl UiStore {
                     store.pending_question.set(None);
                 }
             }
+            "permission_requested" | "question_requested" if !foreground => {
+                // FR-054: a run left in the background now waits for the user.
+                let title = store
+                    .runs
+                    .peek()
+                    .iter()
+                    .find(|run| run.id == run_id)
+                    .map(|run| run.title.clone())
+                    .unwrap_or_default();
+                store.toast(store.tf("toast.background_waiting", &[&title]));
+            }
             "permission_requested" => {
+                store.announce(store.t("a11y.permission_needed").to_string());
                 store.pending_permission.set(Some(event.clone()));
             }
             "question_requested" => {
+                store.announce(store.t("a11y.question_needed").to_string());
                 store.pending_question.set(Some(event.clone()));
             }
             "plan_updated" => {
@@ -640,23 +889,35 @@ impl UiStore {
             "run_completed" | "run_failed" => {
                 let run_id = event.get("runId").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| run_id.to_string());
                 if !foreground {
+                    store.queued.with_mut(|queue| take_undelivered(queue, &run_id));
                     store.refresh_runs();
                     return true;
                 }
                 store.patch_progress.set(None);
                 store.reload_usage(&run_id);
+                let reload_id = run_id.clone();
                 spawn(async move {
                     let state = core();
-                    if let Ok(run) = api::runs::get_run(&state, &run_id).await {
-                        store.active_run.set(Some(run));
+                    let run = api::runs::get_run(&state, &reload_id).await;
+                    // FR-056: another run may have been opened meanwhile.
+                    if let Ok(run) = run {
+                        if store.active_run_id.peek().as_deref() == Some(run.id.as_str()) {
+                            store.active_run.set(Some(run));
+                        }
                     }
                     store.refresh_runs();
                 });
                 store.pending_permission.set(None);
                 store.pending_question.set(None);
-                if let Some(message) = event.get("errorMessage").and_then(Value::as_str) {
-                    store.toast(store.tf("toast.run_failed", &[message]));
+                // UX-011: undelivered queued text goes back into the composer.
+                if let Some(text) = store.queued.with_mut(|queue| take_undelivered(queue, &run_id)) {
+                    store.prompt.with_mut(|prompt| {
+                        *prompt = if prompt.trim().is_empty() { text } else { format!("{text}\n\n{prompt}") };
+                    });
+                    store.toast(store.t("toast.queued_restored").to_string());
                 }
+                // A failure is shown as a block at the end of the thread
+                // (UX-008), read from the run's `error_message`.
             }
             // `round_started`, `run_started`, unknown event types — ignored.
             _ => {}
@@ -681,19 +942,34 @@ impl UiStore {
         });
     }
 
-    /// Shows a transient toast message that auto-clears after 4 s.
+    /// Shows a transient toast. Each toast has its own timer (longer for
+    /// long text) and only removes itself (FR-062).
     pub fn toast(&self, message: String) {
+        static NEXT_TOAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut store = *self;
-        store.status_toast.set(Some(message));
+        let id = NEXT_TOAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let duration = toast_duration(&message);
+        store.toasts.with_mut(|list| push_toast(list, ToastItem { id, text: message }));
         spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            store.status_toast.set(None);
+            tokio::time::sleep(duration).await;
+            store.toasts.with_mut(|list| list.retain(|toast| toast.id != id));
         });
+    }
+
+    /// Drops one toast now (its close button).
+    pub fn dismiss_toast(&self, id: u64) {
+        let mut store = *self;
+        store.toasts.with_mut(|list| list.retain(|toast| toast.id != id));
     }
 }
 
+/// Moves keyboard focus into the composer (after opening a chat, starting a
+/// new one or answering a card).
+pub fn focus_composer() {
+    dioxus::document::eval("requestAnimationFrame(() => { const t = document.querySelector('.composer textarea'); if (t && !t.disabled) t.focus(); });");
+}
+
 /// Whether a run status counts as "active" (event stream worth attaching).
-#[allow(dead_code)]
 pub fn run_is_active(status: &str) -> bool {
     matches!(
         status,
@@ -900,14 +1176,12 @@ mod routing_tests {
 
     #[test]
     fn background_runs_only_update_the_sidebar() {
-        for kind in ["status_changed", "run_title_changed", "run_completed", "run_failed"] {
+        for kind in ["status_changed", "run_title_changed", "run_completed", "run_failed", "permission_requested", "question_requested"] {
             assert!(applies_in_background(kind), "{kind}");
         }
         for kind in [
             "message_created",
             "message_updated",
-            "permission_requested",
-            "question_requested",
             "plan_updated",
             "turn_diff_updated",
             "agent_spawned",
@@ -916,6 +1190,66 @@ mod routing_tests {
         ] {
             assert!(!applies_in_background(kind), "{kind} must not leak into the open run");
         }
+    }
+
+    #[test]
+    fn answering_clears_only_the_answered_card() {
+        let first = serde_json::json!({ "runId": "r", "promptId": 1, "toolCall": { "id": "a" } });
+        let next = serde_json::json!({ "runId": "r", "promptId": 2, "toolCall": { "id": "a" } });
+        assert!(is_same_request(Some(&first), &first));
+        assert!(!is_same_request(Some(&next), &first), "the next queued prompt stays");
+        assert!(!is_same_request(None, &first));
+        // Without ids (older cores) the payload decides.
+        let legacy = serde_json::json!({ "runId": "r", "toolCall": { "id": "a" } });
+        assert!(is_same_request(Some(&legacy), &legacy.clone()));
+        assert!(!is_same_request(Some(&legacy), &serde_json::json!({ "runId": "r", "toolCall": { "id": "b" } })));
+    }
+
+    #[test]
+    fn toasts_queue_and_cap() {
+        let mut list = Vec::new();
+        for id in 1..=5 {
+            push_toast(&mut list, ToastItem { id, text: format!("t{id}") });
+        }
+        assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), vec![3, 4, 5]);
+        assert_eq!(toast_duration("short"), std::time::Duration::from_secs(4));
+        assert!(toast_duration(&"x".repeat(200)) > std::time::Duration::from_secs(4));
+        assert_eq!(toast_duration(&"x".repeat(5000)), std::time::Duration::from_secs(12));
+    }
+
+    #[test]
+    fn queued_messages_are_dropped_when_delivered_and_restored_when_not() {
+        let mut queue = vec![
+            QueuedMessage { run_id: "a".into(), text: "first".into() },
+            QueuedMessage { run_id: "b".into(), text: "other".into() },
+            QueuedMessage { run_id: "a".into(), text: "second".into() },
+        ];
+        assert!(take_delivered(&mut queue, "a", " first "));
+        assert!(!take_delivered(&mut queue, "a", "other"), "another run's entry is not touched");
+        assert_eq!(take_undelivered(&mut queue, "a").as_deref(), Some("second"));
+        assert_eq!(queue, vec![QueuedMessage { run_id: "b".into(), text: "other".into() }]);
+        assert_eq!(take_undelivered(&mut queue, "a"), None);
+    }
+
+    #[test]
+    fn mode_cycle_never_enters_full_access() {
+        assert_eq!(next_mode("accept_edits"), "plan");
+        assert_eq!(next_mode("plan"), "accept_edits");
+        assert_eq!(next_mode("auto"), "accept_edits");
+        assert_eq!(next_mode("chat"), "accept_edits");
+        assert_eq!(mode_key("chat"), "mode.chat");
+    }
+
+    #[test]
+    fn default_model_prefers_the_remembered_one_when_offered() {
+        let catalog = vec![
+            ProviderMetadata { id: "a".into(), display_name: "A".into(), kind: "x".into(), models: vec!["a1".into()], model_settings: None },
+            ProviderMetadata { id: "b".into(), display_name: "B".into(), kind: "x".into(), models: vec!["b1".into(), "b/2".into()], model_settings: None },
+        ];
+        assert_eq!(default_model(&catalog, Some(("b", "b/2"))), Some(("b".into(), "b/2".into())));
+        assert_eq!(default_model(&catalog, Some(("b", "gone"))), Some(("a".into(), "a1".into())));
+        assert_eq!(default_model(&catalog, None), Some(("a".into(), "a1".into())));
+        assert_eq!(default_model(&[], None), None);
     }
 
     #[test]
