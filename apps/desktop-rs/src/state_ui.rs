@@ -415,7 +415,7 @@ pub fn use_ui_store() -> UiStore {
         selected_model: use_signal(String::new),
         selected_effort: use_signal(|| effort),
         selected_mode: use_signal(|| mode),
-        right_panel_open: use_signal(|| false),
+        right_panel_open: use_signal(|| prefs::load_layout().right_panel_open),
         right_panel_tab: use_signal(|| RightPanelTab::Plan),
         toasts: use_signal(Vec::new),
         prompt: use_signal(String::new),
@@ -587,6 +587,14 @@ impl UiStore {
 
     /// The provider catalog without hidden models; providers left with no
     /// visible model are dropped (the model pickers use this).
+    /// Opens or closes the right panel and remembers it for the next start.
+    pub fn set_right_panel_open(&self, open: bool) {
+        let mut store = *self;
+        store.right_panel_open.set(open);
+        store.layout.with_mut(|layout| layout.right_panel_open = open);
+        prefs::save_layout(&store.layout.peek());
+    }
+
     pub fn visible_catalog(&self) -> Vec<ProviderMetadata> {
         visible_catalog(&self.providers_catalog.read(), &self.hidden_models.read())
     }

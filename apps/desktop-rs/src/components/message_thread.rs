@@ -672,13 +672,13 @@ fn activity_summary(calls: &[ToolCallView], lang: Lang) -> String {
 }
 
 /// Agent activity of one assistant turn, collapsed into a muted one-line row
-/// that expands into the individual tool rows. A failed call opens it.
+/// that expands into the individual tool rows. It starts collapsed; a failed
+/// call only tints the summary.
 #[component]
 fn ToolActivity(calls: Vec<ToolCallView>) -> Element {
     let store: UiStore = use_context();
-    let running = calls.iter().any(|call| call.response.is_none());
     let failed = calls.iter().any(|call| call.outcome() == ToolOutcome::Failed);
-    let mut open = use_signal(|| running || failed);
+    let mut open = use_signal(|| false);
     let summary = activity_summary(&calls, store.lang());
     rsx! {
         div {
@@ -694,8 +694,11 @@ fn ToolActivity(calls: Vec<ToolCallView>) -> Element {
                 {chevron(*open.read())}
             }
             if *open.read() {
-                for call in calls.iter() {
-                    ToolGroupCard { key: "{call.id}", call: call.clone() }
+                div {
+                    class: "tool-list",
+                    for call in calls.iter() {
+                        ToolGroupCard { key: "{call.id}", call: call.clone() }
+                    }
                 }
             }
         }

@@ -123,7 +123,6 @@ pub fn Sidebar() -> Element {
                 // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
                 onmousedown: start_window_drag,
                 div { class: "brand",
-                    {logo_mark()}
                     span { class: "brand-title", "Locagens" }
                 }
                 div { class: "sidebar-toolbar",

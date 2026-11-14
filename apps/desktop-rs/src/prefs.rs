@@ -165,17 +165,20 @@ pub const SIDEBAR_RANGE: (i32, i32) = (200, 480);
 pub const PANEL_DEFAULT: i32 = 380;
 pub const PANEL_RANGE: (i32, i32) = (260, 640);
 
-/// Column widths, stored under the `"layout"` key of `settings.json`.
+/// Column widths and whether the right panel is open, stored under the
+/// `"layout"` key of `settings.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
     pub sidebar_width: i32,
     pub right_panel_width: i32,
+    /// The inspector starts open and stays as the user last left it.
+    pub right_panel_open: bool,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { sidebar_width: SIDEBAR_DEFAULT, right_panel_width: PANEL_DEFAULT }
+        Self { sidebar_width: SIDEBAR_DEFAULT, right_panel_width: PANEL_DEFAULT, right_panel_open: true }
     }
 }
 
@@ -185,6 +188,7 @@ impl Layout {
         Self {
             sidebar_width: self.sidebar_width.clamp(SIDEBAR_RANGE.0, SIDEBAR_RANGE.1),
             right_panel_width: self.right_panel_width.clamp(PANEL_RANGE.0, PANEL_RANGE.1),
+            ..self
         }
     }
 }
@@ -241,8 +245,8 @@ mod tests {
         let path = temp_file("layout");
         assert_eq!(load_layout_from(&path), Layout::default());
         std::fs::write(&path, r#"{"appearance": {"language": "tr"}}"#).unwrap();
-        save_layout_to(&path, &Layout { sidebar_width: 300, right_panel_width: 9999 }).unwrap();
-        assert_eq!(load_layout_from(&path), Layout { sidebar_width: 300, right_panel_width: 640 });
+        save_layout_to(&path, &Layout { sidebar_width: 300, right_panel_width: 9999, right_panel_open: false }).unwrap();
+        assert_eq!(load_layout_from(&path), Layout { sidebar_width: 300, right_panel_width: 640, right_panel_open: false });
         assert_eq!(load_from(&path).language, Lang::Tr);
     }
 

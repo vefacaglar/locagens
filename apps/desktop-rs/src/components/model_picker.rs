@@ -220,7 +220,7 @@ pub fn ModelPicker() -> Element {
                                         let is_highlighted = position == index;
                                         let row_pick = row.clone();
                                         let class = match (is_current, is_highlighted) {
-                                            (_, true) => "ccm-item active",
+                                            (_, true) => "ccm-item active effort-anchor",
                                             (true, false) => "ccm-item current",
                                             _ => "ccm-item",
                                         };
@@ -241,30 +241,35 @@ pub fn ModelPicker() -> Element {
                             }
                         }
                     }
+                    // Thinking levels of the highlighted model open in a
+                    // vertical flyout beside its row (CSS anchor positioning),
+                    // so the menu never grows sideways or resizes under hover.
                     if let Some((provider_id, _, model)) = highlighted_row.clone().filter(|_| !highlighted_efforts.is_empty()) {
                         div {
-                            class: "picker-effort",
-                            span { class: "picker-effort-label", "{store.t(\"picker.effort\")}" }
-                            div {
-                                class: "seg",
-                                role: "radiogroup",
-                                "aria-label": store.t("picker.effort"),
-                                for effort in highlighted_efforts.iter() {
-                                    {
-                                        let is_model = provider_id == selected_provider && model == selected_model;
-                                        let active = is_model && effective_effort(&selected_effort, &highlighted_efforts) == Some(effort.as_str());
-                                        let effort = effort.clone();
-                                        let provider_id = provider_id.clone();
-                                        let model = model.clone();
-                                        rsx! {
-                                            button {
-                                                key: "{effort}",
-                                                class: if active { "active" } else { "" },
-                                                role: "radio",
-                                                "aria-checked": "{active}",
-                                                onclick: move |_| store.pick_model(&provider_id, &model, Some(&effort)),
-                                                "{store.t(effort_key(&effort))}"
-                                            }
+                            class: "picker-effort-flyout",
+                            role: "radiogroup",
+                            "aria-label": store.t("picker.effort"),
+                            div { class: "ccm-group", "{store.t(\"picker.effort\")}" }
+                            for effort in highlighted_efforts.iter() {
+                                {
+                                    let is_model = provider_id == selected_provider && model == selected_model;
+                                    let active = is_model && effective_effort(&selected_effort, &highlighted_efforts) == Some(effort.as_str());
+                                    let effort = effort.clone();
+                                    let provider_id = provider_id.clone();
+                                    let model = model.clone();
+                                    rsx! {
+                                        button {
+                                            key: "{effort}",
+                                            class: if active { "ccm-item current" } else { "ccm-item" },
+                                            role: "radio",
+                                            "aria-checked": "{active}",
+                                            onclick: move |_| {
+                                                store.pick_model(&provider_id, &model, Some(&effort));
+                                                close();
+                                                crate::state_ui::focus_composer();
+                                            },
+                                            span { class: "ccm-item-label", "{store.t(effort_key(&effort))}" }
+                                            if active { {icon_check()} }
                                         }
                                     }
                                 }

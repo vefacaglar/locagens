@@ -443,6 +443,12 @@ label { color: var(--text-2); font-size: 12px; }
 .status-dot.cancelled { background: var(--text-3); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
+/* ---------------- scrollbars ---------------- */
+/* None on purpose: the webview runs Chromium's overlay scrollbars
+   (main.rs `enable_overlay_scrollbars`), which take no layout width, show
+   while scrolling and fade out. Any webkit-scrollbar pseudo-element or
+   scrollbar-* rule would turn them back into classic, space-taking scrollbars. */
+
 /* ---------------- sidebar ---------------- */
 .sidebar-brand { padding: var(--brand-pad); justify-content: space-between; gap: 6px; border-bottom-color: transparent; }
 .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
@@ -484,7 +490,7 @@ label { color: var(--text-2); font-size: 12px; }
 .sidebar-nav-icon { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: inherit; flex: none; }
 .sidebar-search { flex: none; padding: 0 2px 6px; }
 .sidebar-search input { width: 100%; height: 28px; font-size: 12.5px; padding: 0 8px; }
-.sidebar-tree { flex: 1; overflow-y: auto; padding: 0 10px 12px; scrollbar-width: thin; }
+.sidebar-tree { flex: 1; overflow-y: auto; padding: 0 10px 12px; }
 .sidebar-section-header {
   height: 28px; padding: 0 4px 0 10px; margin-top: 8px;
   display: flex; align-items: center; justify-content: space-between;
@@ -579,7 +585,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .chat-area { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-chat); }
 #chat-scroll {
   flex: 1; overflow-y: auto; padding: 24px 28px calc(var(--dock-h, 160px) + 16px);
-  scrollbar-width: thin;
+ 
   display: flex; flex-direction: column; gap: 20px;
 }
 #chat-scroll > * { flex-shrink: 0; max-width: 800px; width: 100%; margin-left: auto; margin-right: auto; }
@@ -633,7 +639,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .bubble.md a { color: var(--accent); }
 
 /* tables: full width, hairline rows only */
-.bubble.md .table-wrap { width: 100%; overflow-x: auto; margin: 10px 0; scrollbar-width: thin; }
+.bubble.md .table-wrap { width: 100%; overflow-x: auto; margin: 10px 0; }
 .bubble.md table { width: 100%; border-collapse: collapse; border: none; }
 .bubble.md th, .bubble.md td {
   text-align: left; border: none; border-bottom: 1px solid var(--rule);
@@ -649,7 +655,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
   background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 10px;
 }
 .bubble.md .code-block pre {
-  margin: 0; padding: 14px 40px 14px 16px; overflow-x: auto; scrollbar-width: thin;
+  margin: 0; padding: 14px 40px 14px 16px; overflow-x: auto;
   font-size: 12.5px; line-height: 1.5; background: none; border: none;
 }
 .bubble.md .code-block pre code { background: none; padding: 0; font-size: inherit; color: var(--text); }
@@ -689,7 +695,10 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .reasoning-panel .collapsible-body { font-size: 12.5px; color: var(--text-2); white-space: pre-wrap; max-height: 260px; overflow-y: auto; }
 
 .tool-group { display: flex; flex-direction: column; gap: 6px; }
-.tool-card { border: 1px solid var(--border); background: var(--bg-elevated); border-radius: 8px; overflow: hidden; }
+/* Expanded calls share one container, one plain row per call. */
+.tool-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.tool-card { background: transparent; }
+.tool-card + .tool-card { border-top: 1px solid var(--border); }
 .tool-card .tool-head {
   min-height: 30px; display: flex; align-items: center; gap: 8px;
   padding: 0 10px; font-size: 12px; color: var(--text-3); cursor: pointer;
@@ -796,7 +805,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .ccm-header { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); padding: 4px 10px 6px; display: flex; align-items: center; justify-content: space-between; }
 .ccm-header button { padding: 0; font-size: 11.5px; color: var(--text-2); }
 .ccm-search { width: 100%; height: 28px; padding: 0 10px; margin-bottom: 4px; font-size: 12.5px; }
-.ccm-list { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; scrollbar-width: thin; }
+.ccm-list { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow-y: auto; }
 .ccm-empty { padding: 8px 10px; font-size: 12px; color: var(--text-3); }
 .ccm-item {
   width: 100%; min-height: 30px; padding: 0 10px; border-radius: 7px;
@@ -822,9 +831,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .composer-context-menu.slash-menu { width: min(420px, 100%); }
 .ccm-cmd-usage { flex: none; color: var(--text); font-weight: 500; }
 .ccm-cmd-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); font-size: 12px; }
-.ccm-list.model-list { max-height: min(320px, calc(100vh - 180px)); overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
-.ccm-list::-webkit-scrollbar { width: 5px; }
-.ccm-list::-webkit-scrollbar-thumb { background: var(--active); border-radius: 999px; }
+.ccm-list.model-list { max-height: min(320px, calc(100vh - 180px)); overflow-y: auto; overflow-x: hidden; }
 .ccm-model-name { color: var(--text); font-weight: 500; }
 .ccm-model-effort { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--text-3); }
 .composer-flyout-right { position: fixed; z-index: 65; padding-left: 6px; }
@@ -858,7 +865,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 /* ---------------- right inspector ---------------- */
 .right-panel-head { padding: 0 var(--controls-w) 0 16px; border-bottom-color: transparent; }
 .head-title { font-size: 12px; font-weight: 500; color: var(--text-3); }
-.right-panel-body { flex: 1; overflow-y: auto; padding: 4px 8px 16px; display: flex; flex-direction: column; gap: 4px; scrollbar-width: thin; }
+.right-panel-body { flex: 1; overflow-y: auto; padding: 4px 8px 16px; display: flex; flex-direction: column; gap: 4px; }
 .inspector-section { display: flex; flex-direction: column; padding: 4px 0; }
 .inspector-section + .inspector-section { border-top: 1px solid var(--border); }
 .section-label, .section-head {
@@ -946,7 +953,7 @@ button.section-head:hover { color: var(--text-2); }
 }
 .settings-nav button:hover { background: var(--hover); color: var(--text); }
 .settings-nav button.active { background: var(--active); color: var(--text); font-weight: 500; }
-.settings-content { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; scrollbar-width: thin; }
+.settings-content { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; }
 .usage-layout { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 20px 24px; gap: 14px; overflow-y: auto; }
 .usage-metrics { display: flex; gap: 12px; flex-wrap: wrap; }
 .metric-card {
@@ -1090,10 +1097,15 @@ button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex
 .ccm-group { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); padding: 6px 10px 2px; }
 .ccm-item.current { color: var(--text); font-weight: 500; }
 .ccm-footer { border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; margin-top: 4px; }
-.picker-effort { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--border); }
-.picker-effort-label { font-size: 12px; color: var(--text-3); }
-.picker-effort .seg button { padding: 3px 8px; font-size: 12px; }
-.composer-context-menu.model-menu { max-height: min(460px, 70vh); overflow: auto; }
+.composer-context-menu.model-menu { max-height: min(460px, 70vh); overflow: visible; }
+.effort-anchor { anchor-name: --effort-row; }
+.picker-effort-flyout {
+  position: absolute; position-anchor: --effort-row;
+  top: calc(anchor(top) - 6px); left: calc(anchor(right) + 10px);
+  position-try-fallbacks: flip-inline;
+  width: 150px; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-popover); border-radius: 12px; box-shadow: var(--shadow-pop); z-index: 2;
+}
 
 /* ---------------- palette & shortcuts (UX-019) ---------------- */
 .modal-backdrop.palette-backdrop { align-items: flex-start; padding-top: 12vh; }
@@ -1158,6 +1170,18 @@ mod tests {
         for platform in PLATFORMS {
             assert!(build_stylesheet_for(platform, true).contains("color-scheme: dark;"));
             assert!(build_stylesheet_for(platform, false).contains("color-scheme: light;"));
+        }
+    }
+
+    /// Custom scrollbar rules would replace the overlay scrollbars with
+    /// classic ones that narrow their container.
+    #[test]
+    fn scrollbars_stay_overlay() {
+        for dark in [true, false] {
+            let style = build_stylesheet_for("windows", dark);
+            assert!(!style.contains("::-webkit-scrollbar"));
+            assert!(!style.contains("scrollbar-width"));
+            assert!(!style.contains("scrollbar-color"));
         }
     }
 

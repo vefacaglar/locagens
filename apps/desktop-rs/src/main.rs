@@ -26,7 +26,23 @@ use state_ui::{set_core, AppPage};
 /// Smallest window that keeps the chat column usable (FR-061).
 const MIN_WINDOW: (f64, f64) = (760.0, 520.0);
 
+/// Scrollbars drawn over the content (Chromium's Fluent overlay scrollbars):
+/// they take no layout width, so a scroller appearing never narrows its
+/// content, and they show while scrolling and fade out on their own. Set
+/// before the WebView2 environment is created; extra arguments already in
+/// the variable (e.g. a debugging port) are kept.
+fn enable_overlay_scrollbars() {
+    const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    const FLAG: &str = "--enable-features=FluentOverlayScrollbar,OverlayScrollbar";
+    let args = match std::env::var(KEY) {
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing} {FLAG}"),
+        _ => FLAG.to_string(),
+    };
+    std::env::set_var(KEY, args);
+}
+
 fn main() {
+    enable_overlay_scrollbars();
     // 1. Bootstrap the core (opens the data store, runs startup tasks). A GUI
     //    build has no console, so a failure is shown in a dialog.
     let state = match locagens_core::api::bootstrap() {

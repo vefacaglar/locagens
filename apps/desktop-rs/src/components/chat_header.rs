@@ -112,9 +112,9 @@ pub fn ChatHeader() -> Element {
                     class: if inspector_open { "icon-btn on" } else { "icon-btn" },
                     title: store.tf("header.inspector", &[&if cfg!(target_os = "macos") { "\u{2318}\u{2325}B".to_string() } else { "Ctrl+Alt+B".to_string() }]),
                     onclick: move |_| {
-                        let mut store = store;
-                        let open = *store.right_panel_open.read();
-                        store.right_panel_open.set(!open);
+                        let store = store;
+                        let open = *store.right_panel_open.peek();
+                        store.set_right_panel_open(!open);
                     },
                     {icon_panel_right()}
                     if files_changed > 0 {

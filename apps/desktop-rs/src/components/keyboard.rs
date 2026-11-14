@@ -86,7 +86,7 @@ fn run_action(store: UiStore, action: &str) {
         }
         "inspector" => {
             let open = *store.right_panel_open.peek();
-            store.right_panel_open.set(!open);
+            store.set_right_panel_open(!open);
         }
         "mode" => {
             let mode = next_mode(&store.selected_mode.peek());

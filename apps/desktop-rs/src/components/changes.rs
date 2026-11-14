@@ -150,7 +150,7 @@ pub fn ChangesCard(diff: String, run_id: String) -> Element {
 /// Opens the inspector on its Changes section.
 pub fn open_changes(store: UiStore) {
     let mut store = store;
-    store.right_panel_open.set(true);
+    store.set_right_panel_open(true);
     store.right_panel_tab.set(RightPanelTab::Git);
     dioxus::document::eval(
         "requestAnimationFrame(() => requestAnimationFrame(() => { const s = document.getElementById('inspector-git'); if (s) s.scrollIntoView({ block: 'start' }); }));",
