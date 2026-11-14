@@ -151,6 +151,7 @@ pub fn fuzzy_file_score(path, query) -> Option<i64>                     // ranki
 pub async fn git_status(state, path) -> ApiResult<GitStatus>
 pub async fn git_diff_details(state, path) -> ApiResult<Vec<GitFileDiff>>  // per-file changes for the git panel
 pub async fn git_diff(state, path, staged: bool) -> ApiResult<String>      // plain `git diff [--cached]`
+pub async fn git_diff_worktree(state, path) -> ApiResult<String>          // `git diff HEAD` (staged + unstaged; no untracked)
 pub async fn git_stage(state, path, files: &[String]) -> ApiResult<()>
 pub async fn git_unstage(state, path, files: &[String]) -> ApiResult<()>
 pub async fn git_generate_message(state, run_id) -> ApiResult<String>      // LLM commit message

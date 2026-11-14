@@ -54,7 +54,7 @@ pub struct GitFileDiff {
 }
 
 /// One entry of `git worktree list --porcelain`.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitWorktree {
     pub path: String,
@@ -792,6 +792,21 @@ pub async fn git_diff(state: &AppState, path: &str, staged: bool) -> ApiResult<S
     let canonical = require_registered_project(state, path)?;
     let args: &[&str] = if staged { &["diff", "--cached"] } else { &["diff"] };
     git(&canonical, args).await.map_err(ApiError::internal)
+}
+
+/// The work tree against `HEAD` (`git diff HEAD`): staged and unstaged edits
+/// as one diff. Before the first commit it is the staged diff followed by
+/// the unstaged one. Untracked files are not included. Line-ending-only
+/// differences are ignored: the hardened git runs without the system config,
+/// so a `core.autocrlf` checkout would otherwise diff as whole files.
+pub async fn git_diff_worktree(state: &AppState, path: &str) -> ApiResult<String> {
+    let canonical = require_registered_project(state, path)?;
+    if let Ok(diff) = git(&canonical, &["diff", "--ignore-cr-at-eol", "HEAD"]).await {
+        return Ok(diff);
+    }
+    let staged = git(&canonical, &["diff", "--ignore-cr-at-eol", "--cached"]).await.map_err(ApiError::internal)?;
+    let unstaged = git(&canonical, &["diff", "--ignore-cr-at-eol"]).await.map_err(ApiError::internal)?;
+    Ok(staged + &unstaged)
 }
 
 #[cfg(test)]
