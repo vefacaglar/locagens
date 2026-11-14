@@ -47,6 +47,44 @@ docs/                CORE_API.md, CLI.md, CONFIG.md, HOOKS.md, SANDBOX.md,
                      database-schema.md, RELEASING.md
 ```
 
+## Install
+
+Prebuilt binaries come from the latest
+[GitHub Release](https://github.com/vefacaglar/locagens/releases/latest):
+the desktop app as a DMG (macOS) or zip (Windows), and the `lcgn` CLI.
+
+**CLI on macOS** (universal: Apple Silicon and Intel; signed and notarized):
+
+```bash
+curl -L https://github.com/vefacaglar/locagens/releases/latest/download/lcgn-macOS-universal.tar.gz | tar -xz -C /tmp && sudo mv /tmp/lcgn /usr/local/bin/ && lcgn --version
+```
+
+**CLI on Windows** (PowerShell; installs `lcgn.exe` and `locagens.exe` into
+`%LOCALAPPDATA%\Programs\lcgn` and adds that folder to the user `PATH`; open a
+new terminal afterwards):
+
+```powershell
+$d="$env:LOCALAPPDATA\Programs\lcgn"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://github.com/vefacaglar/locagens/releases/latest/download/Locagens-Windows-x64.zip -OutFile "$env:TEMP\lcgn.zip"; Expand-Archive "$env:TEMP\lcgn.zip" $d -Force; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$d", "User")
+```
+
+The Windows binaries are not code-signed, so SmartScreen may ask once
+(**More info → Run anyway**).
+
+**From source** (any platform with Rust installed):
+
+```bash
+cargo install --git https://github.com/vefacaglar/locagens locagens-cli --locked
+```
+
+**Desktop app:** open the DMG and drag Locagens to Applications (macOS), or run
+`locagens.exe` from the zip (Windows; needs the WebView2 runtime, preinstalled
+on Windows 11).
+
+Then sign in to a provider with `lcgn auth login <provider>` (or in the desktop
+settings). Keys and logins live in `~/.locagens/auth.json`; to move them to a
+new machine, copy `auth.json`, `models.json` and `config.toml` from
+`~/.locagens` over a private channel.
+
 ## Build and run
 
 ```bash
