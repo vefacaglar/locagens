@@ -1,16 +1,23 @@
 //! Transcript cells and their rendering into wrapped ratatui lines.
 
-use super::diff::diff_lines;
+use super::theme;
+use super::diff::{diff_lines, FileStat};
 use super::markdown::render_markdown;
-use super::wrap::{sanitize, truncate_to_width, wrap_text, wrap_with_prefix};
+use super::wrap::{display_width, sanitize, truncate_to_width, wrap_text, wrap_with_prefix};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 /// How many output lines a tool cell shows before truncating.
 const TOOL_OUTPUT_LINES: usize = 5;
+/// A failed tool shows more, since the error is what the user needs.
+const FAILED_OUTPUT_LINES: usize = 15;
+/// Cap per tool cell when details are expanded (Ctrl+O).
+const EXPANDED_OUTPUT_LINES: usize = 200;
 /// How many diff lines a diff cell shows before truncating.
 const DIFF_LINES: usize = 40;
+/// Files listed in a collapsed turn summary.
+const SUMMARY_FILES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
@@ -20,7 +27,7 @@ pub struct ToolResult {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CellKind {
-    User { text: String, queued: bool },
+    User { text: String },
     Assistant { text: String },
     Reasoning { text: String },
     Tool {
@@ -35,7 +42,14 @@ pub enum CellKind {
     Diff { title: String, diff: String },
     Notice(String),
     Error(String),
-    Completed(String),
+    /// End of a turn: `✔ 1m 12s · 3 files changed +42 −7 …` plus per-file
+    /// counts; the full diff shows when details are expanded.
+    TurnSummary {
+        headline: String,
+        ok: bool,
+        stats: Vec<FileStat>,
+        diff: Option<String>,
+    },
 }
 
 struct Cached {
@@ -104,11 +118,11 @@ impl Cell {
         if let Some(agent) = &self.agent {
             lines.push(Line::from(Span::styled(
                 format!("[{agent}]"),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(theme::agent()),
             )));
         }
         match &self.kind {
-            CellKind::User { text, queued } => render_user(&mut lines, text, *queued, width),
+            CellKind::User { text } => render_user(&mut lines, text, width),
             CellKind::Assistant { text } => render_assistant(&mut lines, text, width),
             CellKind::Reasoning { text } => render_reasoning(&mut lines, text, width, expanded),
             CellKind::Tool {
@@ -117,8 +131,8 @@ impl Cell {
                 result,
                 diff,
                 ..
-            } => render_tool(&mut lines, name, arguments, result.as_ref(), diff.as_deref(), width),
-            CellKind::Diff { title, diff } => render_diff(&mut lines, title, diff, width),
+            } => render_tool(&mut lines, name, arguments, result.as_ref(), diff.as_deref(), width, expanded),
+            CellKind::Diff { title, diff } => render_diff(&mut lines, title, diff, width, expanded),
             CellKind::Notice(text) => lines.extend(wrap_text(
                 text,
                 width,
@@ -129,14 +143,13 @@ impl Cell {
             CellKind::Error(text) => lines.extend(wrap_text(
                 text,
                 width,
-                Style::default().fg(Color::Red),
-                vec![Span::styled("✖ ", Style::default().fg(Color::Red))],
+                Style::default().fg(theme::err()),
+                vec![Span::styled("✖ ", Style::default().fg(theme::err()))],
                 vec![Span::raw("  ")],
             )),
-            CellKind::Completed(text) => lines.push(Line::from(Span::styled(
-                format!("── {text} ──"),
-                dim(),
-            ))),
+            CellKind::TurnSummary { headline, ok, stats, diff } => {
+                render_summary(&mut lines, headline, *ok, stats, diff.as_deref(), width, expanded)
+            }
         }
         if !matches!(self.kind, CellKind::Reasoning { .. } | CellKind::Notice(_)) {
             lines.push(Line::default());
@@ -146,24 +159,34 @@ impl Cell {
 }
 
 fn dim() -> Style {
-    Style::default().add_modifier(Modifier::DIM)
+    theme::dim()
 }
 
-fn render_user(lines: &mut Vec<Line<'static>>, text: &str, queued: bool, width: usize) {
-    let marker = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let mut body = wrap_text(
+fn render_user(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    let marker = Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD);
+    let body = wrap_text(
         &summarize_attachments(text),
         width,
         Style::default().add_modifier(Modifier::BOLD),
         vec![Span::styled("› ", marker)],
         vec![Span::raw("  ")],
     );
-    if queued {
-        if let Some(last) = body.last_mut() {
-            last.spans.push(Span::styled("  (queued)", Style::default().fg(Color::Yellow)));
-        }
+    match theme::current().user_bg {
+        Some(bg) => lines.extend(body.into_iter().map(|line| band(line, bg, width + 1))),
+        None => lines.extend(body),
     }
-    lines.extend(body);
+}
+
+/// Paints `line` onto a background band that fills `width` columns.
+fn band(mut line: Line<'static>, bg: Color, width: usize) -> Line<'static> {
+    let used: usize = line.spans.iter().map(|span| display_width(&span.content)).sum();
+    for span in line.spans.iter_mut() {
+        span.style = span.style.bg(bg);
+    }
+    if used < width {
+        line.spans.push(Span::styled(" ".repeat(width - used), Style::default().bg(bg)));
+    }
+    line
 }
 
 fn render_assistant(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
@@ -205,11 +228,12 @@ fn render_tool(
     result: Option<&ToolResult>,
     diff: Option<&str>,
     width: usize,
+    expanded: bool,
 ) {
     let (marker, marker_style) = match result {
-        None => ("⋯", Style::default().fg(Color::Yellow)),
-        Some(r) if r.ok => ("✔", Style::default().fg(Color::Green)),
-        Some(_) => ("✖", Style::default().fg(Color::Red)),
+        None => ("⋯", Style::default().fg(theme::warn())),
+        Some(r) if r.ok => ("✔", Style::default().fg(theme::ok())),
+        Some(_) => ("✖", Style::default().fg(theme::err())),
     };
     let (verb, target) = describe_tool(name, arguments);
     let header = vec![
@@ -223,29 +247,30 @@ fn render_tool(
         vec![Span::raw("  ")],
     ));
     if let Some(diff) = diff.filter(|d| !d.is_empty()) {
-        push_limited_diff(lines, diff, width.saturating_sub(4), "  ");
+        push_limited_diff(lines, diff, width.saturating_sub(4), "  ", expanded);
     }
     if let Some(result) = result {
-        push_tool_output(lines, name, result, width);
+        push_tool_output(lines, name, result, width, expanded);
     }
 }
 
-fn push_limited_diff(lines: &mut Vec<Line<'static>>, diff: &str, width: usize, indent: &str) {
+fn push_limited_diff(lines: &mut Vec<Line<'static>>, diff: &str, width: usize, indent: &str, expanded: bool) {
     let rendered = diff_lines(diff, width);
     let total = rendered.len();
-    for mut line in rendered.into_iter().take(DIFF_LINES) {
+    let limit = if expanded { usize::MAX } else { DIFF_LINES };
+    for mut line in rendered.into_iter().take(limit) {
         line.spans.insert(0, Span::raw(indent.to_string()));
         lines.push(line);
     }
-    if total > DIFF_LINES {
+    if total > limit {
         lines.push(Line::from(Span::styled(
-            format!("{indent}… +{} more diff lines", total - DIFF_LINES),
+            format!("{indent}… +{} more diff lines · Ctrl+O to expand", total - limit),
             dim(),
         )));
     }
 }
 
-fn push_tool_output(lines: &mut Vec<Line<'static>>, name: &str, result: &ToolResult, width: usize) {
+fn push_tool_output(lines: &mut Vec<Line<'static>>, name: &str, result: &ToolResult, width: usize, expanded: bool) {
     let quiet = matches!(
         name,
         "read_file" | "list_directory" | "search_files" | "set_chat_title" | "update_plan" | "remember"
@@ -253,33 +278,95 @@ fn push_tool_output(lines: &mut Vec<Line<'static>>, name: &str, result: &ToolRes
     if result.ok && quiet {
         return;
     }
-    let style = if result.ok { dim() } else { Style::default().fg(Color::Red) };
+    let style = if result.ok { dim() } else { Style::default().fg(theme::err()) };
     let output = sanitize(result.output.trim_end());
     if output.is_empty() {
         return;
     }
     let all: Vec<&str> = output.lines().collect();
-    for line in all.iter().take(TOOL_OUTPUT_LINES) {
+    let limit = match (expanded, result.ok) {
+        (true, _) => EXPANDED_OUTPUT_LINES,
+        (false, false) => FAILED_OUTPUT_LINES,
+        (false, true) => TOOL_OUTPUT_LINES,
+    };
+    for line in all.iter().take(limit) {
         let text = truncate_to_width(line, width.saturating_sub(4));
         lines.push(Line::from(vec![
             Span::styled("  │ ", dim()),
             Span::styled(text, style),
         ]));
     }
-    if all.len() > TOOL_OUTPUT_LINES {
+    if all.len() > limit {
+        let hint = if expanded { "" } else { " · Ctrl+O to expand" };
         lines.push(Line::from(Span::styled(
-            format!("  … +{} lines", all.len() - TOOL_OUTPUT_LINES),
+            format!("  … +{} lines{hint}", all.len() - limit),
             dim(),
         )));
     }
 }
 
-fn render_diff(lines: &mut Vec<Line<'static>>, title: &str, diff: &str, width: usize) {
+fn render_diff(lines: &mut Vec<Line<'static>>, title: &str, diff: &str, width: usize, expanded: bool) {
     lines.push(Line::from(vec![
         Span::styled("• ", dim()),
         Span::styled(title.to_string(), Style::default().add_modifier(Modifier::BOLD)),
     ]));
-    push_limited_diff(lines, diff, width.saturating_sub(2), "  ");
+    push_limited_diff(lines, diff, width.saturating_sub(2), "  ", expanded);
+}
+
+/// `3 files changed +42 −7` (empty when nothing changed).
+pub fn changes_headline(stats: &[FileStat]) -> String {
+    if stats.is_empty() {
+        return String::new();
+    }
+    let noun = if stats.len() == 1 { "file" } else { "files" };
+    let added: usize = stats.iter().map(|s| s.added).sum();
+    let removed: usize = stats.iter().map(|s| s.removed).sum();
+    format!("{} {noun} changed +{added} −{removed}", stats.len())
+}
+
+fn render_summary(
+    lines: &mut Vec<Line<'static>>,
+    headline: &str,
+    ok: bool,
+    stats: &[FileStat],
+    diff: Option<&str>,
+    width: usize,
+    expanded: bool,
+) {
+    let (glyph, color) = if ok { ("✔", theme::ok()) } else { ("■", theme::warn()) };
+    let mut text = headline.to_string();
+    if !stats.is_empty() {
+        text.push_str(&format!(" · {} · /diff to view · /undo to revert", changes_headline(stats)));
+    }
+    lines.extend(wrap_with_prefix(
+        &[Span::styled(text, dim())],
+        width,
+        vec![Span::styled(format!("{glyph} "), Style::default().fg(color))],
+        vec![Span::raw("  ")],
+    ));
+    let shown = if expanded { stats.len() } else { stats.len().min(SUMMARY_FILES) };
+    for stat in &stats[..shown] {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {}  ", truncate_to_width(&stat.path, width.saturating_sub(16).max(8)))),
+            Span::styled(format!("+{}", stat.added), Style::default().fg(theme::ok())),
+            Span::raw(" "),
+            Span::styled(format!("−{}", stat.removed), Style::default().fg(theme::err())),
+        ]));
+    }
+    if shown < stats.len() {
+        lines.push(Line::from(Span::styled(
+            format!("  … +{} more files · Ctrl+O to expand", stats.len() - shown),
+            dim(),
+        )));
+    }
+    match diff.filter(|d| !d.is_empty()) {
+        Some(diff) if expanded => {
+            lines.push(Line::default());
+            push_limited_diff(lines, diff, width.saturating_sub(2), "  ", true);
+        }
+        Some(_) => lines.push(Line::from(Span::styled("  Ctrl+O shows the full diff", dim()))),
+        None => {}
+    }
 }
 
 /// `(verb, target)` for a tool call, e.g. `("Ran", "cargo test")`.
@@ -441,7 +528,7 @@ mod tests {
         });
         let lines = cell.lines(40, false);
         let added = lines.iter().find(|l| line_text(l).trim() == "+new").unwrap();
-        assert_eq!(added.spans.last().unwrap().style.fg, Some(Color::Green));
+        assert_eq!(added.spans.last().unwrap().style.fg, Some(theme::ok()));
     }
 
     #[test]

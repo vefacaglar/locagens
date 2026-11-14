@@ -90,7 +90,7 @@ pub async fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Re
         Ok(())
     } else {
         Err(format!(
-            "provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
+            "provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`, or type /login to connect it.",
             model.provider_id
         ))
     }
@@ -158,14 +158,14 @@ pub async fn execute(
         SlashCommand::Undo => {
             match crate::api::projects::undo_last_turn(state, &project_str, session.session.as_deref()).await {
                 Ok(snapshot) => {
-                    result.notice(format!(
-                        "Restored snapshot {} (HEAD {}, {} file(s)).",
-                        snapshot.id,
-                        snapshot.head_sha,
-                        snapshot.restored.len()
-                    ));
+                    let count = snapshot.restored.len();
+                    let noun = if count == 1 { "file" } else { "files" };
+                    result.notice(format!("Reverted {count} {noun} to before the last turn."));
                     if !snapshot.skipped.is_empty() {
-                        result.notice(format!("Left alone (changed after that turn): {}", snapshot.skipped.join(", ")));
+                        result.notice(format!(
+                            "Left alone because they changed since: {}",
+                            snapshot.skipped.join(", ")
+                        ));
                     }
                 }
                 Err(err) => result.error(format!("undo failed: {err}")),
@@ -218,6 +218,22 @@ pub async fn execute(
                 result.notice(lines.join("\n"));
             }
         }
+        SlashCommand::Login(_) => {
+            result.notice("Run `lcgn auth login [provider]`; the interactive picker is in the full-screen UI.");
+        }
+        SlashCommand::Logout(None) => result.error("Usage: /logout <provider>"),
+        SlashCommand::Logout(Some(provider)) => {
+            let input = crate::pi_providers::SetPiAuthInput {
+                provider_id: provider.clone(),
+                action: "delete".to_string(),
+                api_key: None,
+            };
+            match state.pi.set_pi_auth(&input) {
+                Ok(()) => result.notice(format!("Logged out of {provider}.")),
+                Err(err) => result.error(err.to_string()),
+            }
+        }
+        SlashCommand::Copy(_) => result.notice("/copy works in the full-screen UI."),
         SlashCommand::Usage => match session.session.as_deref() {
             None => result.notice("No active session yet."),
             Some(run_id) => {

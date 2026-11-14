@@ -414,6 +414,7 @@ mod locks;
 mod memories;
 mod messages;
 mod permissions;
+mod prompt_history;
 mod projects;
 mod rollout;
 mod runs;

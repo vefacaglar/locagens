@@ -5,15 +5,21 @@
 //! the API calls, `ui` draws; this file owns the terminal and event loop.
 
 mod app;
+mod clipboard;
 mod composer;
 mod diff;
 mod driver;
+mod help;
 mod highlight;
+mod login;
 mod markdown;
 mod overlay;
 mod popup;
+mod sessions;
 mod transcript;
+mod theme;
 mod ui;
+mod ui_overlays;
 mod wrap;
 
 use crate::cli::repl::ReplConfig;
@@ -115,7 +121,10 @@ pub async fn run(state: Arc<AppState>, config: ReplConfig) -> i32 {
 
 async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig) -> io::Result<()> {
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (login_tx, mut login_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::cli::runner::ensure_project(&state, &config.project);
+    let tui_config = crate::config_runtime::current().tui.clone();
+    theme::init(tui_config.as_ref());
     let app = App::new(
         config.project.clone(),
         config.model.clone(),
@@ -123,6 +132,11 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
         config.mode.clone(),
         config.bypass,
         config.initial_session.clone(),
+    );
+    let mut app = app;
+    app.reduced_motion = theme::reduced_motion(
+        std::env::var("LCGN_REDUCED_MOTION").ok().as_deref(),
+        tui_config.as_ref().and_then(|tui| tui.animations),
     );
     // Refresh stale provider model lists in the background; the model
     // choices reload when a new list arrives.
@@ -142,11 +156,16 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
             append_system_prompt: config.append_system_prompt.clone(),
         },
         files_tx,
+        login_tx,
     );
+    let (models_notify_tx, mut models_notify_rx) = tokio::sync::mpsc::channel::<()>(1);
+    driver.set_models_notifier(models_notify_tx);
     driver.load_model_choices().await;
     match &config.initial_session {
         Some(id) => driver.load_session(id).await,
-        None if driver.app.model.is_none() => driver
+        None if config.open_resume => driver.open_resume_picker(),
+        // With no provider at all the welcome text offers /login instead.
+        None if driver.app.model.is_none() && !driver.app.no_providers => driver
             .app
             .push_notice("No model selected. Type /model and pick one from the list."),
         None => {}
@@ -166,6 +185,8 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
             Some(received) = driver.recv_run() => driver.on_run_recv(received).await,
             Some((query, files)) = files_rx.recv() => driver.app.set_file_matches(&query, &files),
             Some(()) = models_rx.recv() => driver.load_model_choices().await,
+            Some(()) = models_notify_rx.recv() => driver.load_model_choices().await,
+            Some(event) = login_rx.recv() => driver.on_login_event(event).await,
             _ = ticker.tick() => {
                 driver.app.tick();
                 if driver.app.dirty {

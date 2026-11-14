@@ -193,10 +193,14 @@ async fn run(mut cli: Cli) -> i32 {
     // folder: ask once on a terminal, otherwise print a one-line notice.
     trust::ensure_project_trust(&project, cli.trust, interactive);
     if interactive {
-        let initial_session = match resolve_initial_session(&cli, &state, &project).await {
+        // In the full-screen UI `-r` opens the /resume picker instead of the
+        // numbered stderr prompt.
+        let defer_resume = cli.use_tui();
+        let initial_session = match resolve_initial_session(&cli, &state, &project, defer_resume).await {
             Ok(session) => session,
             Err(code) => return code,
         };
+        let open_resume = defer_resume && cli.resume && initial_session.is_none();
         let config = repl::ReplConfig {
             project,
             model,
@@ -208,6 +212,7 @@ async fn run(mut cli: Cli) -> i32 {
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
             initial_session,
+            open_resume,
         };
         if cli.use_tui() {
             return tui::run(state, config).await;
@@ -220,7 +225,7 @@ async fn run(mut cli: Cli) -> i32 {
         eprintln!("lcgn: --resume needs an interactive terminal.");
         return 2;
     }
-    let session = match resolve_initial_session(&cli, &state, &project).await {
+    let session = match resolve_initial_session(&cli, &state, &project, false).await {
         Ok(session) => session,
         Err(code) => return code,
     };
@@ -245,6 +250,7 @@ async fn resolve_initial_session(
     cli: &Cli,
     state: &Arc<crate::state::AppState>,
     project: &std::path::Path,
+    defer_resume: bool,
 ) -> Result<Option<String>, i32> {
     let fail = |message: String| -> i32 {
         eprintln!("lcgn: {message}");
@@ -264,6 +270,9 @@ async fn resolve_initial_session(
                 project.display()
             ))),
         };
+    }
+    if cli.resume && defer_resume {
+        return Ok(None);
     }
     if cli.resume {
         return match auth::pick_session(state, project).await {

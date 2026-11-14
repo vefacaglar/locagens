@@ -151,15 +151,18 @@ fn question_requested_opens_overlay_and_answers() {
 }
 
 #[test]
-fn run_completed_clears_busy_and_adds_diff_and_done_line() {
+fn run_completed_clears_busy_and_ends_with_one_summary_cell() {
     let mut app = app();
     app.begin_turn();
     app.on_run_event(&json!({"type": "turn_diff_updated", "filesChanged": 2, "diff": "-a\n+b\n"}));
     app.on_run_event(&json!({"type": "run_completed", "finalOutput": "ok"}));
     assert!(!app.busy);
     assert!(app.run_finished);
-    assert!(matches!(app.cells.first().map(Cell::kind), Some(CellKind::Diff { title, .. }) if title == "Changes: 2 files"));
-    assert!(matches!(app.cells.last().map(Cell::kind), Some(CellKind::Completed(_))));
+    assert_eq!(app.cells.len(), 1, "diff and done line are one summary");
+    assert!(matches!(
+        app.cells[0].kind(),
+        CellKind::TurnSummary { ok: true, stats, diff: Some(_), .. } if stats.is_empty()
+    ));
 }
 
 #[test]
@@ -197,14 +200,16 @@ fn user_events_dedupe_and_hide_environment_context() {
 }
 
 #[test]
-fn queued_message_is_unmarked_when_the_run_folds_it() {
+fn queued_message_waits_in_the_strip_until_the_run_folds_it() {
     let mut app = app();
     app.begin_turn();
     app.note_queued("later", "later");
-    assert!(matches!(app.cells[0].kind(), CellKind::User { queued: true, .. }));
+    assert!(app.cells.is_empty(), "queued text is not in the transcript");
+    assert_eq!(app.queued_displays(), ["later"]);
     app.on_run_event(&json!({"type": "message_created", "message": {"id": "u9", "role": "user", "content": "later"}}));
+    assert!(app.queued_displays().is_empty());
     assert_eq!(app.cells.len(), 1);
-    assert!(matches!(app.cells[0].kind(), CellKind::User { queued: false, .. }));
+    assert!(matches!(app.cells[0].kind(), CellKind::User { text } if text == "later"));
 }
 
 #[test]
@@ -215,6 +220,7 @@ fn leftover_queue_is_handed_back_after_completion() {
     app.on_run_event(&json!({"type": "run_completed", "finalOutput": ""}));
     assert_eq!(app.take_leftover_queued().as_deref(), Some("later"));
     assert!(!app.cells.iter().any(|c| matches!(c.kind(), CellKind::User { .. })));
+    assert!(app.queued_displays().is_empty());
 }
 
 #[test]
@@ -366,14 +372,34 @@ fn scrolling_leaves_follow_mode_and_end_returns() {
 }
 
 #[test]
-fn ctrl_o_toggles_reasoning_and_shift_tab_toggles_mode() {
+fn ctrl_o_toggles_details_and_shift_tab_cycles_build_and_plan() {
     let mut app = app();
     app.on_key(ctrl('o'));
-    assert!(app.show_reasoning);
+    assert!(app.details);
     app.on_key(press(KeyCode::BackTab));
     assert_eq!(app.mode, "plan");
     app.on_key(press(KeyCode::BackTab));
     assert_eq!(app.mode, "accept_edits");
+}
+
+#[test]
+fn shift_tab_reaches_full_access_only_after_it_was_asked_for() {
+    let mut app = app();
+    app.mode = "plan".into();
+    app.cycle_mode();
+    assert_eq!(app.mode, "accept_edits", "Full Access is not in the cycle by default");
+    app.auto_used = true;
+    app.mode = "plan".into();
+    app.cycle_mode();
+    assert_eq!(app.mode, "auto");
+    app.cycle_mode();
+    assert_eq!(app.mode, "accept_edits");
+
+    let mut approved = App::new(PathBuf::from("C:/proj"), None, None, "auto".into(), true, None);
+    approved.cycle_mode();
+    assert_eq!(approved.mode, "plan");
+    approved.cycle_mode();
+    assert_eq!(approved.mode, "auto", "with --approve Build means Full Access");
 }
 
 #[test]
@@ -388,4 +414,172 @@ fn elapsed_formats_compactly() {
     assert_eq!(format_elapsed(Duration::from_secs(5)), "5s");
     assert_eq!(format_elapsed(Duration::from_secs(65)), "1m 05s");
     assert_eq!(format_elapsed(Duration::from_secs(3720)), "1h 02m");
+}
+
+#[test]
+fn turn_summary_lists_files_and_counts() {
+    let mut app = app();
+    app.begin_turn();
+    let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@\n-old\n+new\n+more\n--- a/b.rs\n+++ b/b.rs\n+x\n";
+    app.on_run_event(&json!({"type": "turn_diff_updated", "filesChanged": 2, "diff": diff}));
+    app.on_run_event(&json!({"type": "run_completed", "finalOutput": ""}));
+    let CellKind::TurnSummary { stats, ok, .. } = app.cells[0].kind() else { panic!("expected a summary") };
+    assert!(*ok);
+    assert_eq!((stats[0].path.as_str(), stats[0].added, stats[0].removed), ("src/a.rs", 2, 1));
+    assert_eq!(stats.len(), 2);
+    let lines: Vec<String> = app.cells[0].lines(100, false).iter().map(crate::cli::tui::wrap::line_text).collect();
+    assert!(lines[0].starts_with("✔ "), "{lines:?}");
+    assert!(lines[0].contains("2 files changed +3 −1 · /diff to view · /undo to revert"), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("src/a.rs") && l.contains("+2")));
+}
+
+#[test]
+fn up_on_an_empty_composer_withdraws_the_newest_queued_message() {
+    let mut app = app();
+    assert!(app.on_key(press(KeyCode::Up)).is_empty(), "idle: Up is history");
+    app.begin_turn();
+    assert!(app.on_key(press(KeyCode::Up)).is_empty(), "nothing queued");
+    app.note_queued("first", "first");
+    app.note_queued("second", "second");
+    assert_eq!(app.last_queued_content(), Some("second"));
+    assert!(matches!(app.on_key(press(KeyCode::Up)).as_slice(), [Action::Withdraw]));
+    app.unqueue_last();
+    assert_eq!(app.composer.text(), "second");
+    assert_eq!(app.queued_displays(), ["first"]);
+    // With text in the composer Up edits, it does not withdraw.
+    assert!(app.on_key(press(KeyCode::Up)).is_empty());
+}
+
+#[test]
+fn interrupted_run_puts_queued_messages_back_in_the_composer() {
+    let mut app = app();
+    app.begin_turn();
+    app.note_queued("one", "one");
+    app.note_queued("two", "two");
+    app.on_run_event(&json!({"type": "status_changed", "status": "cancelled"}));
+    assert_eq!(app.composer.text(), "one\n\ntwo");
+    assert!(app.queued_displays().is_empty());
+    assert_eq!(app.flash_text(), Some("Queued message restored to the composer."));
+    assert!(!app.cells.iter().any(|c| matches!(c.kind(), CellKind::Notice(t) if t.contains("not delivered"))));
+}
+
+#[test]
+fn question_mark_opens_help_only_on_an_empty_composer() {
+    let mut app = app();
+    app.on_key(press(KeyCode::Char('?')));
+    assert!(matches!(app.overlay, Some(Overlay::Help(_))));
+    app.on_key(press(KeyCode::Esc));
+    assert!(app.overlay.is_none());
+    type_text(&mut app, "why");
+    app.on_key(press(KeyCode::Char('?')));
+    assert_eq!(app.composer.text(), "why?");
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn ctrl_r_searches_the_seeded_prompt_history() {
+    let mut app = app();
+    app.seed_history(vec!["fix parser".into(), "write docs".into(), "fix lexer".into()]);
+    app.on_key(ctrl('r'));
+    assert!(app.history_search.is_some());
+    type_text(&mut app, "fix");
+    // Newest match first; Up/Ctrl+R steps to older ones.
+    app.on_key(ctrl('r'));
+    app.on_key(press(KeyCode::Enter));
+    assert!(app.history_search.is_none());
+    assert_eq!(app.composer.text(), "fix parser");
+    app.on_key(ctrl('r'));
+    type_text(&mut app, "zzz");
+    app.on_key(press(KeyCode::Enter));
+    assert_eq!(app.composer.text(), "fix parser", "no match leaves the composer alone");
+    app.on_key(ctrl('r'));
+    app.on_key(press(KeyCode::Esc));
+    assert!(app.history_search.is_none());
+}
+
+#[test]
+fn enter_on_the_empty_first_run_screen_opens_login() {
+    let mut app = app();
+    assert!(app.on_key(press(KeyCode::Enter)).is_empty());
+    app.no_providers = true;
+    assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Slash(t)] if t == "/login"));
+    app.push_notice("something");
+    assert!(app.on_key(press(KeyCode::Enter)).is_empty(), "only on the welcome screen");
+}
+
+#[test]
+fn first_drag_shows_the_selection_hint_once() {
+    use crossterm::event::MouseButton;
+    let mut app = app();
+    let drag = MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: 3, row: 3, modifiers: KeyModifiers::NONE };
+    app.on_mouse(drag);
+    assert!(app.flash_text().is_some_and(|t| t.contains("Hold Shift")));
+    app.flash = None;
+    app.on_mouse(drag);
+    assert!(app.flash_text().is_none(), "shown once per session");
+}
+
+#[test]
+fn reduced_motion_slows_the_spinner_to_a_crawl() {
+    let mut app = app();
+    app.begin_turn();
+    app.reduced_motion = true;
+    for _ in 0..(SPINNER_TICKS * 2) {
+        app.tick();
+    }
+    assert_eq!(app.spinner, 0);
+    let mut animated = super::tests::app();
+    animated.begin_turn();
+    for _ in 0..SPINNER_TICKS {
+        animated.tick();
+    }
+    assert_eq!(animated.spinner, 1);
+}
+
+#[test]
+fn compaction_notice_uses_plain_words() {
+    let mut app = app();
+    app.on_run_event(&json!({"type": "context_compacted", "messagesBefore": 42, "messagesAfter": 9}));
+    assert!(matches!(app.cells[0].kind(), CellKind::Notice(t) if t == "Older messages were summarized to free up context."));
+}
+
+#[test]
+fn failed_run_adds_the_next_step_hint() {
+    let mut app = app();
+    app.begin_turn();
+    app.on_run_event(&json!({"type": "run_failed", "errorMessage": "boom"}));
+    assert!(app.cells.iter().any(|c| matches!(c.kind(), CellKind::Notice(t) if t.contains("Send a message to continue"))));
+}
+
+#[test]
+fn session_picker_enter_asks_the_driver_to_resume() {
+    use crate::cli::tui::sessions::SessionPicker;
+    let run = crate::db::Run { id: "r1".into(), title: "Fix".into(), ..Default::default() };
+    let mut app = app();
+    app.overlay = Some(Overlay::Sessions(SessionPicker::new(&[run], None, chrono::Utc::now())));
+    assert!(matches!(app.on_key(press(KeyCode::Enter)).as_slice(), [Action::Resume(id)] if id == "r1"));
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn login_overlay_routes_keys_and_pastes() {
+    use crate::cli::tui::login::{LoginFlow, LoginRow};
+    let row = LoginRow {
+        id: "anthropic".into(),
+        name: "Anthropic".into(),
+        method: "API key".into(),
+        status: String::new(),
+        has_oauth: false,
+        keyless: false,
+    };
+    let mut app = app();
+    app.overlay = Some(Overlay::Login(LoginFlow::new(vec![row])));
+    app.on_key(press(KeyCode::Enter));
+    assert!(app.on_paste(" sk-secret\n").is_empty());
+    let actions = app.on_key(press(KeyCode::Enter));
+    assert!(matches!(actions.as_slice(), [Action::Login(crate::cli::tui::login::LoginAction::SaveKey { key, .. })] if key == "sk-secret"));
+    // Esc on the picker closes the overlay.
+    app.overlay = Some(Overlay::Login(LoginFlow::new(Vec::new())));
+    assert!(app.on_key(press(KeyCode::Esc)).is_empty());
+    assert!(app.overlay.is_none());
 }

@@ -2,8 +2,12 @@
 //! answering prompts, cancelling, slash commands and file search.
 
 use super::app::{context_left_percent, Action, App, UsageInfo};
+use super::login::{LoginAction, LoginFlow, LoginRow, Stage, WaitInfo};
+use super::overlay::{ModelPicker, Overlay};
 use super::popup::PopupItem;
+use super::sessions::SessionPicker;
 use super::transcript::CellKind;
+use crate::api::providers as provider_api;
 use crate::api::runs as runs_api;
 use crate::api::runs::{ContinueRunPayload, CreateRunPayload};
 use crate::cli::commands::{self, ensure_authenticated, CommandSession, Output};
@@ -16,7 +20,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::broadcast::Receiver;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 
 /// Session options that never change while the TUI runs.
 pub struct DriverConfig {
@@ -28,6 +32,12 @@ pub struct DriverConfig {
 /// File search results: `(query, matching paths)`.
 pub type FileResults = (String, Vec<String>);
 
+/// Progress of an OAuth sign-in running on a background task.
+pub enum LoginEvent {
+    Started(Result<provider_api::OAuthLoginStart, String>),
+    Finished(Result<(), String>),
+}
+
 pub struct Driver {
     pub state: Arc<AppState>,
     pub app: App,
@@ -35,6 +45,11 @@ pub struct Driver {
     handle: Option<Arc<RunHandle>>,
     config: DriverConfig,
     files_tx: UnboundedSender<FileResults>,
+    login_tx: UnboundedSender<LoginEvent>,
+    /// Tells the event loop to reload model choices (a list was refreshed).
+    models_tx: Option<Sender<()>>,
+    login_task: Option<tokio::task::JoinHandle<()>>,
+    login_start: Option<provider_api::OAuthLoginStart>,
 }
 
 /// The `/review ` popup entries for `project`: uncommitted changes, every
@@ -84,16 +99,39 @@ impl Driver {
         mut app: App,
         config: DriverConfig,
         files_tx: UnboundedSender<FileResults>,
+        login_tx: UnboundedSender<LoginEvent>,
     ) -> Self {
         app.review_targets = review_target_items(&app.project);
-        Self {
+        app.branch = crate::orchestrator::review::current_branch(&app.project);
+        let mut driver = Self {
             state,
             app,
             rx: None,
             handle: None,
             config,
             files_tx,
-        }
+            login_tx,
+            models_tx: None,
+            login_task: None,
+            login_start: None,
+        };
+        driver.seed_prompt_history();
+        driver
+    }
+
+    pub fn set_models_notifier(&mut self, tx: Sender<()>) {
+        self.models_tx = Some(tx);
+    }
+
+    /// Earlier prompts of this folder's sessions feed the Up arrow and Ctrl+R.
+    fn seed_prompt_history(&mut self) {
+        let project = self.app.project.display().to_string();
+        let ids: std::collections::HashSet<String> = crate::cli::auth::sessions_for(&self.state, Some(&project))
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        let prompts = self.state.db.prompt_history(&ids, 100);
+        self.app.seed_history(prompts);
     }
 
     /// Next event of the active run; pending forever when idle.
@@ -145,6 +183,7 @@ impl Driver {
         }
         self.refresh_usage();
         self.app.review_targets = review_target_items(&self.app.project);
+        self.app.branch = crate::orchestrator::review::current_branch(&self.app.project);
         if self.app.should_quit {
             return;
         }
@@ -171,6 +210,22 @@ impl Driver {
             Action::Cancel => self.cancel().await,
             Action::Quit => self.quit().await,
             Action::SearchFiles(query) => self.search_files(query),
+            Action::Resume(id) => self.resume_session(&id).await,
+            Action::Login(action) => self.login_action(action).await,
+            Action::Withdraw => self.withdraw_queued().await,
+        }
+    }
+
+    /// `Up` while a run is going: take the newest queued message back.
+    async fn withdraw_queued(&mut self) {
+        let (Some(handle), Some(content)) = (self.handle.clone(), self.app.last_queued_content().map(str::to_string))
+        else {
+            return;
+        };
+        if crate::api::queue::withdraw_queued_message(&handle, &content).await {
+            self.app.unqueue_last();
+        } else {
+            self.app.flash("The run already picked that message up.");
         }
     }
 
@@ -325,7 +380,6 @@ impl Driver {
             Some(context_left_percent(entry.input_tokens, window))
         });
         self.app.set_usage(UsageInfo {
-            total_tokens: totals.input_tokens + totals.output_tokens,
             cost: totals.cost,
             context_left,
         });
@@ -336,6 +390,12 @@ impl Driver {
     /// Loads the persisted transcript and run details of `run_id`.
     /// Fills the `/model ` popup with every model of the callable providers.
     pub async fn load_model_choices(&mut self) {
+        self.reload_model_choices().await;
+        self.app.no_providers = self.app.model_choices.is_empty();
+        self.app.dirty = true;
+    }
+
+    async fn reload_model_choices(&mut self) {
         // Models switched off in the desktop's Settings → Providers stay hidden.
         let hidden = crate::api::providers::hidden_models(&self.state);
         self.app.model_choices = self
@@ -383,23 +443,35 @@ impl Driver {
     /// TUI specific.
     async fn slash(&mut self, line: &str) {
         let Some(command) = SlashCommand::parse(line) else { return };
-        if command == SlashCommand::Help {
-            return self.app.push_notice(App::help_text());
+        match &command {
+            SlashCommand::Help => return self.app.open_help(),
+            SlashCommand::Sessions => return self.open_session_picker(),
+            SlashCommand::Login(provider) => return self.open_login(provider.as_deref()).await,
+            SlashCommand::Copy(what) => return self.copy_last_answer(what.as_deref()),
+            _ => {}
         }
         if command == SlashCommand::Model(None) {
             // Like pi: a searchable picker instead of printing the table.
             self.load_model_choices().await;
             if self.app.model_choices.is_empty() {
-                return self.app.push_error("No models available. Sign in with `lcgn auth login <provider>`.");
+                return self.app.push_error("No models available. Type /login to connect a provider.");
             }
             let current = self.app.model.as_ref().map(|model| model.label());
-            self.app.overlay = Some(super::overlay::Overlay::ModelPicker(super::overlay::ModelPicker::new(
-                self.app.model_choices.clone(),
-                current,
-            )));
+            self.app.overlay = Some(Overlay::ModelPicker(ModelPicker::new(self.app.model_choices.clone(), current)));
             self.app.dirty = true;
             return;
         }
+        // Setting changes show in the footer; confirm them in the status line
+        // instead of adding a transcript line.
+        let quiet = matches!(
+            command,
+            SlashCommand::Plan
+                | SlashCommand::Build
+                | SlashCommand::Auto
+                | SlashCommand::Chat
+                | SlashCommand::Thinking(_)
+                | SlashCommand::Model(Some(_))
+        );
         let mut session = CommandSession {
             model: self.app.model.clone(),
             thinking: self.app.thinking.clone(),
@@ -415,6 +487,7 @@ impl Driver {
         self.app.thinking = session.thinking;
         if self.app.mode != session.mode {
             self.app.mode = session.mode;
+            self.app.auto_used |= self.app.mode == "auto";
             self.app.dirty = true;
         }
         self.app.session = session.session;
@@ -426,6 +499,7 @@ impl Driver {
         }
         for output in result.outputs {
             match output {
+                Output::Notice(text) if quiet => self.app.flash(text),
                 Output::Notice(text) => self.app.push_notice(text),
                 Output::Error(text) => self.app.push_error(text),
                 Output::Table(text) => self.app.push_notice(text.trim_end().to_string()),
@@ -438,6 +512,247 @@ impl Driver {
         if result.exit {
             self.quit().await;
         }
+    }
+
+    // ---- /resume ---------------------------------------------------------------
+
+    fn open_session_picker(&mut self) {
+        if self.app.busy {
+            return self.app.push_notice(commands::BUSY_NOTICE);
+        }
+        let project = self.app.project.display().to_string();
+        let runs = crate::cli::auth::sessions_for(&self.state, Some(&project));
+        if runs.is_empty() {
+            return self.app.push_notice("No sessions for this folder yet.");
+        }
+        let picker = SessionPicker::new(&runs, self.app.session.clone(), chrono::Utc::now());
+        self.app.overlay = Some(Overlay::Sessions(picker));
+        self.app.dirty = true;
+    }
+
+    /// Opens the session picker at start (`lcgn -r`).
+    pub fn open_resume_picker(&mut self) {
+        self.open_session_picker();
+    }
+
+    async fn resume_session(&mut self, run_id: &str) {
+        if self.app.busy {
+            return self.app.push_notice(commands::BUSY_NOTICE);
+        }
+        self.app.title = None;
+        self.app.cells.clear();
+        self.app.set_usage(UsageInfo::default());
+        self.app.viewport.follow = true;
+        self.app.session = Some(run_id.to_string());
+        self.load_session(run_id).await;
+    }
+
+    // ---- /copy -------------------------------------------------------------------
+
+    fn copy_last_answer(&mut self, what: Option<&str>) {
+        let answer = self.app.cells.iter().rev().find_map(|cell| match cell.kind() {
+            CellKind::Assistant { text } if cell.msg_id.as_deref() != Some("__plan__") => Some(text.clone()),
+            _ => None,
+        });
+        let Some(answer) = answer else {
+            return self.app.flash("Nothing to copy yet.");
+        };
+        let text = match what.map(str::to_lowercase).as_deref() {
+            None => answer,
+            Some("code") => match super::clipboard::last_fenced_block(&answer) {
+                Some(code) => code,
+                None => return self.app.flash("The last answer has no code block."),
+            },
+            Some(other) => return self.app.push_error(format!("Unknown /copy option \"{other}\". Use /copy or /copy code.")),
+        };
+        let label = super::clipboard::line_count_label(&text);
+        if super::clipboard::copy_text(&text) {
+            self.app.flash(format!("Copied {label}."));
+        } else {
+            self.app.flash("Could not reach the clipboard.");
+        }
+    }
+
+    // ---- /login ------------------------------------------------------------------
+
+    fn login_rows(&self) -> Vec<LoginRow> {
+        self.state.pi.login_providers().iter().map(LoginRow::from_provider).collect()
+    }
+
+    async fn open_login(&mut self, provider: Option<&str>) {
+        let rows = self.login_rows();
+        let flow = match provider.map(str::trim).filter(|p| !p.is_empty()) {
+            None => LoginFlow::new(rows),
+            Some(id) => match LoginFlow::for_provider(rows, id) {
+                Some(flow) => flow,
+                None => return self.app.push_error(format!("Unknown provider \"{id}\". Type /login to pick one.")),
+            },
+        };
+        let begin = flow.begin_action();
+        self.app.overlay = Some(Overlay::Login(flow));
+        self.app.dirty = true;
+        if let Some(action) = begin {
+            self.login_action(action).await;
+        }
+    }
+
+    pub async fn login_action(&mut self, action: LoginAction) {
+        match action {
+            LoginAction::Close => self.app.overlay = None,
+            LoginAction::Cancel => {
+                self.stop_login_task();
+                self.app.overlay = None;
+                self.app.flash("Sign-in cancelled.");
+            }
+            LoginAction::Note(text) => {
+                self.app.overlay = None;
+                self.app.flash(text);
+            }
+            LoginAction::BeginOauth { provider, domain } => self.begin_oauth(provider, domain),
+            LoginAction::SaveKey { provider, key } => self.save_api_key(&provider, key).await,
+            LoginAction::OpenBrowser => {
+                if let Some(start) = &self.login_start {
+                    let note = match provider_api::open_verification_url(start.url_to_open()) {
+                        Ok(()) => "Opened in your browser.".to_string(),
+                        Err(err) => format!("Could not open the browser: {err}"),
+                    };
+                    self.app.flash(note);
+                }
+            }
+            LoginAction::CopyCode => {
+                let code = self.login_start.as_ref().and_then(|start| start.user_code.clone());
+                if let Some(code) = code {
+                    let copied = super::clipboard::copy_text(&code);
+                    self.app.flash(if copied { "Code copied." } else { "Could not reach the clipboard." });
+                }
+            }
+            LoginAction::SubmitRedirect(url) => self.submit_redirect(&url).await,
+        }
+        self.app.dirty = true;
+    }
+
+    fn stop_login_task(&mut self) {
+        if let Some(task) = self.login_task.take() {
+            task.abort();
+        }
+        self.login_start = None;
+    }
+
+    /// Starts the sign-in on a background task: it reports the code or URL
+    /// first, then the outcome, through `login_tx`.
+    fn begin_oauth(&mut self, provider: String, domain: Option<String>) {
+        self.stop_login_task();
+        let state = self.state.clone();
+        let tx = self.login_tx.clone();
+        self.login_task = Some(tokio::spawn(async move {
+            let start = provider_api::start_oauth_login_with_domain(&state, &provider, domain.as_deref()).await;
+            let start = match start {
+                Ok(start) => start,
+                Err(err) => {
+                    let _ = tx.send(LoginEvent::Started(Err(err.to_string())));
+                    return;
+                }
+            };
+            let _ = tx.send(LoginEvent::Started(Ok(start.clone())));
+            let outcome = provider_api::finish_oauth_login(&state, &start).await.map_err(|err| err.to_string());
+            let _ = tx.send(LoginEvent::Finished(outcome));
+        }));
+    }
+
+    /// An OAuth task event reached the event loop.
+    pub async fn on_login_event(&mut self, event: LoginEvent) {
+        let waiting = matches!(&self.app.overlay, Some(Overlay::Login(flow)) if matches!(flow.stage, Stage::Waiting { .. }));
+        if !waiting {
+            return; // cancelled meanwhile
+        }
+        match event {
+            LoginEvent::Started(Ok(start)) => {
+                let info = WaitInfo {
+                    code: start.user_code.clone(),
+                    url: start.url_to_open().to_string(),
+                    accepts_paste: start.user_code.is_none(),
+                    paste: String::new(),
+                    error: None,
+                };
+                self.login_start = Some(start);
+                if let Some(Overlay::Login(flow)) = self.app.overlay.as_mut() {
+                    flow.set_started(info);
+                }
+            }
+            LoginEvent::Started(Err(message)) | LoginEvent::Finished(Err(message)) => {
+                self.stop_login_task();
+                if let Some(Overlay::Login(flow)) = self.app.overlay.as_mut() {
+                    flow.fail(message);
+                }
+            }
+            LoginEvent::Finished(Ok(())) => {
+                let provider = self.login_start.take().map(|start| start.provider_id);
+                self.login_task = None;
+                self.after_login(provider.as_deref().unwrap_or("")).await;
+            }
+        }
+        self.app.dirty = true;
+    }
+
+    async fn submit_redirect(&mut self, pasted: &str) {
+        let Some(start) = self.login_start.clone() else { return };
+        match provider_api::submit_oauth_redirect(&self.state, &start, pasted).await {
+            Ok(()) => {
+                self.stop_login_task();
+                self.after_login(&start.provider_id).await;
+            }
+            Err(err) => {
+                if let Some(Overlay::Login(flow)) = self.app.overlay.as_mut() {
+                    flow.set_wait_error(err.to_string());
+                }
+            }
+        }
+    }
+
+    /// Stores a pasted API key (the same call as `lcgn auth login`).
+    async fn save_api_key(&mut self, provider: &str, key: String) {
+        let input = crate::pi_providers::SetPiAuthInput {
+            provider_id: provider.to_string(),
+            action: "set".to_string(),
+            api_key: Some(key),
+        };
+        match self.state.pi.set_pi_auth(&input) {
+            Ok(()) => self.after_login(provider).await,
+            Err(err) => {
+                if let Some(Overlay::Login(flow)) = self.app.overlay.as_mut() {
+                    flow.fail(err.to_string());
+                }
+            }
+        }
+    }
+
+    /// A provider is connected: reload the models and open the picker on it.
+    async fn after_login(&mut self, provider: &str) {
+        self.app.overlay = None;
+        self.load_model_choices().await;
+        self.refresh_model_lists_in_background();
+        let prefix = format!("{provider}/");
+        if !self.app.model_choices.iter().any(|choice| choice.value.starts_with(&prefix)) {
+            return self.app.flash(format!("Connected {provider}. Its models are still loading; try /model in a moment."));
+        }
+        let current = self.app.model.as_ref().map(|model| model.label());
+        let mut picker = ModelPicker::new(self.app.model_choices.clone(), current);
+        picker.query = prefix;
+        picker.selected = 0;
+        self.app.overlay = Some(Overlay::ModelPicker(picker));
+        self.app.dirty = true;
+    }
+
+    fn refresh_model_lists_in_background(&self) {
+        let state = self.state.clone();
+        let tx = self.models_tx.clone();
+        tokio::spawn(async move {
+            if provider_api::refresh_model_lists(&state).await > 0 {
+                if let Some(tx) = tx {
+                    let _ = tx.send(()).await;
+                }
+            }
+        });
     }
 
     /// `/review [target]`: starts a read-only review run and switches the

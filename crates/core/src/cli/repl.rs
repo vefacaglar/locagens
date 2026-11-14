@@ -24,6 +24,8 @@ pub struct ReplConfig {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub initial_session: Option<String>,
+    /// `lcgn -r` in the full-screen UI: open the session picker at start.
+    pub open_resume: bool,
 }
 
 /// The run id currently executing, so the Ctrl+C watcher can cancel it

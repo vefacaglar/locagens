@@ -1,4 +1,5 @@
-//! Modal overlays: permission approval, agent questions and the model picker.
+//! Modal overlays: permission approval, agent questions and the model picker
+//! (help, the session picker and `/login` live in their own modules).
 
 use super::composer::printable_char;
 use super::diff::preview_diff;
@@ -10,6 +11,9 @@ pub enum Overlay {
     Approval(Approval),
     Question(QuestionFlow),
     ModelPicker(ModelPicker),
+    Help(super::help::HelpView),
+    Sessions(super::sessions::SessionPicker),
+    Login(super::login::LoginFlow),
 }
 
 // ---------------------------------------------------------------------
@@ -153,6 +157,18 @@ impl Approval {
         let preview = event.get("preview").cloned().unwrap_or(Value::Null);
         let action = str_field(&preview, "action");
         let path = str_field(&preview, "path");
+        let files: Vec<String> = preview
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let host = preview
+            .get("networkDomains")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let title = match action {
             "command" => "Run this command?".to_string(),
             "fetch" => "Fetch this URL?".to_string(),
@@ -161,6 +177,11 @@ impl Approval {
             "edit" => "Edit this file?".to_string(),
             "delete" => "Delete this file?".to_string(),
             "mkdir" => "Create this directory?".to_string(),
+            "patch" => {
+                let noun = if files.len() == 1 { "file" } else { "files" };
+                format!("Apply this patch? ({} {noun})", files.len())
+            }
+            "network" => format!("Allow network access to {host}?"),
             _ => format!("Allow {tool_name}?"),
         };
         let mut details = Vec::new();
@@ -179,9 +200,11 @@ impl Approval {
             "fetch" => details.push(format!("GET {}", str_field(&preview, "url"))),
             "move" => details.push(format!("{path} -> {}", str_field(&preview, "destPath"))),
             "create" | "edit" | "delete" | "mkdir" => details.push(path.to_string()),
+            "patch" => details.extend(files.iter().map(|file| format!("  {file}"))),
+            "network" => details.push(str_field(&preview, "url").to_string()),
             _ => {
                 if let Some(call) = event.pointer("/toolCall/function/arguments").and_then(Value::as_str) {
-                    details.push(call.chars().take(400).collect());
+                    details.push(format!("Arguments: {}", call.chars().take(400).collect::<String>()));
                 }
             }
         }
@@ -199,6 +222,13 @@ impl Approval {
     fn diff_for(preview: &Value, action: &str, path: &str) -> Option<String> {
         let old = preview.get("oldContent").and_then(Value::as_str);
         let new = preview.get("newContent").and_then(Value::as_str);
+        if action == "patch" {
+            return preview
+                .get("diff")
+                .and_then(Value::as_str)
+                .filter(|diff| !diff.trim().is_empty())
+                .map(str::to_string);
+        }
         let diff = match action {
             "edit" if old.is_some() && new.is_some() => preview_diff(path, old, new),
             "create" => preview_diff(path, None, new),
