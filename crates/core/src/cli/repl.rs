@@ -55,15 +55,14 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
                     return;
                 }
                 let mut slot = active_run.lock().await;
-                match slot.take() {
-                    Some(run_id) => {
-                        drop(slot);
-                        eprintln!();
-                        eprintln!("lcgn: cancelling {run_id}…");
-                        let _ = std::io::stderr().flush();
-                        let _ = crate::api::runs::cancel_run(&state, &run_id).await;
-                    }
-                    None => std::process::exit(0),
+                // Idle: rustyline reports Ctrl+C itself (Interrupted) and the
+                // REPL exits cleanly, so nothing to do without an active run.
+                if let Some(run_id) = slot.take() {
+                    drop(slot);
+                    eprintln!();
+                    eprintln!("lcgn: cancelling {run_id}…");
+                    let _ = std::io::stderr().flush();
+                    let _ = crate::api::runs::cancel_run(&state, &run_id).await;
                 }
             }
         });
@@ -149,8 +148,9 @@ pub async fn repl(state: Arc<AppState>, config: ReplConfig) -> i32 {
                 eprintln!();
             }
             Err(ReadlineError::Interrupted) => {
-                // The Ctrl+C watcher handles cancel/exit.
-                continue;
+                // Ctrl+C at an idle prompt exits (a run in progress is
+                // cancelled by the watcher above).
+                break;
             }
             Err(ReadlineError::Eof) => break,
             Err(err) => {

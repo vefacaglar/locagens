@@ -47,6 +47,10 @@ impl App {
             return self.on_overlay_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // AltGr text (Ctrl+Alt on Windows) must not trigger Ctrl shortcuts.
+        if ctrl && printable_char(&key).is_some() {
+            return self.on_edit_key(key);
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => return self.on_ctrl_c(),
             KeyCode::Char('d') if ctrl && self.composer.is_empty() => return vec![Action::Quit],
@@ -199,6 +203,12 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let c = &mut self.composer;
+        if let Some(ch) = printable_char(&key) {
+            c.insert_char(ch);
+            let mut actions = Vec::new();
+            self.refresh_popup(&mut actions);
+            return actions;
+        }
         match key.code {
             KeyCode::Enter if shift || alt || ctrl => c.insert_newline(),
             KeyCode::Enter => return self.submit_or_continue_line(),
@@ -234,7 +244,6 @@ impl App {
                     c.history_next();
                 }
             }
-            KeyCode::Char(ch) if !ctrl && !alt => c.insert_char(ch),
             _ => return Vec::new(),
         }
         let mut actions = Vec::new();

@@ -52,7 +52,7 @@ pub async fn run_turn(
 ) -> (i32, Option<String>) {
     // Configuration check: the provider must be authenticated.
     if let Some(model) = &opts.model {
-        if let Err(message) = ensure_authenticated(state, model) {
+        if let Err(message) = ensure_authenticated(state, model).await {
             eprintln!("lcgn: {message}");
             return (2, None);
         }
@@ -120,6 +120,8 @@ pub async fn run_turn(
         opts.show_thinking && !opts.json,
         opts.interactive,
     );
+    // The REPL has its own Ctrl+C watcher (`active`); only a one-shot run listens here.
+    let own_ctrl_c = active.is_none();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     let mut events = RunEvents::new(state.clone(), run_id.clone(), rx);
 
@@ -132,7 +134,13 @@ pub async fn run_turn(
                 Pumped::Resynced(_) => continue,
                 Pumped::Closed => break 1,
             },
-            _ = ctrl_c.as_mut() => {
+            _ = async {
+                if own_ctrl_c {
+                    let _ = ctrl_c.as_mut().await;
+                } else {
+                    std::future::pending::<()>().await
+                }
+            } => {
                 eprintln!();
                 eprintln!("lcgn: cancelled (Ctrl+C)");
                 let _ = runs_api::cancel_run(state, &run_id).await;

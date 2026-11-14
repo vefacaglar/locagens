@@ -1,8 +1,10 @@
 //! Modal overlays: permission approval, agent questions and the model picker.
 
+use super::composer::printable_char;
 use super::diff::preview_diff;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 pub enum Overlay {
     Approval(Approval),
@@ -51,6 +53,11 @@ impl ModelPicker {
     pub fn on_key(&mut self, key: KeyEvent) -> Option<PickerOutcome> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let count = self.visible().len();
+        if let Some(ch) = printable_char(&key) {
+            self.query.push(ch);
+            self.selected = 0;
+            return None;
+        }
         match key.code {
             KeyCode::Esc => return Some(PickerOutcome::Close),
             KeyCode::Char('c') if ctrl => return Some(PickerOutcome::Close),
@@ -67,10 +74,6 @@ impl ModelPicker {
             KeyCode::End => self.selected = count.saturating_sub(1),
             KeyCode::Backspace => {
                 self.query.pop();
-                self.selected = 0;
-            }
-            KeyCode::Char(ch) if !ctrl => {
-                self.query.push(ch);
                 self.selected = 0;
             }
             _ => {}
@@ -125,7 +128,15 @@ pub struct Approval {
     /// Unified diff of the proposed change, when there is one.
     pub diff: Option<String>,
     pub scroll: usize,
+    /// Keys that grant access are ignored until this instant, so text typed
+    /// before the prompt appeared cannot answer it.
+    pub armed_at: Instant,
+    /// A standing grant (project / always) waits here for a second press.
+    pub pending_grant: Option<&'static str>,
 }
+
+/// How long a new approval prompt ignores grant keys.
+const APPROVAL_ARM_DELAY: Duration = Duration::from_millis(600);
 
 fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
@@ -180,6 +191,8 @@ impl Approval {
             details,
             diff: Self::diff_for(&preview, action, path),
             scroll: 0,
+            armed_at: Instant::now() + APPROVAL_ARM_DELAY,
+            pending_grant: None,
         }
     }
 
@@ -195,17 +208,29 @@ impl Approval {
         (!diff.is_empty()).then_some(diff)
     }
 
+    /// Standing grants persist, so they need the same key pressed twice.
+    fn confirm_grant(&mut self, pending: Option<&'static str>, grant: &'static str) -> Option<&'static str> {
+        if pending == Some(grant) {
+            return Some(grant);
+        }
+        self.pending_grant = Some(grant);
+        None
+    }
+
     /// Handles a key; returns the permission decision when one was made.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<&'static str> {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return (key.code == KeyCode::Char('c')).then_some("deny");
         }
+        let armed = Instant::now() >= self.armed_at;
+        let pending = self.pending_grant.take();
         match key.code {
-            KeyCode::Char('o' | 'y') => Some("allow_once"),
-            KeyCode::Char('r') => Some("allow_run"),
-            KeyCode::Char('p') => Some("allow_project"),
-            KeyCode::Char('a') => Some("allow_always"),
             KeyCode::Char('d' | 'n') | KeyCode::Esc => Some("deny"),
+            // Granting keys do nothing until the prompt has been visible a moment.
+            KeyCode::Char('o' | 'y') if armed => Some("allow_once"),
+            KeyCode::Char('r') if armed => Some("allow_run"),
+            KeyCode::Char('p') if armed => self.confirm_grant(pending, "allow_project"),
+            KeyCode::Char('a') if armed => self.confirm_grant(pending, "allow_always"),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.scroll = self.scroll.saturating_sub(1);
                 None
@@ -408,8 +433,11 @@ impl QuestionFlow {
             KeyCode::Backspace => {
                 self.note.pop();
             }
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => self.note.push(ch),
-            _ => {}
+            _ => {
+                if let Some(ch) = printable_char(&key) {
+                    self.note.push(ch);
+                }
+            }
         }
         None
     }
@@ -460,10 +488,13 @@ mod tests {
     #[test]
     fn approval_keys_map_to_decisions() {
         let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        approval.armed_at = Instant::now();
         assert_eq!(approval.on_key(press(KeyCode::Char('o'))), Some("allow_once"));
         assert_eq!(approval.on_key(press(KeyCode::Char('y'))), Some("allow_once"));
         assert_eq!(approval.on_key(press(KeyCode::Char('r'))), Some("allow_run"));
+        assert_eq!(approval.on_key(press(KeyCode::Char('p'))), None, "standing grants need a second press");
         assert_eq!(approval.on_key(press(KeyCode::Char('p'))), Some("allow_project"));
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None);
         assert_eq!(approval.on_key(press(KeyCode::Char('a'))), Some("allow_always"));
         assert_eq!(approval.on_key(press(KeyCode::Char('d'))), Some("deny"));
         assert_eq!(approval.on_key(press(KeyCode::Char('n'))), Some("deny"));
@@ -471,6 +502,28 @@ mod tests {
         assert_eq!(approval.on_key(press(KeyCode::Down)), None);
         assert_eq!(approval.scroll, 1);
         assert_eq!(approval.on_key(press(KeyCode::Char('x'))), None);
+    }
+
+    #[test]
+    fn typed_ahead_keys_do_not_answer_a_fresh_prompt() {
+        let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        for ch in ['o', 'r', 'p', 'a', 'y'] {
+            assert_eq!(approval.on_key(press(KeyCode::Char(ch))), None, "{ch} must be ignored while arming");
+        }
+        assert_eq!(approval.pending_grant, None);
+        // Denying is always allowed.
+        assert_eq!(approval.on_key(press(KeyCode::Esc)), Some("deny"));
+    }
+
+    #[test]
+    fn standing_grant_is_cancelled_by_another_key() {
+        let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        approval.armed_at = Instant::now();
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('x'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None, "pending grant was reset");
+        assert_eq!(approval.on_key(press(KeyCode::Char('p'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None, "different grant restarts");
     }
 
     fn question_event() -> Value {

@@ -75,6 +75,9 @@ pub fn review_target_items(project: &Path) -> Vec<PopupItem> {
     items
 }
 
+/// How long quitting waits for a cancelled run to wind down.
+const QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Driver {
     pub fn new(
         state: Arc<AppState>,
@@ -142,6 +145,9 @@ impl Driver {
         }
         self.refresh_usage();
         self.app.review_targets = review_target_items(&self.app.project);
+        if self.app.should_quit {
+            return;
+        }
         if let Some(prompt) = self.app.take_leftover_queued() {
             self.start_turn(prompt).await;
         }
@@ -169,10 +175,20 @@ impl Driver {
     }
 
     async fn quit(&mut self) {
-        if self.app.busy {
-            self.cancel().await;
-        }
         self.app.should_quit = true;
+        if !self.app.busy {
+            return;
+        }
+        self.cancel().await;
+        // Let the run reach its terminal event so cleanup (the `--no-session`
+        // delete, closing agents) happens before the process exits.
+        let deadline = tokio::time::Instant::now() + QUIT_GRACE;
+        while self.rx.is_some() {
+            match tokio::time::timeout_at(deadline, self.recv_run()).await {
+                Ok(Some(received)) => self.on_run_recv(received).await,
+                _ => break,
+            }
+        }
     }
 
     async fn cancel(&mut self) {
@@ -219,7 +235,7 @@ impl Driver {
 
     async fn start_turn(&mut self, prompt: String) {
         if let Some(model) = &self.app.model {
-            if let Err(message) = ensure_authenticated(&self.state, model) {
+            if let Err(message) = ensure_authenticated(&self.state, model).await {
                 return self.app.push_error(message);
             }
         }
@@ -435,7 +451,7 @@ impl Driver {
         let Some(model) = self.app.model.clone() else {
             return self.app.push_error("No model selected. Use /model provider/id (type /model to list models).");
         };
-        if let Err(message) = ensure_authenticated(&self.state, &model) {
+        if let Err(message) = ensure_authenticated(&self.state, &model).await {
             return self.app.push_error(message);
         }
         crate::cli::runner::ensure_project(&self.state, &self.app.project);

@@ -112,9 +112,29 @@ fn permission_requested_opens_overlay_and_decision_closes_it() {
         {"id": "c1", "function": {"name": "run_command", "arguments": "{}"}},
         "preview": {"action": "command", "command": "rm x"}}));
     assert!(matches!(app.overlay, Some(Overlay::Approval(_))));
+    // Typed-ahead keys are ignored while the prompt arms.
+    assert!(app.on_key(press(KeyCode::Char('r'))).is_empty());
+    assert!(app.overlay.is_some());
+    if let Some(Overlay::Approval(approval)) = app.overlay.as_mut() {
+        approval.armed_at = std::time::Instant::now();
+    }
     let actions = app.on_key(press(KeyCode::Char('r')));
     assert!(matches!(actions.as_slice(), [Action::Decide("allow_run")]));
     assert!(app.overlay.is_none());
+}
+
+#[test]
+fn altgr_characters_are_typed_into_the_composer() {
+    let mut app = app();
+    let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    for ch in ['@', '\\', '{', '|'] {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), altgr));
+    }
+    if cfg!(windows) {
+        assert_eq!(app.composer.text(), "@\\{|");
+    } else {
+        assert_eq!(app.composer.text(), "");
+    }
 }
 
 #[test]

@@ -57,6 +57,10 @@ pub struct Cli {
     /// Ephemeral: do not persist the run
     #[arg(long)]
     pub no_session: bool,
+    /// Also append piped stdin to the message (stdin is otherwise read only
+    /// when no message is given)
+    #[arg(long)]
+    pub stdin: bool,
     /// Chat only (mode "chat")
     #[arg(long)]
     pub no_tools: bool,
@@ -270,6 +274,26 @@ impl Cli {
         self.default_mode.clone().unwrap_or_else(|| "accept_edits".to_string())
     }
 
+    /// Rejects flag combinations that would destroy data. `--no-session`
+    /// deletes the run it ends with, so it must never continue an existing
+    /// session (`-c`, `-r`, `--session`).
+    pub fn validate(&self) -> Result<(), String> {
+        let continues = self.cont || self.resume || self.session.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if self.no_session && continues {
+            return Err(
+                "--no-session cannot be combined with -c, -r or --session: it would delete the session it continues."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Should piped stdin be read? Only when asked for or when there is no
+    /// message, so an inherited open pipe cannot hang `lcgn -p "..."`.
+    pub fn wants_stdin(&self) -> bool {
+        self.stdin || self.messages.iter().all(|m| m.trim().is_empty())
+    }
+
     /// The project directory: `--cwd` when given, else the current directory.
     pub fn project_dir(&self) -> Result<PathBuf, String> {
         match self.cwd.as_deref().filter(|dir| !dir.trim().is_empty()) {
@@ -345,11 +369,10 @@ pub fn read_piped_stdin() -> Option<String> {
         return None;
     }
     use std::io::Read;
-    let mut buffer = String::new();
-    match std::io::stdin().read_to_string(&mut buffer) {
-        Ok(_) => Some(buffer),
-        Err(_) => None,
-    }
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes).ok()?;
+    // Non-UTF-8 input is kept (lossily) instead of being dropped.
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -559,6 +582,22 @@ hide_agent_reasoning = true
         assert!(Cli::try_parse_from(["lcgn", "review", "--base", "main", "--commit", "abc"]).is_err());
         assert!(Cli::try_parse_from(["lcgn", "review", "--uncommitted", "--base", "main"]).is_err());
         assert!(Cli::try_parse_from(["lcgn", "review", "--base", "main", "some prompt"]).is_err());
+    }
+
+    #[test]
+    fn no_session_cannot_continue_an_existing_session() {
+        assert!(cli(&["--no-session", "-p", "q"]).validate().is_ok());
+        assert!(cli(&["-c", "-p", "q"]).validate().is_ok());
+        assert!(cli(&["-c", "--no-session", "-p", "q"]).validate().is_err());
+        assert!(cli(&["--session", "abc", "--no-session"]).validate().is_err());
+        assert!(cli(&["-r", "--no-session"]).validate().is_err());
+    }
+
+    #[test]
+    fn stdin_is_read_only_without_a_message_or_with_the_flag() {
+        assert!(cli(&["-p"]).wants_stdin());
+        assert!(!cli(&["-p", "hi"]).wants_stdin());
+        assert!(cli(&["-p", "--stdin", "hi"]).wants_stdin());
     }
 
     #[test]
