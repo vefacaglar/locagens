@@ -1,8 +1,8 @@
 //! Chat header: the top strip of the main column (window drag area) with a
-//! status dot, `project / conversation` breadcrumb and
+//! status dot, conversation title and
 //! icon buttons for stop, theme and the inspector panel.
 
-use super::icons::{icon_folder, icon_moon, icon_panel_right, icon_sidebar, icon_stop, icon_sun};
+use super::icons::{icon_moon, icon_panel_right, icon_sidebar, icon_stop, icon_sun};
 use super::*;
 use crate::state_ui::UiStore;
 use dioxus::prelude::*;
@@ -16,7 +16,6 @@ pub fn ChatHeader() -> Element {
         .as_ref()
         .map(|run| run.title.clone())
         .unwrap_or_else(|| store.t("conversation.new").to_string());
-    let project_path = store.current_project().unwrap_or_default();
     let sidebar_open = *store.sidebar_open.read();
     let status = run
         .as_ref()
@@ -31,11 +30,6 @@ pub fn ChatHeader() -> Element {
         .as_ref()
         .map(|(_, files)| *files)
         .unwrap_or(0);
-
-    let folder = std::path::Path::new(&project_path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_path.clone());
 
     rsx! {
         header {
@@ -57,15 +51,6 @@ pub fn ChatHeader() -> Element {
                     }
                 }
                 {status_dot(&status)}
-                if !project_path.is_empty() {
-                    span {
-                        class: "crumb",
-                        title: "{project_path}",
-                        {icon_folder()}
-                        span { "{folder}" }
-                        span { class: "crumb-sep", "/" }
-                    }
-                }
                 div {
                     class: "chat-title",
                     title: "{title}",

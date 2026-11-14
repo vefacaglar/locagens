@@ -144,7 +144,7 @@ pub fn SummaryCard() -> Element {
     let store: UiStore = use_context();
     let mut show_all_sources = use_signal(|| false);
     let mut expanded = use_signal(|| None::<RightPanelTab>);
-    let mut card_open = use_signal(|| false);
+    let card_open = store.layout.read().summary_card_open;
     let mut toggle = move |tab: RightPanelTab| {
         let next = if *expanded.peek() == Some(tab) { None } else { Some(tab) };
         expanded.set(next);
@@ -200,15 +200,12 @@ pub fn SummaryCard() -> Element {
 
     rsx! {
         div {
-            class: if *card_open.read() { "summary-card summary-float open" } else { "summary-card summary-float" },
+            class: if card_open { "summary-card summary-float open" } else { "summary-card summary-float" },
             button {
                 class: "summary-head",
                 title: "{project_path.clone().unwrap_or_default()}",
-                "aria-expanded": "{card_open.read()}",
-                onclick: move |_| {
-                    let next = !*card_open.read();
-                    card_open.set(next);
-                },
+                "aria-expanded": "{card_open}",
+                onclick: move |_| store.set_summary_card_open(!card_open),
                 span { class: "summary-project", "{folder}" }
                 if let Some(branch) = branch {
                     span { class: "summary-branch", {icon_git_branch()} "{branch}" }

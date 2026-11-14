@@ -174,11 +174,13 @@ pub struct Layout {
     pub right_panel_width: i32,
     /// The inspector starts open and stays as the user last left it.
     pub right_panel_open: bool,
+    /// The summary card at the chat's top right, as the user last left it.
+    pub summary_card_open: bool,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { sidebar_width: SIDEBAR_DEFAULT, right_panel_width: PANEL_DEFAULT, right_panel_open: true }
+        Self { sidebar_width: SIDEBAR_DEFAULT, right_panel_width: PANEL_DEFAULT, right_panel_open: true, summary_card_open: false }
     }
 }
 
@@ -245,8 +247,11 @@ mod tests {
         let path = temp_file("layout");
         assert_eq!(load_layout_from(&path), Layout::default());
         std::fs::write(&path, r#"{"appearance": {"language": "tr"}}"#).unwrap();
-        save_layout_to(&path, &Layout { sidebar_width: 300, right_panel_width: 9999, right_panel_open: false }).unwrap();
-        assert_eq!(load_layout_from(&path), Layout { sidebar_width: 300, right_panel_width: 640, right_panel_open: false });
+        save_layout_to(&path, &Layout { sidebar_width: 300, right_panel_width: 9999, right_panel_open: false, summary_card_open: true }).unwrap();
+        assert_eq!(
+            load_layout_from(&path),
+            Layout { sidebar_width: 300, right_panel_width: 640, right_panel_open: false, summary_card_open: true }
+        );
         assert_eq!(load_from(&path).language, Lang::Tr);
     }
 

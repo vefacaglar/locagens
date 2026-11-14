@@ -579,6 +579,13 @@ impl UiStore {
         prefs::save_layout(&store.layout.peek());
     }
 
+    /// Opens or closes the chat's summary card and remembers it for the next start.
+    pub fn set_summary_card_open(&self, open: bool) {
+        let mut store = *self;
+        store.layout.with_mut(|layout| layout.summary_card_open = open);
+        prefs::save_layout(&store.layout.peek());
+    }
+
     pub fn visible_catalog(&self) -> Vec<ProviderMetadata> {
         visible_catalog(&self.providers_catalog.read(), &self.hidden_models.read())
     }

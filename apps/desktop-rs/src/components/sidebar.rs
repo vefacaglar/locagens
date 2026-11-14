@@ -122,9 +122,8 @@ pub fn Sidebar() -> Element {
                 class: "sidebar-brand",
                 // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
                 onmousedown: start_window_drag,
-                div { class: "brand",
-                    span { class: "brand-title", "Locagens" }
-                }
+                // Empty spacer: keeps the toolbar at the right of the strip.
+                div { class: "brand" }
                 div { class: "sidebar-toolbar",
                     ondoubleclick: move |event| event.stop_propagation(),
                     button {

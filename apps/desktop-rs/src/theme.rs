@@ -183,13 +183,13 @@ pub fn build_stylesheet_with(platform: &str, appearance: &Appearance) -> String 
     // macOS traffic lights sit at x: 14..72 inside the full-size content view,
     // so the brand strip must clear them; other platforms draw their own
     // window controls (3 x 46px) at the top right.
-    let (brand_pad, controls_w) = if platform == "macos" {
-        ("0 10px 0 80px", "0px")
+    let (brand_pad, brand_pad_left, controls_w) = if platform == "macos" {
+        ("0 10px 0 80px", "80px", "0px")
     } else {
-        ("0 12px 0 14px", "144px")
+        ("0 12px 0 14px", "14px", "144px")
     };
     let vars = format!(
-        "  --font-ui: {font_ui};\n  --font-code: {font_code};\n  --font-mono: var(--font-code);\n  --font-scale: {scale};\n  --ui-ligatures: {ui_ligatures};\n  --code-ligatures: {code_ligatures};\n  --code-features: {code_features};\n  --brand-pad: {brand_pad};\n  --controls-w: {controls_w};"
+        "  --font-ui: {font_ui};\n  --font-code: {font_code};\n  --font-mono: var(--font-code);\n  --font-scale: {scale};\n  --ui-ligatures: {ui_ligatures};\n  --code-ligatures: {code_ligatures};\n  --code-features: {code_features};\n  --brand-pad: {brand_pad};\n  --brand-pad-left: {brand_pad_left};\n  --controls-w: {controls_w};"
     );
     let (scheme, tokens) = match appearance.theme {
         ThemeChoice::Light => ("light", LIGHT_TOKENS),
@@ -466,7 +466,6 @@ label { color: var(--text-2); font-size: 12px; }
 .logo-mark .lm-bg { fill: #131317; stroke: rgba(255, 255, 255, 0.14); stroke-width: 3; }
 .logo-mark .lm-fg { fill: #e6e6ea; }
 .logo-mark .lm-node { fill: #7f89c8; }
-.brand-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-toolbar { display: flex; align-items: center; gap: 2px; margin-left: auto; flex: none; }
 .sidebar-toolbar button {
   width: 28px; height: 28px; padding: 0;
@@ -574,13 +573,6 @@ label { color: var(--text-2); font-size: 12px; }
 .chat-header { padding: 0 12px 0 20px; justify-content: space-between; }
 .chat-header-meta { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; overflow: hidden; }
 .chat-title { font-size: 13.5px; font-weight: 500; flex: 0 1 auto; min-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumb {
-  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px;
-  font-size: 12px; color: var(--text-3);
-}
-.crumb span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.crumb .icon { width: 14px; height: 14px; }
-.crumb .crumb-sep { color: var(--text-3); opacity: 0.6; margin-left: 4px; }
 .chat-header-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .chat-header-actions button { flex: none; white-space: nowrap; }
 button.icon-btn.on { color: var(--text); background: var(--active); }
@@ -1091,7 +1083,9 @@ table.data-table td.empty-cell { text-align: center; color: var(--text-3); paddi
 .badge.accent { color: var(--accent); background: var(--accent-soft); }
 button.armed { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
 button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-.app-shell.no-sidebar .chat-header { padding-left: var(--brand-pad-left, 12px); }
+/* Without the sidebar the header is the window's top-left: clear the traffic lights. */
+.app-shell.no-sidebar .chat-header,
+.app-shell.no-sidebar .page-header { padding-left: var(--brand-pad-left); }
 /* Row actions show on hover and on keyboard focus (FR-066). */
 .run-item:focus-within .run-action, .project-row:focus-within .project-menu-btn,
 .project-row:focus-within .project-new-btn { opacity: 1; }
@@ -1397,6 +1391,7 @@ mod tests {
             assert!(style.contains("SF Mono"), "macos mono font missing");
             assert!(style.contains("--controls-w: 0px;"), "macos has no custom controls");
             assert!(style.contains("0 10px 0 80px"), "traffic light inset missing");
+            assert!(style.contains("--brand-pad-left: 80px;"), "collapsed-sidebar inset missing");
         }
     }
 
