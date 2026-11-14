@@ -610,3 +610,61 @@ fn copilot_anthropic_requests_use_a_bearer_not_an_api_key() {
     assert_eq!(headers["x-api-key"], "token-secret");
     assert!(headers.get("authorization").is_none() && headers.get("user-agent").is_none());
 }
+
+fn image_endpoint(api: &str) -> Endpoint {
+    Endpoint {
+        base_url: "https://example.com/v1".into(),
+        api: api.into(),
+        api_key: "k".into(),
+        session_id: String::new(),
+        model: "m".into(),
+        reasoning_effort: None,
+        max_tokens: None,
+        reasoning_supported: false,
+        quirk: ProviderQuirk::None,
+    }
+}
+
+fn user_with_image(text: &str) -> LlmMessage {
+    LlmMessage {
+        role: "user".into(),
+        content: text.into(),
+        images: vec![crate::db::ImageAttachment { mime: "image/png".into(), data: "QUJD".into() }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn openai_chat_user_image_becomes_content_parts() {
+    let body = openai_body(&image_endpoint("openai-compatible"), "", &[user_with_image("look")], &[]);
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0], json!({ "type": "text", "text": "look" }));
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    let plain = openai_body(&image_endpoint("openai-compatible"), "", &[LlmMessage { role: "user".into(), content: "hi".into(), ..Default::default() }], &[]);
+    assert_eq!(plain["messages"][0]["content"], "hi");
+    let image_only = openai_body(&image_endpoint("openai-compatible"), "", &[user_with_image("")], &[]);
+    assert_eq!(image_only["messages"][0]["content"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn responses_user_image_becomes_input_image() {
+    let body = build_responses_body(&image_endpoint("openai-responses"), "", &[user_with_image("look")], &[]);
+    let content = &body["input"][0]["content"];
+    assert_eq!(content[0], json!({ "type": "input_text", "text": "look" }));
+    assert_eq!(content[1], json!({ "type": "input_image", "image_url": "data:image/png;base64,QUJD" }));
+    let plain = build_responses_body(&image_endpoint("openai-responses"), "", &[LlmMessage { role: "user".into(), content: "hi".into(), ..Default::default() }], &[]);
+    assert_eq!(plain["input"][0]["content"], "hi");
+}
+
+#[test]
+fn anthropic_user_image_becomes_base64_block() {
+    let body = anthropic_body(&image_endpoint("anthropic"), "", &[user_with_image("look")], &[]);
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["source"], json!({ "type": "base64", "media_type": "image/png", "data": "QUJD" }));
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "look");
+    let image_only = anthropic_body(&image_endpoint("anthropic"), "", &[user_with_image("")], &[]);
+    assert_eq!(image_only["messages"][0]["content"].as_array().unwrap().len(), 1);
+}

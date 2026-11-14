@@ -22,7 +22,7 @@ pub(super) fn anthropic_body(endpoint: &Endpoint, system: &str, messages: &[LlmM
             "assistant" => chat.push(json!({ "role": "assistant", "content": assistant_blocks(message) })),
             "tool" => push_tool_result(&mut chat, message),
             role => {
-                chat.push(json!({ "role": role, "content": message.content }));
+                chat.push(json!({ "role": role, "content": message_content(message) }));
             }
         }
     }
@@ -52,6 +52,28 @@ pub(super) fn anthropic_body(endpoint: &Endpoint, system: &str, messages: &[LlmM
 
     apply_thinking(&mut body, endpoint, messages);
     Value::Object(body)
+}
+
+/// A message's `content`: the plain string, or base64 `image` blocks + a text
+/// block when the message carries images.
+fn message_content(message: &LlmMessage) -> Value {
+    if message.images.is_empty() {
+        return json!(message.content);
+    }
+    let mut blocks: Vec<Value> = message
+        .images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": image.mime, "data": image.data },
+            })
+        })
+        .collect();
+    if !message.content.is_empty() {
+        blocks.push(json!({ "type": "text", "text": message.content }));
+    }
+    json!(blocks)
 }
 
 fn ephemeral() -> Value {

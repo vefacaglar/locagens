@@ -8,7 +8,8 @@ use super::model_picker::{effective_effort, model_efforts, ModelPicker};
 use super::slash::{self, SlashAction};
 use crate::state_ui::{core, mode_key, AppPage, Overlay, QueuedMessage, SettingsTab, UiStore};
 use dioxus::prelude::*;
-use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload};
+use locagens_core::api::runs::{ContinueRunPayload, CreateRunPayload, MAX_IMAGES, MAX_IMAGE_BASE64_BYTES};
+use locagens_core::db::ImageAttachment;
 use locagens_core::commands::{detect_trigger, TriggerKind};
 
 /// Byte offset of UTF-16 offset `utf16` in `text` (the webview reports the
@@ -46,10 +47,44 @@ const report = (e) => {
 for (const kind of ['input', 'keyup', 'click', 'focus', 'select']) document.addEventListener(kind, report, true);
 "#;
 
+/// Reports images pasted into the composer as `{ mime, data }` (base64, no
+/// `data:` prefix). An image-only paste is cancelled so no text is inserted;
+/// the clipboard files are read synchronously, the encoding is async.
+const PASTE_SCRIPT: &str = r#"
+document.addEventListener('paste', (e) => {
+  const t = e.target;
+  if (!t || !t.matches || !t.matches('.composer textarea') || !e.clipboardData) return;
+  const items = Array.from(e.clipboardData.items || []);
+  const files = items.filter((i) => i.kind === 'file' && i.type.startsWith('image/')).map((i) => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  if (!items.some((i) => i.kind === 'string' && i.type === 'text/plain')) e.preventDefault();
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result);
+      dioxus.send({ mime: file.type, data: url.slice(url.indexOf(',') + 1) });
+    };
+    reader.readAsDataURL(file);
+  }
+}, true);
+"#;
+
 /// Puts the caret at UTF-16 offset `at` once the new value has rendered.
 fn place_caret(at: usize) {
     const SCRIPT: &str = "requestAnimationFrame(() => requestAnimationFrame(() => { const t = document.querySelector('.composer textarea'); if (t) { t.focus(); t.setSelectionRange(AT, AT); } }));";
     dioxus::document::eval(&SCRIPT.replace("AT", &at.to_string()));
+}
+
+/// Adds a pasted image to the pending list unless it breaks the message
+/// limits (the same caps `create_run` enforces).
+fn add_pasted_image(mut store: UiStore, image: ImageAttachment) {
+    if image.data.len() > MAX_IMAGE_BASE64_BYTES {
+        store.toast(store.t("toast.image_too_large").to_string());
+    } else if store.pending_images.peek().len() >= MAX_IMAGES {
+        store.toast(store.tf("toast.image_too_many", &[&MAX_IMAGES.to_string()]));
+    } else {
+        store.pending_images.with_mut(|images| images.push(image));
+    }
 }
 
 /// One completion entry under the caret.
@@ -81,7 +116,15 @@ pub fn Composer() -> Element {
         }
     });
 
+    use_future(move || async move {
+        let mut channel = dioxus::document::eval(PASTE_SCRIPT);
+        while let Ok(image) = channel.recv::<ImageAttachment>().await {
+            add_pasted_image(store, image);
+        }
+    });
+
     let prompt_text = store.prompt.read().clone();
+    let pending_images = store.pending_images.read().clone();
     let caret_byte = utf16_to_byte(&prompt_text, *caret.read());
     let trigger = detect_trigger(&prompt_text, caret_byte).filter(|_| dismissed.read().as_deref() != Some(prompt_text.as_str()));
     let mention_query = trigger.as_ref().filter(|t| t.kind == TriggerKind::File).map(|t| t.query.clone());
@@ -273,6 +316,31 @@ pub fn Composer() -> Element {
                                         }
                                     },
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            if !pending_images.is_empty() {
+                div {
+                    class: "composer-images",
+                    for (position, image) in pending_images.iter().enumerate() {
+                        div {
+                            key: "{position}",
+                            class: "attach-thumb",
+                            img { src: "data:{image.mime};base64,{image.data}", alt: store.t("composer.image_pasted") }
+                            button {
+                                class: "attach-remove",
+                                title: store.t("composer.remove_image"),
+                                "aria-label": store.t("composer.remove_image"),
+                                onclick: move |_| {
+                                    store.pending_images.with_mut(|images| {
+                                        if position < images.len() {
+                                            images.remove(position);
+                                        }
+                                    });
+                                },
+                                "×"
                             }
                         }
                     }
@@ -588,7 +656,7 @@ pub fn Composer() -> Element {
                 }
                 button {
                     class: "composer-send-btn",
-                    disabled: *busy.read() || is_awaiting || prompt_text.trim().is_empty() || blocked_reason.is_some(),
+                    disabled: *busy.read() || is_awaiting || (prompt_text.trim().is_empty() && pending_images.is_empty()) || blocked_reason.is_some(),
                     title: if let Some(reason) = blocked_reason {
                         reason.to_string()
                     } else if is_awaiting {
@@ -644,10 +712,11 @@ fn withdraw(store: UiStore, text: String) {
 pub(crate) fn submit(store: &UiStore, busy: Signal<bool>) {
     let store = *store;
     let prompt = store.prompt.read().trim().to_string();
-    if prompt.is_empty() || *busy.read() {
+    let images = store.pending_images.read().clone();
+    if (prompt.is_empty() && images.is_empty()) || *busy.read() {
         return;
     }
-    if run_command_line(store, &prompt) {
+    if images.is_empty() && run_command_line(store, &prompt) {
         return;
     }
     // A pending card must be resolved first.
@@ -655,7 +724,7 @@ pub(crate) fn submit(store: &UiStore, busy: Signal<bool>) {
         store.toast(store.t("toast.resolve_first").to_string());
         return;
     }
-    start_turn(store, prompt, busy);
+    start_turn(store, prompt, images, busy);
 }
 
 /// Runs `line` when it is a slash command (shared table and busy rule);
@@ -753,7 +822,7 @@ fn run_slash(mut store: UiStore, action: SlashAction) {
 
 /// Sends a (non-command) prompt: queue on a generating run, continue a
 /// finished one, or create a new run.
-fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
+fn start_turn(mut store: UiStore, prompt: String, images: Vec<ImageAttachment>, busy: Signal<bool>) {
     let provider_id = store.selected_provider.read().clone();
     let model = store.selected_model.read().clone();
     if provider_id.is_empty() || model.is_empty() {
@@ -773,12 +842,18 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
     let run = store.active_run.read().clone();
     let status = run.as_ref().map(|run| run.status.clone());
 
+    if status.as_deref() == Some("generating") && !images.is_empty() {
+        store.toast(store.t("toast.image_while_generating").to_string());
+        return;
+    }
     let mut busy = busy;
     busy.set(true);
-    store.prompt_history.with_mut(|history| {
-        history.retain(|old| old != &prompt);
-        history.push(prompt.clone());
-    });
+    if !prompt.is_empty() {
+        store.prompt_history.with_mut(|history| {
+            history.retain(|old| old != &prompt);
+            history.push(prompt.clone());
+        });
+    }
 
     if status.as_deref() == Some("generating") {
         // Mid-run: queue the message on the active run's inbox; it shows in
@@ -804,6 +879,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
             let state = core();
             let payload = ContinueRunPayload {
                 task: prompt.clone(),
+                images: images.clone(),
                 provider_id: Some(provider_id.clone()),
                 model: Some(model.clone()),
                 reasoning_effort: effort.clone(),
@@ -814,6 +890,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
             match locagens_core::api::runs::continue_run(&state, &run_id, &payload).await {
                 Ok(continued) => {
                     store.prompt.set(String::new());
+                    store.pending_images.set(Vec::new());
                     store.active_run_id.set(Some(run_id.clone()));
                     store.turn_diff.set(None);
                     store.spawned_agents.set(Vec::new());
@@ -840,6 +917,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
         let state = core();
         let payload = CreateRunPayload {
             task: prompt.clone(),
+            images: images.clone(),
             project_path: project_path.clone(),
             project_name: None,
             provider_id: provider_id.clone(),
@@ -857,6 +935,7 @@ fn start_turn(mut store: UiStore, prompt: String, busy: Signal<bool>) {
                 let run_id = started.run.id.clone();
                 store.reset_conversation();
                 store.prompt.set(String::new());
+                store.pending_images.set(Vec::new());
                 store.active_run_id.set(Some(run_id.clone()));
                 store.active_run.set(Some(started.run));
                 // Load the initial user message so it appears immediately.

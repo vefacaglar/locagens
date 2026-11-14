@@ -22,6 +22,8 @@ pub struct LlmMessage {
     /// Id of the persisted `RunMessage` this message came from (compaction
     /// markers point at the first message they kept).
     pub source_id: Option<String>,
+    /// Images attached to a user message.
+    pub images: Vec<crate::db::ImageAttachment>,
 }
 
 /// Token accounting for one completion call.

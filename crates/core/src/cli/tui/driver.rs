@@ -351,6 +351,7 @@ impl Driver {
             bypass_permissions: self.app.bypass,
             system_prompt: self.config.system_prompt.clone(),
             append_system_prompt: self.config.append_system_prompt.clone(),
+            images: Vec::new(),
         };
         match runs_api::continue_run(&self.state, id, &payload).await {
             Ok(continued) => Ok((id.to_string(), continued.events, continued.handle)),

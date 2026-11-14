@@ -609,6 +609,19 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
   font-size: 13.5px; line-height: 1.55;
   white-space: pre-wrap; word-break: break-word;
 }
+.msg-user .msg-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.attach-thumb {
+  position: relative; height: 64px; border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--bg-elevated);
+}
+.attach-thumb img { display: block; height: 100%; width: auto; max-width: 160px; object-fit: cover; }
+.attach-thumb .attach-remove {
+  position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--bg-elevated);
+  color: var(--text-2); cursor: pointer; font-size: 12px; line-height: 1;
+}
+.composer-images { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px 0; }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; }
 .msg-assistant .bubble { padding: 2px 0; font-size: 14px; line-height: 1.65; word-break: break-word; }
 .msg-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-3); padding: 0 2px; }

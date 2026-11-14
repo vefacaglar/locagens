@@ -224,6 +224,7 @@ carries the replacement message for an existing `id` (last write wins).
 | `content` | `string` | Message body text |
 | `reasoningContent` | `string?` | Model's chain-of-thought / reasoning text |
 | `rawResponse` | `string?` | Serialized tool-call payload / raw response |
+| `images` | `[{mime, data}]?` | Images pasted with a user message (`image/*` MIME, base64 data); omitted when empty, absent in old rollouts |
 | `createdAt` | `string` | ISO-8601 timestamp |
 
 ### `plan` — `Plan`

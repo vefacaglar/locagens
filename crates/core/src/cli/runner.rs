@@ -98,6 +98,7 @@ pub async fn run_turn(
                 bypass_permissions: opts.bypass,
                 system_prompt: opts.system_prompt.clone(),
                 append_system_prompt: opts.append_system_prompt.clone(),
+                images: Vec::new(),
             };
             match runs_api::continue_run(state, &id, &payload).await {
                 Ok(continued) => (id.clone(), continued.events, continued.handle),

@@ -347,6 +347,7 @@ fn to_llm_message(message: &RunMessage) -> llm::LlmMessage {
         role: message.role.clone(),
         content: message.content.clone(),
         source_id: Some(message.id.clone()),
+        images: message.images.clone(),
         ..Default::default()
     };
     match message.role.as_str() {
