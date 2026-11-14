@@ -20,8 +20,10 @@ const MAX_PROMPT_CHARS: usize = 2_000;
 pub const TITLE_ROLE: &str = "title";
 
 pub const TITLE_PROMPT: &str = "You name chats in a coding assistant. Reply with a short title \
-(2 to 6 words) for the conversation that starts with the user's message. Write it in the \
-language of the message. Reply with the title only: no quotes, no markdown, no trailing period.";
+(2 to 6 words) for the conversation that starts with the user's message. Write the title in \
+the same natural language as the user's message: an English message gets an English title, a \
+Turkish message a Turkish title. Never translate it. Reply with the title only: no quotes, no \
+markdown, no trailing period.";
 
 /// The placeholder title of a new run: the task's first line, cut at
 /// [`MAX_TITLE_CHARS`].

@@ -197,6 +197,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("thread.copy", "Copy message", "Mesajı kopyala"),
     ("tool.done", "done", "bitti"),
     ("tool.running", "running", "çalışıyor"),
+    ("tool.awaiting_approval", "waiting for approval", "onay bekliyor"),
     ("tool.no_output", "(no output)", "(çıktı yok)"),
     ("act.ran", "Ran {0} {1}", "{0} {1} çalıştırıldı"),
     ("act.edited", "Edited {0} {1}", "{0} {1} düzenlendi"),

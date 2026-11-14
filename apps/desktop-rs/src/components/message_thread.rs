@@ -740,7 +740,12 @@ fn ToolGroupCard(call: ToolCallView) -> Element {
                 match outcome {
                     ToolOutcome::Failed => rsx! { span { class: "badge err", "{store.t(\"tool.failed\")}" } },
                     ToolOutcome::Denied => rsx! { span { class: "badge", "{store.t(\"tool.denied\")}" } },
-                    ToolOutcome::Running => rsx! { span { class: "tool-status", "{store.t(\"tool.running\")}" } },
+                    ToolOutcome::Running => {
+                        // The pending call of a prompt has not run yet.
+                        let awaiting = store.active_run.read().as_ref().is_some_and(|run| run.status == "awaiting_permission");
+                        let key = if awaiting { "tool.awaiting_approval" } else { "tool.running" };
+                        rsx! { span { class: "tool-status", "{store.t(key)}" } }
+                    }
                     ToolOutcome::Ok => rsx! {},
                 }
             }

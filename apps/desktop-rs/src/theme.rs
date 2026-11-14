@@ -1019,6 +1019,7 @@ button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex
 .pc-reason { font-size: 12px; color: var(--text-2); }
 .pc-scroll { max-height: 40vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
 .pc-menu-wrap { position: relative; }
+.pc-menu-wrap > button { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .composer-context-menu.pc-menu { bottom: calc(100% + 6px); left: 0; width: min(340px, 80vw); }
 .pc-menu .ccm-item { white-space: normal; align-items: flex-start; }
 .pc-menu .pc-grant { display: block; font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }

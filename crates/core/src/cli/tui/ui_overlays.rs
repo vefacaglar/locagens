@@ -35,9 +35,12 @@ fn command_lines() -> Vec<Line<'static>> {
         "Commands",
         Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
     ))];
-    for (usage, description) in command_rows() {
+    let rows = command_rows();
+    // One column wide enough for the longest usage, plus a gap.
+    let column = rows.iter().map(|(usage, _)| usage.chars().count()).max().unwrap_or(0) + 2;
+    for (usage, description) in rows {
         lines.push(Line::from(vec![
-            Span::styled(format!("{usage:<18}"), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{usage:<column$}"), Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(description, dim()),
         ]));
     }
@@ -54,7 +57,7 @@ fn key_lines() -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled((*group).to_string(), Style::default().add_modifier(Modifier::BOLD))));
         for (key, what) in *keys {
             lines.push(Line::from(vec![
-                Span::styled(format!("{key:<19}"), Style::default().fg(theme::accent())),
+                Span::styled(format!("{key:<19} "), Style::default().fg(theme::accent())),
                 Span::styled((*what).to_string(), dim()),
             ]));
         }

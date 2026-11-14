@@ -833,6 +833,81 @@ mod tests {
         assert!(screen.contains("show or switch models"));
     }
 
+    /// Renders `app` at a normal and a small size; prints both frames (see
+    /// them with `--nocapture`) and returns the normal one.
+    fn render_both(app: &mut App, name: &str) -> String {
+        let normal = render(app, 90, 26);
+        let small = render(app, 50, 14);
+        println!("== {name} 90x26
+{normal}
+== {name} 50x14
+{small}");
+        normal
+    }
+
+    #[test]
+    fn smoke_renders_the_model_picker() {
+        use crate::cli::tui::popup::PopupItem;
+        let mut app = app();
+        let item = |value: &str| PopupItem { value: value.into(), label: value.into(), detail: String::new() };
+        let all = vec![item("acme/turbo-1"), item("acme/turbo-2"), item("other/long-model-name-preview")];
+        app.overlay = Some(Overlay::ModelPicker(crate::cli::tui::overlay::ModelPicker::new(all, Some("acme/turbo-1".into()))));
+        let screen = render_both(&mut app, "model picker");
+        assert!(screen.contains("acme/turbo-2"), "{screen}");
+        assert!(screen.contains("other/long-model-name-preview"), "{screen}");
+    }
+
+    #[test]
+    fn smoke_renders_the_help_overlay() {
+        let mut app = app();
+        app.overlay = Some(Overlay::Help(crate::cli::tui::help::HelpView::default()));
+        let screen = render_both(&mut app, "help");
+        assert!(screen.contains("Commands"), "{screen}");
+        // Long usages keep a gap before their description.
+        assert!(screen.contains("/model [provider/id]  show or switch models"), "{screen}");
+    }
+
+    #[test]
+    fn smoke_renders_the_sessions_picker() {
+        use crate::cli::tui::sessions::SessionPicker;
+        let mut app = app();
+        let run = |id: &str, title: &str| crate::db::Run {
+            id: id.into(),
+            title: title.into(),
+            task: title.into(),
+            model: "turbo-1".into(),
+            status: "done".into(),
+            updated_at: "2026-11-14T10:00:00Z".into(),
+            ..Default::default()
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-14T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let runs = vec![run("r1", "Fix the parser"), run("r2", "Add a login flow for the very long provider name")];
+        app.overlay = Some(Overlay::Sessions(SessionPicker::new(&runs, Some("r1".into()), now)));
+        let screen = render_both(&mut app, "sessions");
+        assert!(screen.contains("Fix the parser"), "{screen}");
+    }
+
+    #[test]
+    fn smoke_renders_the_login_overlay() {
+        use crate::cli::tui::login::{LoginFlow, LoginRow};
+        let mut app = app();
+        let row = |id: &str, name: &str, method: &str, status: &str| LoginRow {
+            id: id.into(),
+            name: name.into(),
+            method: method.into(),
+            status: status.into(),
+            has_oauth: method.starts_with("Sign in"),
+            keyless: false,
+        };
+        let rows = vec![
+            row("openai", "OpenAI", "Sign in with ChatGPT", ""),
+            row("opencode-go", "OpenCode Go", "API key", "✔ connected"),
+        ];
+        app.overlay = Some(Overlay::Login(LoginFlow::new(rows)));
+        let screen = render_both(&mut app, "login");
+        assert!(screen.contains("OpenCode Go"), "{screen}");
+    }
+
     fn ratatui_key(ch: char) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char(ch),
