@@ -13,7 +13,7 @@ fn key_preview_shows_only_four_characters_of_long_keys() {
 async fn credential_command_is_killed_after_the_timeout() {
     let command = if cfg!(windows) { "powershell -NoProfile -Command Start-Sleep 30" } else { "sleep 30" };
     let started = std::time::Instant::now();
-    let err = run_credential_command(command, std::time::Duration::from_millis(300))
+    let err = run_credential_command(command, &std::env::temp_dir(), std::time::Duration::from_millis(300))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("timed out"), "{err}");
@@ -42,7 +42,7 @@ fn debug_output_of_credential_types_hides_keys() {
 
 #[tokio::test]
 async fn credential_command_keeps_embedded_quotes() {
-    let out = run_credential_command("echo \"quoted value\"", std::time::Duration::from_secs(10))
+    let out = run_credential_command("echo \"quoted value\"", &std::env::temp_dir(), std::time::Duration::from_secs(10))
         .await
         .unwrap();
     assert!(out.contains("quoted value"), "{out}");
@@ -60,4 +60,25 @@ fn device_id_and_auth_writes_leave_no_temp_files() {
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
     assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+}
+
+/// FR-035: a `!command` helper runs in the Locagens home (not the project
+/// folder the process was started in), and its cached output expires.
+#[tokio::test]
+async fn credential_helper_runs_in_the_locagens_home_and_its_cache_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("helper-home-check");
+    std::fs::create_dir_all(&agent).unwrap();
+    let manager = PiProviderManager::with_dirs(agent.clone(), dir.path().join("support"));
+    let print_cwd = if cfg!(windows) { "!cd" } else { "!pwd" };
+    std::fs::write(agent.join("auth.json"), json!({ "acme": { "type": "api_key", "key": print_cwd } }).to_string()).unwrap();
+    let cwd = manager.resolve_api_key("acme", None).await.unwrap();
+    assert!(cwd.ends_with("helper-home-check"), "{cwd}");
+
+    let command = &print_cwd[1..];
+    let Some(old) = std::time::Instant::now().checked_sub(super::auth_store::KEY_COMMAND_CACHE_TTL) else { return };
+    manager.command_cache.lock().unwrap().insert(command.to_string(), ("fake-stale-token".to_string(), old));
+    assert_eq!(manager.resolve_api_key("acme", None).await.as_deref(), Some(cwd.as_str()), "expired entry runs again");
+    manager.command_cache.lock().unwrap().insert(command.to_string(), ("fake-fresh-token".to_string(), std::time::Instant::now()));
+    assert_eq!(manager.resolve_api_key("acme", None).await.as_deref(), Some("fake-fresh-token"));
 }

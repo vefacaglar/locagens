@@ -77,9 +77,16 @@ fn restore_terminal() {
 
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
+    let ui_thread = std::thread::current().id();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        previous(info);
+        // A panic in a background task must not tear the screen down under
+        // the still-running UI: log it, restore only for the UI thread.
+        if std::thread::current().id() == ui_thread {
+            restore_terminal();
+            previous(info);
+        } else {
+            tracing::error!("panic in a background thread: {info}");
+        }
     }));
 }
 
@@ -117,6 +124,15 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
         config.bypass,
         config.initial_session.clone(),
     );
+    // Refresh stale provider model lists in the background; the model
+    // choices reload when a new list arrives.
+    let (models_tx, mut models_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let refresh_state = state.clone();
+    tokio::spawn(async move {
+        if crate::api::providers::refresh_model_lists(&refresh_state).await > 0 {
+            let _ = models_tx.send(()).await;
+        }
+    });
     let mut driver = Driver::new(
         state,
         app,
@@ -149,6 +165,7 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
             },
             Some(received) = driver.recv_run() => driver.on_run_recv(received).await,
             Some((query, files)) = files_rx.recv() => driver.app.set_file_matches(&query, &files),
+            Some(()) = models_rx.recv() => driver.load_model_choices().await,
             _ = ticker.tick() => {
                 driver.app.tick();
                 if driver.app.dirty {
@@ -194,7 +211,7 @@ fn normalize_key(mut key: KeyEvent, last_char_at: &mut Option<Instant>) -> KeyEv
     if cfg!(windows) && in_burst && key.code == KeyCode::Enter && key.modifiers.is_empty() {
         key.modifiers = KeyModifiers::SHIFT;
         *last_char_at = Some(now);
-    } else if matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+    } else if composer::printable_char(&key).is_some() {
         *last_char_at = Some(now);
     } else {
         *last_char_at = None;

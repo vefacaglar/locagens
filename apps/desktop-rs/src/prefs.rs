@@ -118,6 +118,69 @@ pub fn save_to(path: &Path, appearance: &Appearance) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
+/// Default and allowed widths (px) of the resizable side columns.
+pub const SIDEBAR_DEFAULT: i32 = 264;
+pub const SIDEBAR_RANGE: (i32, i32) = (200, 480);
+pub const PANEL_DEFAULT: i32 = 380;
+pub const PANEL_RANGE: (i32, i32) = (260, 640);
+
+/// Column widths, stored under the `"layout"` key of `settings.json`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    pub sidebar_width: i32,
+    pub right_panel_width: i32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self { sidebar_width: SIDEBAR_DEFAULT, right_panel_width: PANEL_DEFAULT }
+    }
+}
+
+impl Layout {
+    /// The same layout with both widths clamped to their ranges.
+    pub fn clamped(self) -> Self {
+        Self {
+            sidebar_width: self.sidebar_width.clamp(SIDEBAR_RANGE.0, SIDEBAR_RANGE.1),
+            right_panel_width: self.right_panel_width.clamp(PANEL_RANGE.0, PANEL_RANGE.1),
+        }
+    }
+}
+
+pub fn load_layout_from(path: &Path) -> Layout {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|root| root.get("layout").cloned())
+        .and_then(|value| serde_json::from_value::<Layout>(value).ok())
+        .unwrap_or_default()
+        .clamped()
+}
+
+/// Writes the layout object, keeping every other key in the file.
+pub fn save_layout_to(path: &Path, layout: &Layout) -> std::io::Result<()> {
+    let mut root = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    root["layout"] = serde_json::to_value(layout.clamped()).map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(path, text)
+}
+
+pub fn load_layout() -> Layout {
+    load_layout_from(&locagens_core::paths::default_settings_path())
+}
+
+pub fn save_layout(layout: &Layout) {
+    let _ = save_layout_to(&locagens_core::paths::default_settings_path(), layout);
+}
+
 /// Loads from the app's settings file.
 pub fn load() -> Appearance {
     load_from(&locagens_core::paths::default_settings_path())
@@ -138,6 +201,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("settings.json")
+    }
+
+    #[test]
+    fn layout_round_trips_clamps_and_keeps_other_keys() {
+        let path = temp_file("layout");
+        assert_eq!(load_layout_from(&path), Layout::default());
+        std::fs::write(&path, r#"{"appearance": {"language": "tr"}}"#).unwrap();
+        save_layout_to(&path, &Layout { sidebar_width: 300, right_panel_width: 9999 }).unwrap();
+        assert_eq!(load_layout_from(&path), Layout { sidebar_width: 300, right_panel_width: 640 });
+        assert_eq!(load_from(&path).language, Lang::Tr);
     }
 
     #[test]

@@ -277,11 +277,12 @@ impl PiProviderManager {
             .cloned()
     }
 
-    /// `[model_providers.*]` entries from Codex `config.toml` fallback
-    /// directories, converted to `models.json`-shaped entries.
+    /// `[model_providers.*]` entries from `config.toml` — the Locagens home
+    /// first, then the Codex/`pi` fallback directories (the first file that
+    /// defines a provider wins) — converted to `models.json`-shaped entries.
     fn codex_config_providers(&self) -> Map<String, Value> {
         let mut result = Map::new();
-        for directory in &self.fallback_dirs {
+        for directory in std::iter::once(&self.primary_dir).chain(self.fallback_dirs.iter()) {
             let Ok(raw) = std::fs::read_to_string(directory.join("config.toml")) else {
                 continue;
             };
@@ -323,7 +324,7 @@ impl PiProviderManager {
                     "openai-compatible"
                 };
                 converted.insert("api".into(), json!(api));
-                result.insert(name.clone(), Value::Object(converted));
+                result.entry(name.clone()).or_insert(Value::Object(converted));
             }
         }
         result
@@ -540,7 +541,7 @@ impl PiProviderManager {
     /// Provider ids to expose: everything the user configured, i.e. any
     /// `auth.json` entry, `models.json` / Codex `config.toml` provider, and
     /// built-ins whose own env var (or configured `envKey`) is set.
-    fn provider_ids(&self) -> Vec<String> {
+    pub(super) fn provider_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.read_auth_map().keys().cloned().collect();
         if let Value::Object(providers) = self.read_models_json().get("providers").cloned().unwrap_or(Value::Null) {
             ids.extend(providers.keys().cloned());
@@ -666,6 +667,8 @@ impl PiProviderManager {
         }
 
         let entry = self.models_json_provider(provider_id);
+        let declared: std::collections::HashSet<String> =
+            Self::models_json_models(entry.as_ref()).into_iter().map(|model| model.id).collect();
         for model in Self::models_json_models(entry.as_ref()) {
             if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
                 existing.name = model.name;
@@ -687,6 +690,8 @@ impl PiProviderManager {
             }
         }
 
+        // A fetched `/models` list decides what the provider still offers.
+        self.apply_live_list(provider_id, &mut models, &declared);
         models
     }
 
@@ -869,23 +874,10 @@ impl PiProviderManager {
                     t.to_string()
                 }
             });
-        let mut models_doc = self.read_models_json();
-        if !models_doc.is_object() {
-            models_doc = json!({});
-        }
         let needs_provider_entry = input.base_url.is_some() || input.models.is_some() || api.is_some();
         if needs_provider_entry {
-            let object = models_doc.as_object_mut().unwrap();
-            let providers = object
-                .entry("providers")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .unwrap();
-            let entry = providers
-                .entry(provider_id.to_string())
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .unwrap();
+            let mut models_doc = read_json_for_update(&self.models_path())?;
+            let entry = provider_entry(&mut models_doc, provider_id, "models.json")?;
             match input.base_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
                 Some(url) => {
                     entry.insert("baseUrl".into(), json!(url));
@@ -930,21 +922,8 @@ impl PiProviderManager {
 
         // 3. displayName / modelSettings → locagens-providers-meta.json.
         if input.display_name.is_some() || input.model_settings.is_some() {
-            let mut meta = Self::read_json(&self.meta_path());
-            if !meta.is_object() {
-                meta = json!({});
-            }
-            let object = meta.as_object_mut().unwrap();
-            let providers = object
-                .entry("providers")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .unwrap();
-            let entry = providers
-                .entry(provider_id.to_string())
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .unwrap();
+            let mut meta = read_json_for_update(&self.meta_path())?;
+            let entry = provider_entry(&mut meta, provider_id, "the provider metadata file")?;
             if let Some(name) = input.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 entry.insert("displayName".into(), json!(name));
             }
@@ -957,24 +936,29 @@ impl PiProviderManager {
         Ok(())
     }
 
-    /// Removes providers that previously existed in the editable config but
-    /// are missing from the submitted map: their `models.json` entry, UI
-    /// metadata and `auth.json` credential are all deleted.
+    /// Removes custom providers (a `models.json` or metadata entry) missing
+    /// from the submitted map: that entry, its UI metadata and its API-key
+    /// credential. Sign-ins (OAuth), env-var keys and Codex/`pi` providers
+    /// are never removed this way — they are not part of the editable map.
     fn delete_missing_providers<'a, I>(&self, kept: I) -> Result<()>
     where
         I: Iterator<Item = &'a String>,
     {
         let kept: Vec<&str> = kept.map(|id| id.as_str()).collect();
-        let removed: Vec<String> = self
-            .provider_ids()
-            .into_iter()
-            .filter(|id| !kept.contains(&id.as_str()))
-            .collect();
+        let mut models_doc = read_json_for_update(&self.models_path())?;
+        let mut meta = read_json_for_update(&self.meta_path())?;
+        let mut configured: Vec<String> = Vec::new();
+        for doc in [&models_doc, &meta] {
+            if let Some(providers) = doc.get("providers").and_then(Value::as_object) {
+                configured.extend(providers.keys().cloned());
+            }
+        }
+        configured.sort();
+        configured.dedup();
+        let removed: Vec<String> = configured.into_iter().filter(|id| !kept.contains(&id.as_str())).collect();
         if removed.is_empty() {
             return Ok(());
         }
-        let mut models_doc = self.read_models_json();
-        let mut meta = Self::read_json(&self.meta_path());
         for id in &removed {
             if let Some(providers) = models_doc.get_mut("providers").and_then(Value::as_object_mut) {
                 providers.remove(id);
@@ -987,9 +971,40 @@ impl PiProviderManager {
         Self::write_json(&self.meta_path(), &meta)?;
         self.update_primary_auth(|auth| {
             for id in &removed {
-                auth.remove(id);
+                let is_api_key = auth.get(id).and_then(|entry| entry.get("type")).and_then(Value::as_str) == Some("api_key");
+                if is_api_key {
+                    auth.remove(id);
+                }
             }
             Ok(())
         })
     }
+}
+
+/// A JSON file about to be rewritten: `{}` when it does not exist, an error
+/// when it exists but is not a JSON object (a hand-edited file is never
+/// replaced by an empty one).
+fn read_json_for_update(path: &Path) -> Result<Value> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        Err(err) => anyhow::bail!("Cannot read {}: {err}", path.display()),
+    };
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(value) if value.is_object() => Ok(value),
+        Ok(_) => anyhow::bail!("{} is not a JSON object; fix it by hand before saving.", path.display()),
+        Err(err) => anyhow::bail!("{} is not valid JSON ({err}); fix it by hand before saving.", path.display()),
+    }
+}
+
+/// `doc.providers[provider_id]` as a mutable object, created when missing;
+/// an error (not a panic) when the file has another shape there.
+fn provider_entry<'a>(doc: &'a mut Value, provider_id: &str, file: &str) -> Result<&'a mut Map<String, Value>> {
+    let shape_error = || anyhow::anyhow!("Unexpected shape of `providers` in {file}; fix it by hand before saving.");
+    let root = doc.as_object_mut().ok_or_else(shape_error)?;
+    let providers = root.entry("providers").or_insert_with(|| json!({})).as_object_mut().ok_or_else(shape_error)?;
+    providers.entry(provider_id.to_string()).or_insert_with(|| json!({})).as_object_mut().ok_or_else(shape_error)
 }

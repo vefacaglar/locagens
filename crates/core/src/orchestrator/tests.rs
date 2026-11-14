@@ -97,9 +97,20 @@ fn standing_grants_match_scope_tool_command_and_domains() {
         status: "allow_run".into(),
         ..rule.clone()
     };
-    assert!(standing_grant_matches(&global, "fetch_url", "", &[], "C:/anywhere"));
+    // A fetch_url grant is bound to the host it was given for (FR-032).
+    let global = PermissionRule { command: "example.com".into(), ..global };
+    assert!(standing_grant_matches(&global, "fetch_url", "example.com", &[], "C:/anywhere"));
+    assert!(!standing_grant_matches(&global, "fetch_url", "evil.com", &[], "C:/anywhere"));
+    let unkeyed = PermissionRule { command: String::new(), ..global.clone() };
+    assert!(!standing_grant_matches(&unkeyed, "fetch_url", "", &[], "C:/anywhere"));
+    assert_eq!(super::gating::grant_key("fetch_url", &json!({ "url": "https://Example.com/a/b?x=1" })), "example.com");
     let denied = PermissionRule { status: "deny".into(), ..global };
-    assert!(!standing_grant_matches(&denied, "fetch_url", "", &[], "C:/anywhere"));
+    assert!(!standing_grant_matches(&denied, "fetch_url", "example.com", &[], "C:/anywhere"));
+
+    // A command grant saved without domains does not cover a call that adds hosts.
+    let no_domains = PermissionRule { network_domains: vec![], ..rule };
+    assert!(standing_grant_matches(&no_domains, "run_command", "npm test", &[], "C:/ws"));
+    assert!(!standing_grant_matches(&no_domains, "run_command", "npm test", &["evil.com".to_string()], "C:/ws"));
 }
 
 #[test]

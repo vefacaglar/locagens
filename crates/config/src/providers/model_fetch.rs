@@ -19,6 +19,23 @@ impl PiProviderManager {
     /// directly; when present, fetched ids are merged with the provider's
     /// cached `models-store.json` models.
     pub async fn fetch_models(&self, input: &FetchModelsInput) -> Result<Vec<String>> {
+        let mut models: Vec<String> = input
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| self.models_store_models(id).into_iter().map(|model| model.id).collect())
+            .unwrap_or_default();
+        for id in self.fetch_remote_model_ids(input).await? {
+            if !models.contains(&id) {
+                models.push(id);
+            }
+        }
+        Ok(models)
+    }
+
+    /// The model ids the provider's list endpoint reports (nothing cached).
+    pub(super) async fn fetch_remote_model_ids(&self, input: &FetchModelsInput) -> Result<Vec<String>> {
         let provider_id = input
             .provider_id
             .as_deref()
@@ -63,15 +80,7 @@ impl PiProviderManager {
             },
         };
 
-        let mut models: Vec<String> = provider_id
-            .as_ref()
-            .map(|id| {
-                self.models_store_models(id)
-                    .into_iter()
-                    .map(|model| model.id)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut models: Vec<String> = Vec::new();
 
         let request = if anthropic {
             let url = if base_url.ends_with("/v1") {

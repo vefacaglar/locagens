@@ -46,11 +46,14 @@ const DARK_TOKENS: &str = "
   --text: #ececef;
   --text-2: #a4a4ad;
   --text-3: #6f6f79;
-  --accent: #6d78e8;
-  --accent-hover: #7b86ef;
+  --accent: #3f7fe3;
+  --accent-hover: #6aa0f3;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(109, 120, 232, 0.16);
-  --accent-ring: rgba(125, 136, 240, 0.55);
+  --accent-soft: rgba(63, 127, 227, 0.16);
+  --accent-ring: rgba(96, 160, 245, 0.55);
+  --send-bg: #ececef;
+  --send-fg: #18181b;
+  --send-hover: #ffffff;
   --ok: #62a884;
   --warn: #c7a35e;
   --err: #d2766f;
@@ -76,27 +79,30 @@ const DARK_TOKENS: &str = "
 
 /// Light palette: airy paper surfaces with the same structure.
 const LIGHT_TOKENS: &str = "
-  --bg-app: #fafafa;
-  --bg-chat: #ffffff;
-  --bg-sidebar: #f3f3f5;
-  --bg-panel: #f7f7f8;
-  --bg-elevated: #ffffff;
-  --bg-bubble: #ececef;
-  --bg-popover: #ffffff;
+  --bg-app: #f1f1ee;
+  --bg-chat: #f6f6f4;
+  --bg-sidebar: #e9e9e6;
+  --bg-panel: #f0f0ed;
+  --bg-elevated: #fafaf8;
+  --bg-bubble: #e4e4e0;
+  --bg-popover: #fafaf8;
   --bg-input: rgba(0, 0, 0, 0.035);
   --hover: rgba(0, 0, 0, 0.045);
   --active: rgba(0, 0, 0, 0.075);
-  --border: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.15);
+  --border: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.13);
   --border-focus: rgba(0, 0, 0, 0.3);
-  --text: #18181b;
-  --text-2: #52525b;
-  --text-3: #8b8b95;
-  --accent: #4f5bd5;
-  --accent-hover: #4350c4;
+  --text: #26262a;
+  --text-2: #55555c;
+  --text-3: #6e6e76;
+  --accent: #2563c9;
+  --accent-hover: #1d54b0;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(79, 91, 213, 0.11);
-  --accent-ring: rgba(79, 91, 213, 0.5);
+  --accent-soft: rgba(37, 99, 201, 0.11);
+  --accent-ring: rgba(37, 99, 201, 0.5);
+  --send-bg: #26262a;
+  --send-fg: #f6f6f4;
+  --send-hover: #3a3a40;
   --ok: #2f7d5b;
   --warn: #9a6a12;
   --err: #c0392b;
@@ -107,7 +113,7 @@ const LIGHT_TOKENS: &str = "
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.14), 0 0 0 1px rgba(0, 0, 0, 0.06);
   --win-close: #c42b1c;
-  --code-bg: #f6f6f8;
+  --code-bg: #ecece8;
   --code-border: rgba(0, 0, 0, 0.09);
   --chip-bg: rgba(0, 0, 0, 0.055);
   --rule: rgba(0, 0, 0, 0.09);
@@ -117,7 +123,7 @@ const LIGHT_TOKENS: &str = "
   --syn-type: #1f7a70;
   --syn-string: #3f7a3a;
   --syn-number: #7b4fb3;
-  --syn-comment: #8b8b95;
+  --syn-comment: #6e6e76;
 ";
 
 /// Builds the stylesheet for an explicit platform (`"windows"`, `"macos"`,
@@ -317,18 +323,21 @@ input, textarea { user-select: text; -webkit-user-select: text; cursor: text; }
   overflow: hidden;
 }
 .sidebar {
-  width: 264px; min-width: 264px; height: 100%;
+  width: var(--sidebar-w, 264px); min-width: var(--sidebar-w, 264px); height: 100%;
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
 }
+.resize-anchor { position: relative; flex: none; width: 0; z-index: 20; }
+.resize-handle { position: absolute; top: 0; bottom: 0; left: -3px; width: 6px; cursor: col-resize; background: transparent; transition: background 0.12s ease; }
+.resize-handle:hover, .resize-handle:focus-visible, .resize-handle:active { background: var(--accent-ring); outline: none; }
 .main-column {
   flex: 1 1 auto; min-width: 0; height: 100%;
   display: flex; flex-direction: column;
   background: var(--bg-chat);
 }
 .right-panel {
-  width: 380px; min-width: 380px; height: 100%;
+  width: var(--panel-w, 380px); min-width: var(--panel-w, 380px); height: 100%;
   background: var(--bg-panel);
   border-left: 1px solid var(--border);
   display: flex; flex-direction: column;
@@ -557,10 +566,6 @@ label { color: var(--text-2); font-size: 12px; }
 .crumb span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .crumb .icon { width: 14px; height: 14px; }
 .crumb .crumb-sep { color: var(--text-3); opacity: 0.6; margin-left: 4px; }
-.usage-chip {
-  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
-  background: var(--hover); border-radius: 4px; padding: 2px 7px; white-space: nowrap; flex: none;
-}
 .chat-header-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .chat-header-actions button { flex: none; white-space: nowrap; }
 button.icon-btn.on { color: var(--text); background: var(--active); }
@@ -581,7 +586,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 #chat-scroll > * { flex-shrink: 0; max-width: 800px; width: 100%; margin-left: auto; margin-right: auto; }
 /* Grows/shrinks from JS (window.lcgnChat) to let a sent message sit at the top. */
 #chat-scroll > .chat-tail-spacer { height: 0; margin-top: -20px; pointer-events: none; }
-.msg-user { display: flex; justify-content: flex-end; }
+.msg-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .msg-user .bubble {
   max-width: 78%;
   background: var(--bg-elevated);
@@ -657,7 +662,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 .code-block .s-punctuation { color: var(--text-2); }
 .code-block .s-comment .s-punctuation { color: var(--syn-comment); }
 .msg-footer { display: flex; align-items: center; gap: 6px; padding: 0 2px; opacity: 0; transition: opacity 0.12s ease; }
-.msg-assistant:hover .msg-footer, .msg-footer:focus-within { opacity: 1; }
+.msg-assistant:hover .msg-footer, .msg-user:hover .msg-footer,.msg-footer:focus-within { opacity: 1; }
 .msg-footer .msg-time { font-size: 11px; color: var(--text-3); }
 .msg-footer button.icon-btn { width: 24px; min-width: 24px; height: 24px; color: var(--text-3); }
 .msg-footer button.icon-btn:hover { color: var(--text); }
@@ -823,10 +828,11 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 }
 .composer-send-btn {
   width: 30px; height: 30px; min-width: 30px; padding: 0;
-  border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+  border-radius: 50%; background: var(--send-bg); color: var(--send-fg);
   display: inline-flex; align-items: center; justify-content: center; flex: none;
 }
-.composer-send-btn:hover:not(:disabled) { background: var(--accent-hover); color: var(--accent-fg); }
+.composer-send-btn:hover:not(:disabled) { background: var(--send-hover); color: var(--send-fg); }
+.composer-usage { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); white-space: nowrap; flex: none; }
 .composer-send-btn:disabled { background: var(--active); color: var(--text-3); opacity: 1; }
 .composer-spacer { flex: 1; }
 .composer-hint { font-size: 11px; color: var(--text-3); }
@@ -960,6 +966,14 @@ table.data-table td.empty-cell { text-align: center; color: var(--text-3); paddi
 .settings-row.selected { background: var(--hover); border-color: var(--border-strong); }
 .settings-row > button { flex: none; white-space: nowrap; }
 .settings-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.settings-hint { color: var(--text-3); font-size: 12px; padding: 0 8px 8px; }
+.settings-row.provider-head { width: 100%; text-align: left; background: transparent; border-color: transparent; color: var(--text); }
+.provider-chevron { flex: none; color: var(--text-3); width: 12px; }
+.provider-models { margin: 0 0 6px 18px; border-left: 1px solid var(--border); }
+.switch { flex: none; width: 34px; height: 20px; padding: 0; border-radius: 10px; position: relative; background: var(--active); border: 1px solid var(--border-strong); }
+.switch.on { background: var(--accent); border-color: var(--accent); }
+.switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-2); transition: transform 0.12s ease; }
+.switch.on .switch-knob { transform: translateX(14px); background: var(--accent-fg); }
 .settings-empty { color: var(--text-3); text-align: center; padding: 30px 0; }
 
 /* ---------------- toast ---------------- */
@@ -1032,8 +1046,8 @@ mod tests {
     #[test]
     fn one_restrained_accent_per_mode() {
         for platform in PLATFORMS {
-            assert!(build_stylesheet_for(platform, true).contains("--accent: #6d78e8;"));
-            assert!(build_stylesheet_for(platform, false).contains("--accent: #4f5bd5;"));
+            assert!(build_stylesheet_for(platform, true).contains("--accent: #3f7fe3;"));
+            assert!(build_stylesheet_for(platform, false).contains("--accent: #2563c9;"));
         }
     }
 
@@ -1042,7 +1056,7 @@ mod tests {
         let dark = build_stylesheet_for("windows", true);
         assert!(dark.contains("--bg-app: #0e0e10;"));
         assert!(dark.contains("--border: rgba(255, 255, 255, 0.06);"));
-        assert!(build_stylesheet_for("windows", false).contains("--bg-chat: #ffffff;"));
+        assert!(build_stylesheet_for("windows", false).contains("--bg-chat: #f6f6f4;"));
     }
 
     #[test]
@@ -1138,7 +1152,7 @@ mod tests {
     fn system_theme_follows_prefers_color_scheme() {
         let system = with(|a| a.theme = ThemeChoice::System);
         assert!(system.contains("@media (prefers-color-scheme: light)"));
-        assert!(system.contains("--bg-chat: #ffffff;") && system.contains("--bg-app: #0e0e10;"));
+        assert!(system.contains("--bg-chat: #f6f6f4;") && system.contains("--bg-app: #0e0e10;"));
         for theme in [ThemeChoice::Dark, ThemeChoice::Light] {
             assert!(!with(|a| a.theme = theme).contains("prefers-color-scheme"));
         }

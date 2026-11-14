@@ -7,6 +7,8 @@
 //!   (`{ "type": "api_key", "key": "..." }`, `!command`, `$ENV_VAR` or OAuth).
 //! - `models.json` — custom provider configs & model overrides.
 //! - `models-store.json` — cached dynamic model catalog.
+//! - `models-live.json` — each provider's last `GET /models` list (wins over
+//!   the catalog once fetched; see `model_refresh`).
 //!
 //! Read-only credential fallbacks: `~/.codex` (`$CODEX_HOME`: `auth.json`
 //! `OPENAI_API_KEY` and `config.toml` `[model_providers.*]`), the legacy
@@ -32,6 +34,9 @@ use std::sync::{Arc, Mutex};
 mod auth_store;
 mod model_catalog;
 mod model_fetch;
+mod model_refresh;
+
+pub use model_refresh::MODEL_LIST_MAX_AGE;
 
 pub use model_catalog::model_reasoning_efforts;
 
@@ -43,23 +48,6 @@ mod tests;
 
 /// Sentinel sent by the UI so existing API keys are never overwritten.
 pub const PRESERVE_API_KEY: &str = "__LOCAGENS_PRESERVE_API_KEY__";
-
-/// Environment-variable fallback chain for API keys.
-const ENV_FALLBACKS: [&str; 13] = [
-    "OPENCODE_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "OPENROUTER_API_KEY",
-    "GROQ_API_KEY",
-    "XAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "MINIMAX_API_KEY",
-    "MOONSHOT_API_KEY",
-    "KIMI_API_KEY",
-    "ZAI_API_KEY",
-];
 
 /// One credential entry of `~/.pi/agent/auth.json`.
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -279,11 +267,13 @@ pub struct PiProviderManager {
     opencode_dir: Option<PathBuf>,
     app_support_dir: PathBuf,
     http: reqwest::Client,
-    /// Cache of `!command` stdout results, keyed by command string.
-    command_cache: Mutex<HashMap<String, String>>,
+    /// Cache of `!command` stdout results and when they ran, keyed by command.
+    command_cache: Mutex<HashMap<String, (String, std::time::Instant)>>,
     oauth: OAuthClients,
     /// Loopback receivers of started authorization-URL logins, by provider.
     pending_logins: Mutex<HashMap<String, Arc<CallbackServer>>>,
+    /// Serializes OAuth token refreshes per provider within this process.
+    refresh_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl PiProviderManager {
@@ -304,8 +294,11 @@ impl PiProviderManager {
     /// Primary directory plus read-only fallback chain
     /// (`~/.locagens` → `~/.codex` → `~/.pi/agent` in production).
     pub fn with_chain(primary_dir: PathBuf, app_support_dir: PathBuf, fallback_dirs: Vec<PathBuf>) -> Self {
+        // No redirects: reqwest keeps `x-api-key` (it only strips
+        // `Authorization`) when a provider redirects to another origin.
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -317,6 +310,7 @@ impl PiProviderManager {
             command_cache: Mutex::new(HashMap::new()),
             oauth: OAuthClients::default(),
             pending_logins: Mutex::new(HashMap::new()),
+            refresh_gates: Mutex::new(HashMap::new()),
         }
     }
 

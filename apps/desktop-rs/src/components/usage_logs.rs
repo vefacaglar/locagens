@@ -13,13 +13,24 @@ pub fn UsageLogsPage() -> Element {
     let mut search = use_signal(String::new);
     let mut offset = use_signal(|| 0i64);
     const PAGE_SIZE: i64 = 50;
+    // Epoch when the page opened: that first load is immediate, later ones debounced.
+    let opened_at = use_hook(|| *store.usage_epoch.peek());
 
     use_effect(move || {
-        // Re-query whenever the search text or page offset changes.
+        // Re-query when the search text or page changes, and (debounced)
+        // whenever new usage lands. The page only exists while visible, so
+        // this costs nothing on other pages.
         let search_value = search.read().clone();
         let offset_value = *offset.read();
+        let epoch = *store.usage_epoch.read();
         let mut data = data;
         spawn(async move {
+            if epoch != opened_at {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if *store.usage_epoch.peek() != epoch {
+                    return; // newer usage arrived; its own effect run reloads
+                }
+            }
             let state = core();
             let query = UsageLogQuery {
                 limit: Some(PAGE_SIZE),
@@ -57,16 +68,6 @@ pub fn UsageLogsPage() -> Element {
                     search.set(event.value());
                     offset.set(0);
                 },
-            }
-            button {
-                class: "subtle icon-btn",
-                // Clicks on the button must not start a window drag.
-                onmousedown: move |e| e.stop_propagation(),
-                onclick: move |_| {
-                    let mut store = store;
-                    store.page.set(crate::state_ui::AppPage::Chat);
-                },
-                {icon_arrow_left()} "{store.t(\"common.back_to_chat\")}"
             }
         }
         div {

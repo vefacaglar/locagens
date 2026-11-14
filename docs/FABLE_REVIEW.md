@@ -111,6 +111,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-006 · high · the turn snapshot deadlocks on large repositories, so the run never ends (reproduced)
 
+**Status:** fixed. `git_bytes` writes stdin from a separate task while reading stdout; regression test with a ~3 MB path list under a timeout.
+
 - **Location:** `core/services/git.rs:58-62` (`git_bytes` writes all of stdin,
   then reads stdout), `core/services/snapshots.rs:217-232` (`hash_files`),
   called from `core/orchestrator/drive.rs:461-466` and `run_handle.rs:31-36`.
@@ -130,6 +132,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   list through a temp file), add a timeout, and set `kill_on_drop(true)`.
 
 ### FR-007 · medium · the snapshot hashes the whole worktree twice per turn
+
+**Status:** fixed. Snapshots keep a `hashcache.json` (size + mtime → blob) and only re-hash changed files.
 
 - **Location:** `core/services/snapshots.rs:145-197`, `:273-290`.
 - **Problem:** every Build or Full Access turn runs `hash-object -w` over every
@@ -157,6 +161,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   restoring ones the tools never touched.
 
 ### FR-009 · low · undo and snapshot gaps
+
+**Status:** partly fixed. `snapshots.json` updates are serialized in-process, symlinks are excluded, and undo refuses while the run is live. A project in a subfolder of a repo still gets no snapshot.
 
 - **Location:** `core/services/snapshots.rs:149`, `:208`, `:193-195`,
   `core/api/projects.rs:570-578`.
@@ -320,6 +326,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-023 · medium · `read_file` cannot reach anything past the first 120 KB
 
+**Status:** fixed. `read_file` takes `offset`/`limit`, with a 32 MiB size guard and a continuation hint.
+
 - **Location:** `core/orchestrator/tools.rs:498-522`.
 - **Problem:** the file is cut at 120 000 bytes before `start_line` /
   `end_line` are applied, and the result is cut again at 24 000 characters.
@@ -330,6 +338,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-024 · medium · `edit_file` does not check that `old_text` is unique
 
+**Status:** fixed. A non-unique `old_text` is refused with the match count; `replace_all` replaces every match.
+
 - **Location:** `core/orchestrator/tools.rs:543-549`.
 - **Problem:** the description says "must match exactly and be unique". The
   code replaces the first match, so an ambiguous snippet edits the wrong place
@@ -338,6 +348,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-025 · low · `write_file` and friends accept missing required arguments
 
+**Status:** fixed. A missing `content` / `new_text` is rejected.
+
 - **Location:** `core/orchestrator/tools.rs:528` (`unwrap_or("")`).
 - **Problem:** a call with a `path` but no `content` truncates the file to
   zero bytes. Together with FR-012 (arguments cut at the token limit) this can
@@ -345,6 +357,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** reject calls that lack a required argument.
 
 ### FR-026 · low · `search_files` details
+
+**Status:** fixed except `.gitignore` support.
 
 - **Location:** `core/orchestrator/tools.rs:606-694`.
 - `*.rs` matches with `ends_with("rs")`, so `users` and `foo.tsrs` match.
@@ -368,6 +382,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-028 · medium · `remember` writes global memory with no prompt, in every mode
 
+**Status:** fixed. `remember` prompts for global memory outside Full Access and for project memory in chat/plan/ask modes.
+
 - **Location:** `core/orchestrator/agent_loop.rs:399-411`,
   `core/orchestrator/mod.rs:96-101` (offered in chat and plan),
   `core/orchestrator/prompts.rs:9-23`.
@@ -383,6 +399,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 ## 3. Security
 
 ### FR-029 · high · Locagens' own git calls run repository-controlled config before any trust decision (needs-confirmation)
+
+**Status:** fixed. Every internal git call goes through one hardened builder: fsmonitor, hooks, external diff, textconv, pager and askpass are off, and system config is ignored (except for `push`, which needs the credential helper).
 
 - **Location:** `core/services/git.rs:20-37`, `:40-69`; callers
   `core/api/projects.rs:307-326` (`git_status`, polled by the desktop Git tab),
@@ -400,6 +418,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-030 · high · on macOS and Linux the `exec_command` `shell` argument runs any program without a prompt (needs-confirmation)
 
+**Status:** fixed. Only known shells are accepted as `shell`; anything else is an error.
+
 - **Location:** `crates/execpolicy/src/processes.rs:50-62`
   (`shell_for_options`), `core/orchestrator/exec_session.rs:121-124`,
   `core/orchestrator/gating.rs:64-70`, `:321-350`.
@@ -415,6 +435,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-031 · medium · MCP tools run without a prompt in Build mode
 
+**Status:** fixed. MCP tools prompt in Build mode; standing grants work per tool.
+
 - **Location:** `core/orchestrator/tools.rs:40`
   (`tool.starts_with("mcp__") && mode != "accept_edits"`).
 - **Problem:** Build mode prompts for every command and every `fetch_url`,
@@ -425,6 +447,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-032 · medium · standing grants are broader than the card suggests
 
+**Status:** partly fixed. Command grants need an equal domain list and `fetch_url` grants are per host; file-tool grants are still tool-wide.
+
 - **Location:** `core/orchestrator/gating.rs:321-350`.
 - A command grant saved without domains matches the same command with any
   `network_domains` (`if !rule.network_domains.is_empty()`), so a later call
@@ -434,6 +458,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** require equal domain lists; scope `fetch_url` grants to the host.
 
 ### FR-033 · high · an environment API key of one vendor is sent to any other provider that has no key *(sub-review, lines re-checked)*
+
+**Status:** fixed. A vendor env key is only used for that vendor's built-in, or when it is named explicitly (`$VAR`, `envKey`).
 
 - **Location:** `crates/config/src/providers/auth_store.rs:248-264`,
   `core/orchestrator/drive.rs:207-212`.
@@ -458,6 +484,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-035 · medium · credential helper and redirect handling *(sub-review)*
 
+**Status:** fixed. The credential helper runs in the Locagens home with a 10-minute cache; the provider HTTP client does not follow redirects (the LLM client: in progress).
+
 - `crates/config/src/providers/auth_store.rs:78`: the `!command` helper runs
   through `cmd /C` in the inherited working directory (the project folder), so
   a repository's `op.bat` can shadow the real helper. Its output is cached for
@@ -471,6 +499,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-036 · medium · `auth.json` lock is held across the network refresh *(sub-review)*
 
+**Status:** fixed. The OAuth refresh runs unlocked, then re-reads and compares; refreshes are serialized per provider; a lock broken by mistake is put back.
+
 - **Location:** `crates/config/src/providers/auth_store.rs:188-194`,
   `:400-404`; `crates/config/src/oauth/auth_lock.rs:13`, `:76-83`.
 - **Problem:** a refresh holds the lock for up to the HTTP timeout (30 to
@@ -480,6 +510,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** refresh outside the lock, then lock, re-read, compare and write.
 
 ### FR-037 · low · other credential and config hygiene *(sub-review)*
+
+**Status:** fixed. Atomic `config.toml` trust writes; `Debug` hides env values; `save_configs` only removes custom providers it owns, never panics and never overwrites an unparseable `models.json`; `[model_providers]` is read from the Locagens home too.
 
 - `crates/config/src/config_toml.rs:222`: `write_project_trust_level` rewrites
   the user's `config.toml` with a plain `std::fs::write` (not atomic, no lock).
@@ -504,6 +536,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-038 · high · `--no-session` with `-c` or `--session` deletes the existing session (reproduced)
 
+**Status:** fixed. `--no-session` with `-c`, `-r` or `--session` is rejected.
+
 - **Location:** `core/cli/runner.rs:192-195`, `core/cli/mod.rs:204-220`,
   `core/cli/tui/driver.rs:138`.
 - **Reproduction:** two sessions listed by `lcgn sessions`; run
@@ -512,6 +546,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** reject the combination, or delete only runs this process created.
 
 ### FR-039 · high · typed-ahead keys answer a TUI permission prompt, including "always" *(sub-review)*
+
+**Status:** fixed. Grant keys are ignored for 600 ms after the prompt opens; project/always need a double press.
 
 - **Location:** `core/cli/tui/overlay.rs:100-104`,
   `core/cli/tui/app/input.rs:46`, `core/cli/tui/app/events.rs:77`.
@@ -523,6 +559,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-040 · high · AltGr characters cannot be typed in the TUI on Windows *(sub-review)*
 
+**Status:** fixed. Ctrl+Alt+char is typed as text on Windows (AltGr).
+
 - **Location:** `core/cli/tui/app/input.rs:223`
   (`KeyCode::Char(ch) if !ctrl && !alt`), `core/cli/tui/overlay.rs:307`.
 - **Problem:** crossterm reports AltGr as Ctrl+Alt on Windows. On a Turkish Q
@@ -531,6 +569,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** treat Ctrl+Alt with a printable character as text on Windows.
 
 ### FR-041 · high · environment-only authentication is rejected by the CLI pre-check *(sub-review)*
+
+**Status:** fixed. The pre-check uses the same key resolution as the run (env-only keys pass).
 
 - **Location:** `core/cli/commands.rs:84`, `core/cli/auth.rs:325`,
   `crates/config/src/providers/auth_store.rs:526`.
@@ -542,6 +582,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-042 · medium · model ids that contain `/` conflict with `--provider` and config defaults *(sub-review)*
 
+**Status:** fixed. With `--provider`, the whole string is tried as that provider's model id first.
+
 - **Location:** `core/cli/models.rs:38`.
 - **Scenario:** `lcgn --provider openrouter --model openai/gpt-4o`, or
   `model = "openai/gpt-4o"` with `model_provider = "openrouter"` in
@@ -551,12 +593,16 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-043 · medium · the TUI panic hook restores the terminal for any thread while the UI keeps running *(sub-review)*
 
+**Status:** fixed. The panic hook restores the terminal only for the UI thread.
+
 - **Location:** `core/cli/tui/mod.rs:80-83`.
 - **Problem:** a panic in a tokio task leaves raw mode and the alternate
   screen while the event loop continues, so the screen is garbled.
 - **Fix:** restore only on the UI thread; log other panics.
 
 ### FR-044 · medium · quitting the TUI while busy skips cleanup *(sub-review)*
+
+**Status:** fixed. Quitting waits up to 2 s for the run's cleanup.
 
 - **Location:** `core/cli/tui/driver.rs:171-176`.
 - **Problem:** `quit()` cancels but does not wait. A `--no-session` run keeps
@@ -566,6 +612,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 
 ### FR-045 · medium · `-p` can block forever on an inherited stdin pipe *(sub-review)*
 
+**Status:** fixed. Piped stdin is read only without a message or with `--stdin`.
+
 - **Location:** `core/cli/args.rs:339-349`.
 - **Problem:** stdin is read to the end whenever it is not a terminal. A CI
   step or parent process that leaves the pipe open hangs `lcgn -p "…"`.
@@ -573,6 +621,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
 - **Fix:** read stdin only when no message was given, or behind `--stdin`.
 
 ### FR-046 · medium · no `tracing` subscriber is installed *(sub-review)*
+
+**Status:** fixed. `lcgn` logs to `<home>/logs/lcgn.log` (`RUST_LOG`).
 
 - **Location:** `core/cli/mod.rs` (`main_entry`); none in the workspace.
 - **Problem:** OAuth refresh failures, ignored config files, provider retries
@@ -582,6 +632,8 @@ Paths are relative to the repository root. `core/` means `crates/core/src/`,
   TUI and desktop.
 
 ### FR-047 · low · further CLI and TUI details *(sub-review)*
+
+**Status:** fixed (every item).
 
 - `core/cli/auth.rs:23-25`: `lcgn auth login 3` stores a credential under the
   provider id `3` (the documented number form is only resolved in the picker).
@@ -870,18 +922,22 @@ state here.
 - **FR-072 · medium** · `core/orchestrator/tools.rs:958-970`: permission
   previews cut old and new content at 4 000 characters with no marker, so the
   user approves a write whose tail they cannot see.
+  **Status:** fixed. Previews end with "… (N more characters)".
 - **FR-073 · medium** · `core/orchestrator/exec_session.rs:114-118`:
   `max_output_tokens` allows up to 800 000 characters in one tool result, far
   above the 24 000-character cap of every other tool and enough to overflow
   the context in one call.
+  **Status:** fixed. `exec_command` / `write_stdin` output is capped like the other tools.
 - **FR-074 · medium** · `core/orchestrator/tools.rs:496`, `:541`: `read_file`
   and `edit_file` fail on any file that is not valid UTF-8 (Windows-1254 or
   Latin-1 sources), with a raw "stream did not contain valid UTF-8" error and
   no way to edit the file.
+  **Status:** fixed. Non-UTF-8 files are read lossily with a note; editing them is refused.
 - **FR-075 · low** · `core/orchestrator/mod.rs:96-101`,
   `core/orchestrator/agent_loop.rs:440-464`: chat and plan modes block MCP
   tools, but still offer `list_mcp_resources` and `read_mcp_resource`, which
   start the configured MCP servers and read from them with no prompt.
+  **Status:** fixed. Chat and plan modes no longer offer the MCP resource tools.
 - **FR-076 · low** · `core/orchestrator/drive.rs:190-192`:
   `reasoning_supported` uses `contains` on short markers (`o1`, `o3`, `o4`),
   so any model id that merely contains one of them gets a `reasoning_effort`

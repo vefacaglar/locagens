@@ -4,7 +4,7 @@
 //! tested; the async work (API calls) is requested through [`Action`]s and
 //! performed by the driver.
 
-use super::composer::Composer;
+use super::composer::{printable_char, Composer};
 use super::overlay::{Approval, Overlay, QuestionAnswer, QuestionFlow};
 use super::popup::{
     command_takes_no_args, completion_text, detect_trigger, file_items, review_items, slash_items, Popup,

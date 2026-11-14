@@ -1,10 +1,10 @@
 //! Chat header: the top strip of the main column (window drag area) with a
-//! status dot, `project / conversation` breadcrumb, a token/cost chip and
+//! status dot, `project / conversation` breadcrumb and
 //! icon buttons for stop, theme and the inspector panel.
 
 use super::icons::{icon_folder, icon_moon, icon_panel_right, icon_stop, icon_sun};
 use super::*;
-use crate::state_ui::{fmt_cost, fmt_tokens, UiStore};
+use crate::state_ui::UiStore;
 use dioxus::prelude::*;
 
 #[component]
@@ -35,15 +35,6 @@ pub fn ChatHeader() -> Element {
         .map(|(_, files)| *files)
         .unwrap_or(0);
 
-    let usage_text = store.run_usage.read().as_ref().map(|usage| {
-        store.tf(
-            "header.tokens_cost",
-            &[
-                &fmt_tokens(usage.total_input_tokens + usage.total_output_tokens),
-                &fmt_cost(usage.total_cost),
-            ],
-        )
-    });
     let folder = std::path::Path::new(&project_path)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -77,9 +68,6 @@ pub fn ChatHeader() -> Element {
                 // Clicks on the buttons must neither start a drag nor maximize.
                 onmousedown: move |e| e.stop_propagation(),
                 ondoubleclick: move |e| e.stop_propagation(),
-                if let Some(usage_text) = usage_text {
-                    span { class: "usage-chip", "{usage_text}" }
-                }
                 if is_active {
                     button {
                         class: "icon-btn danger",

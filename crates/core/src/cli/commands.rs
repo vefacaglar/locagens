@@ -80,8 +80,13 @@ pub fn help_text() -> String {
 
 /// Errors with a ready-to-print message when `model`'s provider has no
 /// credentials (Ollama needs none).
-pub fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Result<(), String> {
-    if state.pi.has_api_key(&model.provider_id) || model.provider_id == "ollama" {
+///
+/// Uses the same resolution as the run itself (`auth.json`, `!command`,
+/// `$ENV_VAR`, then the provider's environment variables), so a key that
+/// comes only from the environment passes.
+pub async fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Result<(), String> {
+    let has_key = state.pi.resolve_api_key(&model.provider_id, None).await.is_some();
+    if has_key || model.provider_id == "ollama" {
         Ok(())
     } else {
         Err(format!(
@@ -240,7 +245,7 @@ async fn set_model(
     target: &str,
 ) {
     match resolve_model(&state.pi, Some(target), None).await {
-        Ok(resolved) => match ensure_authenticated(state, &resolved) {
+        Ok(resolved) => match ensure_authenticated(state, &resolved).await {
             Ok(()) => {
                 result.notice(format!("Model set to {}.", resolved.label()));
                 session.model = Some(resolved);
@@ -411,13 +416,13 @@ mod tests {
         assert!(matches!(&unknown.outputs[0], Output::Error(t) if t.contains("/bogus")));
     }
 
-    #[test]
-    fn unauthenticated_providers_get_one_consistent_message() {
+    #[tokio::test]
+    async fn unauthenticated_providers_get_one_consistent_message() {
         let state = test_state();
         let model = ResolvedModel { provider_id: "nobody".into(), model: "m".into() };
-        let message = ensure_authenticated(&state, &model).unwrap_err();
+        let message = ensure_authenticated(&state, &model).await.unwrap_err();
         assert!(message.contains("\"nobody\"") && message.contains("lcgn auth login nobody"), "{message}");
         let ollama = ResolvedModel { provider_id: "ollama".into(), model: "m".into() };
-        assert!(ensure_authenticated(&state, &ollama).is_ok());
+        assert!(ensure_authenticated(&state, &ollama).await.is_ok());
     }
 }

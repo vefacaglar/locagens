@@ -93,14 +93,14 @@ fn worker_tool_defs() -> Vec<Value> {
 }
 
 /// Main-agent tool names for the run's mode: `chat` exposes only read-only
-/// bookkeeping tools, `plan` adds planning/research/delegation tools, and
+/// bookkeeping tools (no MCP resource tools: they start MCP servers, FR-075), `plan` adds planning/research/delegation tools, and
 /// every other mode gets the full toolset.
 fn tool_names_for_mode(mode: &str) -> Vec<&'static str> {
     let chat_tools: &[&str] = &[
         "read_file", "list_directory", "search_files", "view_image",
         "set_chat_title", "remember", "load_skill", "compact_context",
         "ask_user_question", "request_user_input",
-        "list_mcp_resources", "read_mcp_resource", "get_context_remaining", "host_executable",
+        "get_context_remaining", "host_executable",
     ];
     match mode {
         "chat" => chat_tools.to_vec(),
