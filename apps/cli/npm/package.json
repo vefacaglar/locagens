@@ -1,17 +1,41 @@
 {
   "name": "locagens",
-  "version": "1.0.1",
-  "description": "Locagens CLI — local-first AI coding agent",
+  "version": "1.0.2",
+  "description": "Locagens CLI (lcgn) — local-first AI coding agent with full-screen TUI, code review, MCP, and workspace sandboxing",
+  "author": "Vefa Çağlar Özcan <vefacaglarozcan@gmail.com>",
   "license": "MIT",
+  "homepage": "https://github.com/vefacaglar/locagens#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vefacaglar/locagens.git"
   },
+  "bugs": {
+    "url": "https://github.com/vefacaglar/locagens/issues"
+  },
+  "keywords": [
+    "locagens",
+    "lcgn",
+    "ai",
+    "coding-agent",
+    "ai-agent",
+    "cli",
+    "tui",
+    "llm",
+    "code-review",
+    "mcp",
+    "rust",
+    "developer-tools",
+    "local-first",
+    "openai",
+    "anthropic",
+    "copilot"
+  ],
   "bin": {
     "lcgn": "bin/lcgn.js"
   },
   "files": [
-    "bin/lcgn.js"
+    "bin/lcgn.js",
+    "README.md"
   ],
   "scripts": {
     "postinstall": "node bin/lcgn.js --install-only"
