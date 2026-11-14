@@ -34,6 +34,14 @@ pub async fn resolve_model(
         }
     };
 
+    // An explicit provider owns the whole string when it offers that id
+    // (e.g. `--provider openrouter --model openai/gpt-4o`).
+    if let Some(explicit) = provider_flag {
+        if providers.iter().any(|p| p.id == explicit && p.models.iter().any(|m| m == raw)) {
+            return Ok(ResolvedModel { provider_id: explicit.to_string(), model: raw.to_string() });
+        }
+    }
+
     // provider/id form.
     if let Some((flagged_provider, model_id)) = raw.split_once('/') {
         if let Some(explicit) = provider_flag {
@@ -232,6 +240,27 @@ mod tests {
             .is_err());
         assert!(resolve_model(&manager, Some("ghost/m-1"), None).await.is_err());
         assert!(resolve_model(&manager, None, None).await.is_err());
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn model_ids_with_a_slash_belong_to_the_explicit_provider() {
+        let (manager, agent, support) = temp_manager("slash");
+        let doc = serde_json::json!({
+            "providers": {
+                "router": { "baseUrl": "http://127.0.0.1:1/v1", "api": "openai-compatible", "models": [ { "id": "openai/gpt-4o" } ] }
+            }
+        });
+        std::fs::write(agent.join("models.json"), doc.to_string()).unwrap();
+
+        let resolved = resolve_model(&manager, Some("openai/gpt-4o"), Some("router")).await.unwrap();
+        assert_eq!((resolved.provider_id.as_str(), resolved.model.as_str()), ("router", "openai/gpt-4o"));
+        // The provider/id form still works and still conflicts with a different --provider.
+        let resolved = resolve_model(&manager, Some("router/openai/gpt-4o"), None).await.unwrap();
+        assert_eq!(resolved.model, "openai/gpt-4o");
+        assert!(resolve_model(&manager, Some("other/x"), Some("router")).await.is_err());
 
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);

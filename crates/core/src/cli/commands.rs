@@ -80,12 +80,17 @@ pub fn help_text() -> String {
 
 /// Errors with a ready-to-print message when `model`'s provider has no
 /// credentials (Ollama needs none).
-pub fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Result<(), String> {
-    if state.pi.has_api_key(&model.provider_id) || model.provider_id == "ollama" {
+///
+/// Uses the same resolution as the run itself (`auth.json`, `!command`,
+/// `$ENV_VAR`, then the provider's environment variables), so a key that
+/// comes only from the environment passes.
+pub async fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Result<(), String> {
+    let has_key = state.pi.resolve_api_key(&model.provider_id, None).await.is_some();
+    if has_key || model.provider_id == "ollama" {
         Ok(())
     } else {
         Err(format!(
-            "provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`.",
+            "provider \"{0}\" is not authenticated. Run `lcgn auth login {0}`, or type /login to connect it.",
             model.provider_id
         ))
     }
@@ -153,14 +158,14 @@ pub async fn execute(
         SlashCommand::Undo => {
             match crate::api::projects::undo_last_turn(state, &project_str, session.session.as_deref()).await {
                 Ok(snapshot) => {
-                    result.notice(format!(
-                        "Restored snapshot {} (HEAD {}, {} file(s)).",
-                        snapshot.id,
-                        snapshot.head_sha,
-                        snapshot.restored.len()
-                    ));
+                    let count = snapshot.restored.len();
+                    let noun = if count == 1 { "file" } else { "files" };
+                    result.notice(format!("Reverted {count} {noun} to before the last turn."));
                     if !snapshot.skipped.is_empty() {
-                        result.notice(format!("Left alone (changed after that turn): {}", snapshot.skipped.join(", ")));
+                        result.notice(format!(
+                            "Left alone because they changed since: {}",
+                            snapshot.skipped.join(", ")
+                        ));
                     }
                 }
                 Err(err) => result.error(format!("undo failed: {err}")),
@@ -213,6 +218,22 @@ pub async fn execute(
                 result.notice(lines.join("\n"));
             }
         }
+        SlashCommand::Login(_) => {
+            result.notice("Run `lcgn auth login [provider]`; the interactive picker is in the full-screen UI.");
+        }
+        SlashCommand::Logout(None) => result.error("Usage: /logout <provider>"),
+        SlashCommand::Logout(Some(provider)) => {
+            let input = crate::pi_providers::SetPiAuthInput {
+                provider_id: provider.clone(),
+                action: "delete".to_string(),
+                api_key: None,
+            };
+            match state.pi.set_pi_auth(&input) {
+                Ok(()) => result.notice(format!("Logged out of {provider}.")),
+                Err(err) => result.error(err.to_string()),
+            }
+        }
+        SlashCommand::Copy(_) => result.notice("/copy works in the full-screen UI."),
         SlashCommand::Usage => match session.session.as_deref() {
             None => result.notice("No active session yet."),
             Some(run_id) => {
@@ -240,7 +261,7 @@ async fn set_model(
     target: &str,
 ) {
     match resolve_model(&state.pi, Some(target), None).await {
-        Ok(resolved) => match ensure_authenticated(state, &resolved) {
+        Ok(resolved) => match ensure_authenticated(state, &resolved).await {
             Ok(()) => {
                 result.notice(format!("Model set to {}.", resolved.label()));
                 session.model = Some(resolved);
@@ -411,13 +432,13 @@ mod tests {
         assert!(matches!(&unknown.outputs[0], Output::Error(t) if t.contains("/bogus")));
     }
 
-    #[test]
-    fn unauthenticated_providers_get_one_consistent_message() {
+    #[tokio::test]
+    async fn unauthenticated_providers_get_one_consistent_message() {
         let state = test_state();
         let model = ResolvedModel { provider_id: "nobody".into(), model: "m".into() };
-        let message = ensure_authenticated(&state, &model).unwrap_err();
+        let message = ensure_authenticated(&state, &model).await.unwrap_err();
         assert!(message.contains("\"nobody\"") && message.contains("lcgn auth login nobody"), "{message}");
         let ollama = ResolvedModel { provider_id: "ollama".into(), model: "m".into() };
-        assert!(ensure_authenticated(&state, &ollama).is_ok());
+        assert!(ensure_authenticated(&state, &ollama).await.is_ok());
     }
 }

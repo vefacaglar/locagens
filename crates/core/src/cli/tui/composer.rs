@@ -1,6 +1,27 @@
 //! Multi-line prompt editor with wrapping, word editing and history recall.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
+
+/// The text a key press types, if it types any. Plain and Shift characters
+/// are text; Ctrl or Alt alone are shortcuts. Windows reports AltGr as
+/// Ctrl+Alt, so there that combination is text too (Turkish Q: `@ \ { [ ] } |`).
+pub fn printable_char(key: &KeyEvent) -> Option<char> {
+    printable_char_on(key, cfg!(windows))
+}
+
+fn printable_char_on(key: &KeyEvent, altgr_is_ctrl_alt: bool) -> Option<char> {
+    let KeyCode::Char(ch) = key.code else {
+        return None;
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match (ctrl, alt) {
+        (false, false) => Some(ch),
+        (true, true) if altgr_is_ctrl_alt && !ch.is_control() => Some(ch),
+        _ => None,
+    }
+}
 
 /// One wrapped, on-screen row of the composer (byte offsets into the text).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +105,7 @@ impl Composer {
     pub fn replace_range_to_cursor(&mut self, start: usize, replacement: &str) {
         let start = start.min(self.cursor);
         self.text.replace_range(start..self.cursor, replacement);
+        self.history_pos = None;
         self.cursor = start + replacement.len();
     }
 
@@ -92,6 +114,7 @@ impl Composer {
     pub fn backspace(&mut self) {
         if let Some(previous) = self.prev_boundary(self.cursor) {
             self.text.replace_range(previous..self.cursor, "");
+            self.history_pos = None;
             self.cursor = previous;
         }
     }
@@ -99,24 +122,28 @@ impl Composer {
     pub fn delete_forward(&mut self) {
         if let Some(next) = self.next_boundary(self.cursor) {
             self.text.replace_range(self.cursor..next, "");
+            self.history_pos = None;
         }
     }
 
     pub fn delete_word_back(&mut self) {
         let start = self.word_start_before(self.cursor);
         self.text.replace_range(start..self.cursor, "");
+        self.history_pos = None;
         self.cursor = start;
     }
 
     pub fn delete_word_forward(&mut self) {
         let end = self.word_end_after(self.cursor);
         self.text.replace_range(self.cursor..end, "");
+        self.history_pos = None;
     }
 
     /// Ctrl+U: delete from the start of the logical line to the cursor.
     pub fn kill_to_line_start(&mut self) {
         let start = self.line_start(self.cursor);
         self.text.replace_range(start..self.cursor, "");
+        self.history_pos = None;
         self.cursor = start;
     }
 
@@ -127,6 +154,7 @@ impl Composer {
             self.delete_forward();
         } else {
             self.text.replace_range(self.cursor..end, "");
+            self.history_pos = None;
         }
     }
 
@@ -217,6 +245,34 @@ impl Composer {
         }
         self.cursor = self.text.len();
         true
+    }
+
+    /// Older prompts first; seeded at start and extended by submissions.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Seeds the recall history (oldest first), e.g. from `history.jsonl`.
+    pub fn seed_history(&mut self, prompts: Vec<String>) {
+        self.history = prompts;
+        self.history_pos = None;
+    }
+
+    /// Replaces the text and puts the cursor at the end.
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.to_string();
+        self.cursor = self.text.len();
+        self.history_pos = None;
+    }
+
+    /// Appends `block` after the current text, separated by a blank line.
+    pub fn append_block(&mut self, block: &str) {
+        if !self.text.trim().is_empty() {
+            self.text.push_str("\n\n");
+        }
+        self.text.push_str(block);
+        self.cursor = self.text.len();
+        self.history_pos = None;
     }
 
     /// Takes the trimmed text, records it in history and clears the editor.
@@ -341,6 +397,25 @@ impl Composer {
 }
 
 #[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn seeded_history_is_recalled_and_blocks_append_after_a_blank_line() {
+        let mut c = Composer::default();
+        c.seed_history(vec!["one".into(), "two".into()]);
+        assert!(c.history_prev());
+        assert_eq!(c.text(), "two");
+        c.set_text("draft");
+        c.append_block("restored");
+        assert_eq!(c.text(), "draft\n\nrestored");
+        c.set_text("");
+        c.append_block("first");
+        assert_eq!(c.text(), "first");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -454,6 +529,32 @@ mod tests {
         c.take_submission();
         assert!(c.history_prev());
         assert!(!c.history_prev());
+    }
+
+    #[test]
+    fn altgr_is_text_on_windows_only_and_plain_ctrl_alt_are_shortcuts() {
+        let ev = |code, mods| KeyEvent::new(code, mods);
+        let both = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for ch in ['@', '\\', '{', '[', ']', '}', '|'] {
+            assert_eq!(printable_char_on(&ev(KeyCode::Char(ch), both), true), Some(ch));
+            assert_eq!(printable_char_on(&ev(KeyCode::Char(ch), both), false), None);
+        }
+        assert_eq!(printable_char_on(&ev(KeyCode::Char('a'), KeyModifiers::NONE), false), Some('a'));
+        assert_eq!(printable_char_on(&ev(KeyCode::Char('A'), KeyModifiers::SHIFT), false), Some('A'));
+        assert_eq!(printable_char_on(&ev(KeyCode::Char('a'), KeyModifiers::CONTROL), true), None);
+        assert_eq!(printable_char_on(&ev(KeyCode::Char('d'), KeyModifiers::ALT), true), None);
+        assert_eq!(printable_char_on(&ev(KeyCode::Enter, both), true), None);
+    }
+
+    #[test]
+    fn deleting_text_leaves_history_recall() {
+        let mut c = composer_with("first");
+        c.take_submission();
+        assert!(c.history_prev());
+        c.backspace();
+        assert_eq!(c.text(), "firs");
+        assert!(!c.history_next(), "Down must not replace the edited entry");
+        assert_eq!(c.text(), "firs");
     }
 
     #[test]

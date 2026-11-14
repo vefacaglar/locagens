@@ -28,7 +28,9 @@ type error.log | lcgn -p "what happened here?" --model opencode-go/glm-5.3-flash
   (`cli/prompt.rs`): `@path` mentions of **existing files inside the project**
   are attached (max 256 KiB each); everything else, including `@alice`, a
   missing file or `@../outside`, stays plain text, and newlines are kept
-  verbatim. Piped (non-TTY) stdin is appended to the prompt, like `pi`.
+  verbatim. Piped (non-TTY) stdin is the prompt when no message is given;
+  with a message it is appended only when `--stdin` is passed (so an
+  inherited open pipe cannot hang `lcgn -p "..."`).
 - Text mode streams the main agent's answer to **stdout** and everything else
   (reasoning, tool lines like `✔ read_file src/main.rs`, sub-agent text tagged
   `[name]`, usage/cost) to **stderr** — so `lcgn -p "..." > out.txt` captures
@@ -82,8 +84,12 @@ With a terminal on stdin and stdout, `lcgn` opens a Codex-style full-screen
 UI (alternate screen): header with project path and run title, a scrollable
 transcript (markdown, syntax-highlighted code, tool cells, diffs), a status
 line while a run is active, a multi-line composer and a footer with
-provider/model, thinking level, mode, session id, token usage and context
-left. Use `--no-tui` (or `LCGN_NO_TUI=1`) for the plain line REPL below.
+model, thinking level and mode on the left and context left and cost on
+the right. The composer border names the mode: Build (cyan, ` Message `),
+Plan (blue, ` Plan · read-only `) and Full Access (red, ` Full Access · no
+permission prompts `). Setting changes (`/plan`, `/thinking`, `/model`) flash
+in the status line instead of adding a transcript line. Messages queued while a
+run is active wait in a strip above the composer. Use `--no-tui` (or `LCGN_NO_TUI=1`) for the plain line REPL below.
 `-p` and `--mode json` never start the UI.
 
 Keys:
@@ -100,16 +106,32 @@ Ctrl+Left / Ctrl+Right     move by word
 /                          command popup (Up/Down, Tab or Enter to complete)
 @                          file popup (fuzzy project files, inserts @path)
 PageUp / PageDown, wheel   scroll the transcript; End follows the output again
-Ctrl+O                     show / hide reasoning
-Shift+Tab                  toggle Plan / Build mode
+Ctrl+R                     search earlier prompts of this folder (Enter uses one)
+?                          help overlay (empty composer)
+Ctrl+O                     show details: reasoning, full tool output
+                           (up to 200 lines), full diffs
+Shift+Tab                  cycle Build -> Plan (-> Full Access once `--approve`
+                           or `/auto` was used) -> Build
+Up (run active, empty      pull the newest queued message back to edit it
+  composer)
 Esc                        close popup, otherwise interrupt the active run
 Ctrl+C                     clear the composer; else interrupt the run; else
                            press twice within 2s to quit
 Ctrl+D                     quit (empty composer)
 ```
 
-Permission requests open a modal: `o`/`y` allow once, `r` this run, `p`
-project, `a` always, `d`/`n`/Esc deny, Up/Down scroll the diff. Questions
+Up / Down also recall prompts from earlier sessions of the folder (the last 100
+from `history.jsonl`). An interrupted or failed run puts its undelivered queued
+messages back into the composer.
+
+Permission requests open a modal that says why it appeared. `y`/`o` allow
+once, `r` this run, `d`/`n`/Esc deny, Up/Down scroll the diff. `p` (project)
+and `a` (always) are standing grants: press the key twice (the footer reads
+`p p project` and `a a always`; after the first press it says "press a again
+to always allow"), and grant keys are ignored for the first 600 ms. The line
+under the options shows what a standing grant covers. Dangerous commands and
+protected paths show only `y` and `d`. `apply_patch` requests list the files
+and the diff; network requests name the host. Questions
 from the agent open a list: Up/Down, Space (multi-select), Enter to confirm,
 Tab for a free-text note, Esc to skip. `@path` mentions of existing project
 files are attached to the prompt like in the REPL.
@@ -130,13 +152,30 @@ Slash commands (TUI and REPL):
 /mcp, /skills          list MCP servers / skills
 /review [target]       code review (see "Code review" below); `/review ` opens a
                        popup of targets: uncommitted changes, branches, commits
-/sessions              list sessions for this directory
+/resume                pick a session of this folder to continue (alias /sessions;
+                       `lcgn -r` opens this picker at start)
+/login [provider]      connect a provider; /logout <provider> removes it
+/copy [code]           copy the last answer (or its last code block)
 /usage                 usage/cost of the current session
-/help
+/help                  commands and keys overlay
 /exit                  (alias /quit)
 ```
 
-`/clear` is an alias of `/new`. `/help` lists the commands and key bindings.
+`/clear` is an alias of `/new`. `/help` (or `?`) opens an overlay with the
+commands and key bindings.
+
+`/login` opens a provider picker (`Enter` connect, `Tab` use an API key instead).
+API-key providers show one masked input; OAuth providers show the code and
+URL and wait (`Enter` opens the browser, `c` copies the code, `Esc` cancels).
+Credentials are stored like `lcgn auth login` does. Anthropic is API key only.
+With no provider connected the welcome text says so and `Enter` opens `/login`.
+
+`/copy` uses OSC 52 plus the platform clipboard command. Mouse capture is on,
+so hold Shift while dragging to select text with the terminal.
+
+`[tui]` in `config.toml`: `theme = "dark" | "light"` (default: from
+`COLORFGBG`), `animations = false` (also `LCGN_REDUCED_MOTION=1`) for a static
+status line. `NO_COLOR` removes all colours. For a screen reader use `--no-tui`.
 
 `/new`, `/fork`, `/undo` and `/review` are refused while a run is generating
 (Esc interrupts it first). The commands are parsed and executed by one shared
@@ -263,8 +302,24 @@ key (never refreshed). OpenCode's `~/.local/share/opencode/auth.json`
 other source and never written.
 `lcgn auth check` reports OAuth credentials as valid/expired (never the
 tokens). Only providers you have configured (credential in `auth.json`, the
-provider's own env var, or an entry in `models.json` / Codex `config.toml`)
-appear in `/model` and `--list-models`.
+provider's own env var, or an entry in `models.json` / `config.toml`
+`[model_providers]`) and that have a base URL appear in `/model` and
+`--list-models`. A vendor env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...)
+is only used for that vendor's own built-in provider; any other provider uses
+an env key only when it names it (`"$VAR"` in `auth.json`, or `envKey` /
+`env_key`).
+
+Model lists are fetched live: the TUI (and the desktop app) re-fetch each
+signed-in provider's `GET /models` in the background when the cached list is
+missing or older than 6 hours (`~/.locagens/models-live.json`). Once fetched,
+that list decides which models a provider offers (models you declared in
+`models.json` stay), so retired models drop out. Models switched off in the
+desktop's Settings → Providers are hidden from `/model` too.
+
+New chats are named by the model: on the first turn of a TUI or desktop chat a
+small extra call (no tools, logged under the `title` usage role) writes a
+2–6 word title, unless one was set meanwhile. Headless `lcgn -p` runs keep the
+first line of the prompt as the title.
 
 ## MCP
 

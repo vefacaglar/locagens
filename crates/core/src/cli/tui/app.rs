@@ -4,7 +4,8 @@
 //! tested; the async work (API calls) is requested through [`Action`]s and
 //! performed by the driver.
 
-use super::composer::Composer;
+use super::composer::{printable_char, Composer};
+use super::login::LoginAction;
 use super::overlay::{Approval, Overlay, QuestionAnswer, QuestionFlow};
 use super::popup::{
     command_takes_no_args, completion_text, detect_trigger, file_items, review_items, slash_items, Popup,
@@ -41,7 +42,46 @@ pub enum Action {
     Cancel,
     Quit,
     SearchFiles(String),
+    /// Load a session picked in `/resume`.
+    Resume(String),
+    /// A step of the `/login` overlay.
+    Login(LoginAction),
+    /// Pull the newest queued message back off the active run.
+    Withdraw,
 }
+
+/// A queued mid-run message: what the user typed and what the run got.
+struct Queued {
+    display: String,
+    content: String,
+}
+
+/// Ctrl+R prompt-history search state.
+#[derive(Default)]
+pub struct HistorySearch {
+    pub query: String,
+    pub selected: usize,
+}
+
+impl HistorySearch {
+    /// Prompts containing every word of the query, newest first.
+    pub fn matches<'a>(&self, history: &'a [String]) -> Vec<&'a String> {
+        let words: Vec<String> = self.query.split_whitespace().map(str::to_lowercase).collect();
+        history
+            .iter()
+            .rev()
+            .filter(|prompt| {
+                let lower = prompt.to_lowercase();
+                words.iter().all(|word| lower.contains(word.as_str()))
+            })
+            .collect()
+    }
+}
+
+/// How long a status-line flash stays.
+const FLASH_TTL: Duration = Duration::from_secs(2);
+/// A tick count that updates the elapsed time every ~5 s with reduced motion.
+const REDUCED_MOTION_TICKS: u32 = 150;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Finish {
@@ -52,7 +92,6 @@ enum Finish {
 
 #[derive(Default)]
 pub struct UsageInfo {
-    pub total_tokens: i64,
     pub cost: f64,
     /// Percent of the model's context window still free.
     pub context_left: Option<u8>,
@@ -125,7 +164,7 @@ pub struct App {
     pub busy: bool,
     pub busy_since: Option<Instant>,
     pub spinner: usize,
-    pub show_reasoning: bool,
+    pub details: bool,
     pub viewport: Viewport,
     pub quit_armed_at: Option<Instant>,
     pub should_quit: bool,
@@ -137,7 +176,20 @@ pub struct App {
     turn_diff: Option<(String, u64)>,
     /// Status label while the model streams an `apply_patch` call.
     pub patch_progress: Option<String>,
-    queued_texts: VecDeque<String>,
+    queued: VecDeque<Queued>,
+    /// Short confirmation shown in the status line (setting changes, copy).
+    flash: Option<(String, Instant, Duration)>,
+    /// `/auto` or `--approve` was used: Shift+Tab may land on Full Access.
+    pub auto_used: bool,
+    /// Current git branch of the project, for the header.
+    pub branch: Option<String>,
+    pub home: Option<PathBuf>,
+    /// No provider has credentials yet: the welcome text offers `/login`.
+    pub no_providers: bool,
+    /// `[tui] animations = false` / `LCGN_REDUCED_MOTION`.
+    pub reduced_motion: bool,
+    drag_hint_shown: bool,
+    pub history_search: Option<HistorySearch>,
     popup_dismissed_for: Option<String>,
     last_file_query: Option<String>,
     spinner_ticks: u32,
@@ -200,7 +252,7 @@ impl App {
             busy: false,
             busy_since: None,
             spinner: 0,
-            show_reasoning: false,
+            details: false,
             viewport: Viewport {
                 follow: true,
                 ..Viewport::default()
@@ -212,7 +264,15 @@ impl App {
             run_finished: false,
             turn_diff: None,
             patch_progress: None,
-            queued_texts: VecDeque::new(),
+            queued: VecDeque::new(),
+            flash: None,
+            auto_used: bypass,
+            branch: None,
+            home: dirs::home_dir(),
+            no_providers: false,
+            reduced_motion: false,
+            drag_hint_shown: false,
+            history_search: None,
             popup_dismissed_for: None,
             last_file_query: None,
             spinner_ticks: 0,
@@ -269,28 +329,51 @@ impl App {
         self.dirty = true;
     }
 
-    /// Mode switch used by `/plan`, `/build` and Shift+Tab.
-    pub fn set_build_mode(&mut self, plan: bool) {
-        self.mode = if plan {
-            "plan".to_string()
-        } else if self.bypass {
-            "auto".to_string()
-        } else {
-            "accept_edits".to_string()
+    /// Shift+Tab: Build -> Plan -> (Full Access, once it was asked for) ->
+    /// Build. With `--approve` Build means Full Access, so it alternates
+    /// between Plan and Full Access.
+    pub fn cycle_mode(&mut self) {
+        let next = match self.mode.as_str() {
+            "plan" if self.bypass || self.auto_used => "auto",
+            "plan" => "accept_edits",
+            "auto" if self.bypass => "plan",
+            "auto" => "accept_edits",
+            _ if self.bypass => "plan",
+            _ => "plan",
         };
+        self.mode = next.to_string();
         self.dirty = true;
+    }
+
+    // ---- status-line flash -----------------------------------------------------
+
+    /// Shows `text` in the status line for two seconds.
+    pub fn flash(&mut self, text: impl Into<String>) {
+        self.flash_for(text, FLASH_TTL);
+    }
+
+    pub fn flash_for(&mut self, text: impl Into<String>, ttl: Duration) {
+        self.flash = Some((text.into(), Instant::now(), ttl));
+        self.dirty = true;
+    }
+
+    pub fn flash_text(&self) -> Option<&str> {
+        self.flash
+            .as_ref()
+            .filter(|(_, since, ttl)| since.elapsed() < *ttl)
+            .map(|(text, _, _)| text.as_str())
     }
 
     // ---- misc ---------------------------------------------------------------
 
-    pub fn help_text() -> String {
-        let names: Vec<String> = crate::commands::commands_for(crate::commands::Frontend::Cli)
-            .map(|command| format!("/{}", command.name))
-            .collect();
-        format!("Commands: {}\n", names.join(" "))
-            + "Keys: Enter send · Shift+Enter, Ctrl+J, Alt+Enter or trailing \\ newline · Up/Down history\n\
-         Esc interrupt · Ctrl+C clear/interrupt/quit · Ctrl+D quit · Ctrl+O reasoning · Shift+Tab plan/build\n\
-         PageUp/PageDown/wheel scroll · End follow · @ file mention · / commands"
+    pub fn open_help(&mut self) {
+        self.overlay = Some(Overlay::Help(super::help::HelpView::default()));
+        self.dirty = true;
+    }
+
+    /// Seeds the Up-arrow history with earlier prompts (oldest first).
+    pub fn seed_history(&mut self, prompts: Vec<String>) {
+        self.composer.seed_history(prompts);
     }
 
     /// Plain-text title for the header line.

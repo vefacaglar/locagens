@@ -5,9 +5,10 @@
 //! both measured from the active context size. Locagens measures the active
 //! context with the estimate the auto-compactor itself uses
 //! (`compact::estimate_history_tokens`) and compares it against the model's
-//! `contextWindow` from the provider catalog and `AUTO_COMPACT_TOKEN_THRESHOLD`.
+//! `contextWindow` from the provider catalog and the agent's auto-compaction
+//! threshold.
 
-use super::compact::{estimate_history_tokens, AUTO_COMPACT_TOKEN_THRESHOLD};
+use super::compact::estimate_history_tokens;
 use super::llm::LlmMessage;
 use serde_json::{json, Value};
 
@@ -31,11 +32,11 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
-    pub fn measure(history: &[LlmMessage], context_window: Option<i64>) -> Self {
+    pub fn measure(history: &[LlmMessage], context_window: Option<i64>, auto_compact_threshold: usize) -> Self {
         Self {
             estimated_tokens: estimate_history_tokens(history) as i64,
             context_window: context_window.filter(|window| *window > 0),
-            auto_compact_threshold: AUTO_COMPACT_TOKEN_THRESHOLD as i64,
+            auto_compact_threshold: auto_compact_threshold as i64,
         }
     }
 
@@ -78,6 +79,7 @@ impl ContextBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::compact::AUTO_COMPACT_TOKEN_THRESHOLD as LIMIT;
 
     fn history_of(chars: usize) -> Vec<LlmMessage> {
         vec![LlmMessage { role: "user".into(), content: "x".repeat(chars), ..Default::default() }]
@@ -85,7 +87,7 @@ mod tests {
 
     #[test]
     fn uses_the_compactors_estimate() {
-        let budget = ContextBudget::measure(&history_of(4000), Some(200_000));
+        let budget = ContextBudget::measure(&history_of(4000), Some(200_000), LIMIT);
         assert_eq!(budget.estimated_tokens, 1000);
         assert_eq!(budget.window_remaining(), Some(199_000));
         assert_eq!(budget.until_auto_compact(), 89_000);
@@ -94,16 +96,16 @@ mod tests {
     #[test]
     fn tokens_left_is_the_tighter_limit() {
         // Big window: auto-compaction triggers first.
-        let big = ContextBudget::measure(&history_of(4000), Some(1_000_000));
+        let big = ContextBudget::measure(&history_of(4000), Some(1_000_000), LIMIT);
         assert_eq!(big.tokens_left(), 89_000);
         // Small window: the window fills first.
-        let small = ContextBudget::measure(&history_of(4000), Some(8_000));
+        let small = ContextBudget::measure(&history_of(4000), Some(8_000), LIMIT);
         assert_eq!(small.tokens_left(), 7_000);
     }
 
     #[test]
     fn unknown_window_falls_back_to_the_compaction_threshold() {
-        let budget = ContextBudget::measure(&history_of(400), None);
+        let budget = ContextBudget::measure(&history_of(400), None, LIMIT);
         assert_eq!(budget.window_remaining(), None);
         assert_eq!(budget.percent_remaining(), None);
         assert_eq!(budget.tokens_left(), 89_900);
@@ -112,17 +114,17 @@ mod tests {
 
     #[test]
     fn overfull_history_clamps_to_zero_and_percent_is_rounded() {
-        let over = ContextBudget::measure(&history_of(4_000_000), Some(10_000));
+        let over = ContextBudget::measure(&history_of(4_000_000), Some(10_000), LIMIT);
         assert_eq!(over.tokens_left(), 0);
         assert_eq!(over.percent_remaining(), Some(0.0));
-        let quarter = ContextBudget::measure(&history_of(30_000), Some(10_000 + 7_500));
+        let quarter = ContextBudget::measure(&history_of(30_000), Some(10_000 + 7_500), LIMIT);
         // 7500 used of 17500 -> 10000 free = 57.1%
         assert_eq!(quarter.percent_remaining(), Some(57.1));
     }
 
     #[test]
     fn nonpositive_window_is_treated_as_unknown() {
-        assert_eq!(ContextBudget::measure(&[], Some(0)).context_window, None);
-        assert_eq!(ContextBudget::measure(&[], Some(-5)).context_window, None);
+        assert_eq!(ContextBudget::measure(&[], Some(0), LIMIT).context_window, None);
+        assert_eq!(ContextBudget::measure(&[], Some(-5), LIMIT).context_window, None);
     }
 }

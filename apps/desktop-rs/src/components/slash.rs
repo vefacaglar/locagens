@@ -172,7 +172,7 @@ mod tests {
         let names: Vec<&str> = suggestions("/").iter().map(|spec| spec.name).collect();
         assert_eq!(names, commands::commands_for(Frontend::Desktop).map(|spec| spec.name).collect::<Vec<_>>());
         let names: Vec<&str> = suggestions("/re").iter().map(|spec| spec.name).collect();
-        assert_eq!(names, vec!["review"]);
+        assert_eq!(names, vec!["review", "resume"]);
         assert!(suggestions("/review ").is_empty(), "arguments close the list");
         assert!(suggestions("/exit").is_empty(), "CLI-only commands are not suggested");
         assert!(suggestions("hello").is_empty());

@@ -1,13 +1,19 @@
-//! Modal overlays: permission approval, agent questions and the model picker.
+//! Modal overlays: permission approval, agent questions and the model picker
+//! (help, the session picker and `/login` live in their own modules).
 
+use super::composer::printable_char;
 use super::diff::preview_diff;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 pub enum Overlay {
     Approval(Approval),
     Question(QuestionFlow),
     ModelPicker(ModelPicker),
+    Help(super::help::HelpView),
+    Sessions(super::sessions::SessionPicker),
+    Login(super::login::LoginFlow),
 }
 
 // ---------------------------------------------------------------------
@@ -51,6 +57,11 @@ impl ModelPicker {
     pub fn on_key(&mut self, key: KeyEvent) -> Option<PickerOutcome> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let count = self.visible().len();
+        if let Some(ch) = printable_char(&key) {
+            self.query.push(ch);
+            self.selected = 0;
+            return None;
+        }
         match key.code {
             KeyCode::Esc => return Some(PickerOutcome::Close),
             KeyCode::Char('c') if ctrl => return Some(PickerOutcome::Close),
@@ -67,10 +78,6 @@ impl ModelPicker {
             KeyCode::End => self.selected = count.saturating_sub(1),
             KeyCode::Backspace => {
                 self.query.pop();
-                self.selected = 0;
-            }
-            KeyCode::Char(ch) if !ctrl => {
-                self.query.push(ch);
                 self.selected = 0;
             }
             _ => {}
@@ -125,7 +132,21 @@ pub struct Approval {
     /// Unified diff of the proposed change, when there is one.
     pub diff: Option<String>,
     pub scroll: usize,
+    /// Keys that grant access are ignored until this instant, so text typed
+    /// before the prompt appeared cannot answer it.
+    pub armed_at: Instant,
+    /// A standing grant (project / always) waits here for a second press.
+    pub pending_grant: Option<&'static str>,
+    /// Why the prompt appeared (`preview.reason.text`).
+    pub reason: Option<String>,
+    /// Only "once" and "deny" apply (dangerous command, protected path).
+    pub one_time_only: bool,
+    /// What a standing grant would cover (`preview.grantLabel`).
+    pub grant_label: Option<String>,
 }
+
+/// How long a new approval prompt ignores grant keys.
+const APPROVAL_ARM_DELAY: Duration = Duration::from_millis(600);
 
 fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
@@ -142,6 +163,18 @@ impl Approval {
         let preview = event.get("preview").cloned().unwrap_or(Value::Null);
         let action = str_field(&preview, "action");
         let path = str_field(&preview, "path");
+        let files: Vec<String> = preview
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let host = preview
+            .get("networkDomains")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let title = match action {
             "command" => "Run this command?".to_string(),
             "fetch" => "Fetch this URL?".to_string(),
@@ -150,6 +183,11 @@ impl Approval {
             "edit" => "Edit this file?".to_string(),
             "delete" => "Delete this file?".to_string(),
             "mkdir" => "Create this directory?".to_string(),
+            "patch" => {
+                let noun = if files.len() == 1 { "file" } else { "files" };
+                format!("Apply this patch? ({} {noun})", files.len())
+            }
+            "network" => format!("Allow network access to {host}?"),
             _ => format!("Allow {tool_name}?"),
         };
         let mut details = Vec::new();
@@ -168,9 +206,11 @@ impl Approval {
             "fetch" => details.push(format!("GET {}", str_field(&preview, "url"))),
             "move" => details.push(format!("{path} -> {}", str_field(&preview, "destPath"))),
             "create" | "edit" | "delete" | "mkdir" => details.push(path.to_string()),
+            "patch" => details.extend(files.iter().map(|file| format!("  {file}"))),
+            "network" => details.push(str_field(&preview, "url").to_string()),
             _ => {
                 if let Some(call) = event.pointer("/toolCall/function/arguments").and_then(Value::as_str) {
-                    details.push(call.chars().take(400).collect());
+                    details.push(format!("Arguments: {}", call.chars().take(400).collect::<String>()));
                 }
             }
         }
@@ -180,12 +220,32 @@ impl Approval {
             details,
             diff: Self::diff_for(&preview, action, path),
             scroll: 0,
+            armed_at: Instant::now() + APPROVAL_ARM_DELAY,
+            pending_grant: None,
+            reason: preview
+                .pointer("/reason/text")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+            one_time_only: preview.get("oneTimeOnly").and_then(Value::as_bool).unwrap_or(false),
+            grant_label: preview
+                .get("grantLabel")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
         }
     }
 
     fn diff_for(preview: &Value, action: &str, path: &str) -> Option<String> {
         let old = preview.get("oldContent").and_then(Value::as_str);
         let new = preview.get("newContent").and_then(Value::as_str);
+        if action == "patch" {
+            return preview
+                .get("diff")
+                .and_then(Value::as_str)
+                .filter(|diff| !diff.trim().is_empty())
+                .map(str::to_string);
+        }
         let diff = match action {
             "edit" if old.is_some() && new.is_some() => preview_diff(path, old, new),
             "create" => preview_diff(path, None, new),
@@ -195,17 +255,30 @@ impl Approval {
         (!diff.is_empty()).then_some(diff)
     }
 
+    /// Standing grants persist, so they need the same key pressed twice.
+    fn confirm_grant(&mut self, pending: Option<&'static str>, grant: &'static str) -> Option<&'static str> {
+        if pending == Some(grant) {
+            return Some(grant);
+        }
+        self.pending_grant = Some(grant);
+        None
+    }
+
     /// Handles a key; returns the permission decision when one was made.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<&'static str> {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return (key.code == KeyCode::Char('c')).then_some("deny");
         }
+        let armed = Instant::now() >= self.armed_at;
+        let pending = self.pending_grant.take();
         match key.code {
-            KeyCode::Char('o' | 'y') => Some("allow_once"),
-            KeyCode::Char('r') => Some("allow_run"),
-            KeyCode::Char('p') => Some("allow_project"),
-            KeyCode::Char('a') => Some("allow_always"),
             KeyCode::Char('d' | 'n') | KeyCode::Esc => Some("deny"),
+            // Granting keys do nothing until the prompt has been visible a moment.
+            KeyCode::Char('o' | 'y') if armed => Some("allow_once"),
+            KeyCode::Char('r' | 'p' | 'a') if self.one_time_only => None,
+            KeyCode::Char('r') if armed => Some("allow_run"),
+            KeyCode::Char('p') if armed => self.confirm_grant(pending, "allow_project"),
+            KeyCode::Char('a') if armed => self.confirm_grant(pending, "allow_always"),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.scroll = self.scroll.saturating_sub(1);
                 None
@@ -408,8 +481,11 @@ impl QuestionFlow {
             KeyCode::Backspace => {
                 self.note.pop();
             }
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => self.note.push(ch),
-            _ => {}
+            _ => {
+                if let Some(ch) = printable_char(&key) {
+                    self.note.push(ch);
+                }
+            }
         }
         None
     }
@@ -460,10 +536,13 @@ mod tests {
     #[test]
     fn approval_keys_map_to_decisions() {
         let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        approval.armed_at = Instant::now();
         assert_eq!(approval.on_key(press(KeyCode::Char('o'))), Some("allow_once"));
         assert_eq!(approval.on_key(press(KeyCode::Char('y'))), Some("allow_once"));
         assert_eq!(approval.on_key(press(KeyCode::Char('r'))), Some("allow_run"));
+        assert_eq!(approval.on_key(press(KeyCode::Char('p'))), None, "standing grants need a second press");
         assert_eq!(approval.on_key(press(KeyCode::Char('p'))), Some("allow_project"));
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None);
         assert_eq!(approval.on_key(press(KeyCode::Char('a'))), Some("allow_always"));
         assert_eq!(approval.on_key(press(KeyCode::Char('d'))), Some("deny"));
         assert_eq!(approval.on_key(press(KeyCode::Char('n'))), Some("deny"));
@@ -471,6 +550,28 @@ mod tests {
         assert_eq!(approval.on_key(press(KeyCode::Down)), None);
         assert_eq!(approval.scroll, 1);
         assert_eq!(approval.on_key(press(KeyCode::Char('x'))), None);
+    }
+
+    #[test]
+    fn typed_ahead_keys_do_not_answer_a_fresh_prompt() {
+        let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        for ch in ['o', 'r', 'p', 'a', 'y'] {
+            assert_eq!(approval.on_key(press(KeyCode::Char(ch))), None, "{ch} must be ignored while arming");
+        }
+        assert_eq!(approval.pending_grant, None);
+        // Denying is always allowed.
+        assert_eq!(approval.on_key(press(KeyCode::Esc)), Some("deny"));
+    }
+
+    #[test]
+    fn standing_grant_is_cancelled_by_another_key() {
+        let mut approval = Approval::from_event(&permission_event(json!({"action": "command", "command": "ls"})));
+        approval.armed_at = Instant::now();
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('x'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None, "pending grant was reset");
+        assert_eq!(approval.on_key(press(KeyCode::Char('p'))), None);
+        assert_eq!(approval.on_key(press(KeyCode::Char('a'))), None, "different grant restarts");
     }
 
     fn question_event() -> Value {
@@ -522,5 +623,56 @@ mod tests {
         let answer = flow.on_key(press(KeyCode::Esc)).expect("skipped");
         assert!(answer.selections.is_empty());
         assert_eq!(answer.notes.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod approval_ux_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(preview: Value) -> Value {
+        json!({"type": "permission_requested",
+            "toolCall": {"id": "c1", "function": {"name": "apply_patch", "arguments": "{}"}},
+            "preview": preview})
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn patch_shows_files_and_the_ready_diff() {
+        let approval = Approval::from_event(&event(json!({
+            "action": "patch", "files": ["src/a.rs", "b.rs"], "diff": "--- a/src/a.rs\n+++ b/src/a.rs\n+x\n"})));
+        assert_eq!(approval.title, "Apply this patch? (2 files)");
+        assert_eq!(approval.details, vec!["  src/a.rs", "  b.rs"]);
+        assert!(approval.diff.unwrap().contains("+x"));
+    }
+
+    #[test]
+    fn network_names_the_host_and_unknown_tools_label_arguments() {
+        let approval = Approval::from_event(&event(json!({
+            "action": "network", "url": "api.github.com:443", "networkDomains": ["api.github.com"]})));
+        assert_eq!(approval.title, "Allow network access to api.github.com?");
+        assert_eq!(approval.details, vec!["api.github.com:443"]);
+        let other = Approval::from_event(&event(json!({"action": "mystery"})));
+        assert!(other.details[0].starts_with("Arguments: "));
+    }
+
+    #[test]
+    fn reason_grant_label_and_one_time_only_come_from_the_preview() {
+        let mut approval = Approval::from_event(&event(json!({
+            "action": "command", "command": "rm -rf x",
+            "reason": {"code": "dangerous_command", "text": "This command can delete data."},
+            "oneTimeOnly": true, "grantLabel": "rm *"})));
+        approval.armed_at = Instant::now();
+        assert_eq!(approval.reason.as_deref(), Some("This command can delete data."));
+        assert_eq!(approval.grant_label.as_deref(), Some("rm *"));
+        for key in ['r', 'p', 'a'] {
+            assert_eq!(approval.on_key(press(KeyCode::Char(key))), None);
+            assert_eq!(approval.on_key(press(KeyCode::Char(key))), None, "no grant even when pressed twice");
+        }
+        assert_eq!(approval.on_key(press(KeyCode::Char('y'))), Some("allow_once"));
     }
 }

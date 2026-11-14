@@ -5,6 +5,7 @@ pub mod args;
 pub mod auth;
 pub mod commands;
 pub mod events;
+pub mod logging;
 pub mod mcp;
 pub mod models;
 pub mod prompt;
@@ -26,6 +27,11 @@ use std::sync::Arc;
 pub fn main_entry() -> i32 {
     enable_windows_vt();
     let cli = Cli::parse();
+    if let Err(message) = cli.validate() {
+        eprintln!("lcgn: {message}");
+        return 2;
+    }
+    logging::init();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -187,10 +193,14 @@ async fn run(mut cli: Cli) -> i32 {
     // folder: ask once on a terminal, otherwise print a one-line notice.
     trust::ensure_project_trust(&project, cli.trust, interactive);
     if interactive {
-        let initial_session = match resolve_initial_session(&cli, &state, &project).await {
+        // In the full-screen UI `-r` opens the /resume picker instead of the
+        // numbered stderr prompt.
+        let defer_resume = cli.use_tui();
+        let initial_session = match resolve_initial_session(&cli, &state, &project, defer_resume).await {
             Ok(session) => session,
             Err(code) => return code,
         };
+        let open_resume = defer_resume && cli.resume && initial_session.is_none();
         let config = repl::ReplConfig {
             project,
             model,
@@ -202,11 +212,16 @@ async fn run(mut cli: Cli) -> i32 {
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
             initial_session,
+            open_resume,
         };
-        if cli.use_tui() {
-            return tui::run(state, config).await;
-        }
-        return repl::repl(state, config).await;
+        let code = if cli.use_tui() {
+            tui::run(state.clone(), config).await
+        } else {
+            repl::repl(state.clone(), config).await
+        };
+        // Exec sessions (dev servers, watchers) end with lcgn (FR-022).
+        crate::api::runs::shutdown(&state).await;
+        return code;
     }
 
     // One-shot run (with -p, --mode json, or piped/non-tty stdin).
@@ -214,7 +229,7 @@ async fn run(mut cli: Cli) -> i32 {
         eprintln!("lcgn: --resume needs an interactive terminal.");
         return 2;
     }
-    let session = match resolve_initial_session(&cli, &state, &project).await {
+    let session = match resolve_initial_session(&cli, &state, &project, false).await {
         Ok(session) => session,
         Err(code) => return code,
     };
@@ -222,7 +237,7 @@ async fn run(mut cli: Cli) -> i32 {
         Some(id) => TurnTarget::Continue(id),
         None => TurnTarget::New,
     };
-    let stdin = args::read_piped_stdin();
+    let stdin = if cli.wants_stdin() { args::read_piped_stdin() } else { None };
     let task = match args::assemble_prompt(&cli.messages, &project, stdin.as_deref()) {
         Ok(task) => task,
         Err(message) => {
@@ -230,7 +245,9 @@ async fn run(mut cli: Cli) -> i32 {
             return 2;
         }
     };
-    runner::run_turn(&state, target, &opts, task, None).await.0
+    let code = runner::run_turn(&state, target, &opts, task, None).await.0;
+    crate::api::runs::shutdown(&state).await;
+    code
 }
 
 /// Resolves `-c` / `--session` / `-r` into the session id to continue
@@ -239,6 +256,7 @@ async fn resolve_initial_session(
     cli: &Cli,
     state: &Arc<crate::state::AppState>,
     project: &std::path::Path,
+    defer_resume: bool,
 ) -> Result<Option<String>, i32> {
     let fail = |message: String| -> i32 {
         eprintln!("lcgn: {message}");
@@ -258,6 +276,9 @@ async fn resolve_initial_session(
                 project.display()
             ))),
         };
+    }
+    if cli.resume && defer_resume {
+        return Ok(None);
     }
     if cli.resume {
         return match auth::pick_session(state, project).await {

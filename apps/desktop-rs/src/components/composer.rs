@@ -618,7 +618,7 @@ fn withdraw(store: UiStore, text: String) {
     let mut store = store;
     let Some(run_id) = store.active_run_id.peek().clone() else { return };
     spawn(async move {
-        let removed = locagens_core::api::queue::withdraw_queued_message(&core(), &run_id, &text).await.unwrap_or(false);
+        let removed = locagens_core::api::queue::withdraw_queued(&core(), &run_id, &text).await.unwrap_or(false);
         let entry = QueuedMessage { run_id: run_id.clone(), text: text.clone() };
         store.queued.with_mut(|queue| {
             if let Some(index) = queue.iter().position(|queued| *queued == entry) {

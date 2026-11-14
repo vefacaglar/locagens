@@ -59,7 +59,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     spec("review", &[], "[target]", "code review: changes, a branch or a commit", ALL),
     spec("mcp", &[], "", "list MCP servers and status", ALL),
     spec("skills", &[], "", "list discovered skills", ALL),
-    spec("sessions", &[], "", "list sessions for this directory", ALL),
+    spec("resume", &["sessions"], "", "pick a session of this folder to continue", ALL),
+    spec("login", &[], "[provider]", "connect a provider (API key or sign-in)", CLI),
+    spec("logout", &[], "<provider>", "remove a provider's stored credentials", CLI),
+    spec("copy", &[], "[code]", "copy the last answer (or its last code block)", CLI),
     spec("usage", &[], "", "usage and cost of this session", ALL),
     spec("help", &[], "", "show the available commands", ALL),
     spec("exit", &["quit"], "", "leave lcgn", CLI),
@@ -159,7 +162,14 @@ pub enum SlashCommand {
     Review(String),
     Mcp,
     Skills,
+    /// `/resume` (alias `/sessions`).
     Sessions,
+    /// `/login [provider]`.
+    Login(Option<String>),
+    /// `/logout <provider>`.
+    Logout(Option<String>),
+    /// `/copy` or `/copy code`.
+    Copy(Option<String>),
     Usage,
     /// Not in the table; carries the lowercased head (`/nope`).
     Unknown(String),
@@ -175,6 +185,11 @@ impl SlashCommand {
         let mut parts = line.split_whitespace();
         let raw_head = parts.next().unwrap_or("");
         let head = raw_head.to_lowercase();
+        // `/usr/bin/foo fails` is a path in ordinary text, not a command.
+        let name = &head[1..];
+        if !name.is_empty() && !name.chars().all(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
         let first_arg = parts.next().map(str::to_string);
         let Some(spec) = find(&head) else {
             return Some(Self::Unknown(head));
@@ -195,7 +210,10 @@ impl SlashCommand {
             "review" => Self::Review(line[raw_head.len()..].trim().to_string()),
             "mcp" => Self::Mcp,
             "skills" => Self::Skills,
-            "sessions" => Self::Sessions,
+            "resume" => Self::Sessions,
+            "login" => Self::Login(first_arg),
+            "logout" => Self::Logout(first_arg),
+            "copy" => Self::Copy(first_arg),
             "usage" => Self::Usage,
             _ => Self::Unknown(head),
         })
@@ -219,7 +237,10 @@ impl SlashCommand {
             Self::Review(_) => "review",
             Self::Mcp => "mcp",
             Self::Skills => "skills",
-            Self::Sessions => "sessions",
+            Self::Sessions => "resume",
+            Self::Login(_) => "login",
+            Self::Logout(_) => "logout",
+            Self::Copy(_) => "copy",
             Self::Usage => "usage",
             Self::Unknown(_) => return None,
         };
@@ -245,6 +266,8 @@ mod tests {
     #[test]
     fn parses_every_command_and_ignores_plain_text() {
         assert_eq!(SlashCommand::parse("hello"), None);
+        assert_eq!(SlashCommand::parse("/usr/bin/foo fails"), None, "a path is text");
+        assert_eq!(SlashCommand::parse("/bogus"), Some(SlashCommand::Unknown("/bogus".into())));
         assert_eq!(SlashCommand::parse("  /exit "), Some(SlashCommand::Exit));
         assert_eq!(SlashCommand::parse("/QUIT"), Some(SlashCommand::Exit));
         assert_eq!(SlashCommand::parse("/model"), Some(SlashCommand::Model(None)));
@@ -299,8 +322,9 @@ mod tests {
         let cli: Vec<&str> = commands_for(Frontend::Cli).map(|c| c.name).collect();
         assert_eq!(cli.len(), COMMANDS.len(), "the CLI offers every command");
         let desktop: Vec<&str> = commands_for(Frontend::Desktop).map(|c| c.name).collect();
-        // Every command but `/exit` has a desktop equivalent (UX-021).
-        assert_eq!(desktop.len(), COMMANDS.len() - 1);
+        // Every command but the terminal-only `/exit`, `/login`, `/logout`
+        // and `/copy` has a desktop equivalent (UX-021).
+        assert_eq!(desktop.len(), COMMANDS.len() - 4);
         assert!(!desktop.contains(&"exit"));
         assert!(SlashCommand::Undo.supported_by(Frontend::Desktop));
         assert!(SlashCommand::Diff.supported_by(Frontend::Desktop));
@@ -314,13 +338,13 @@ mod tests {
         assert_eq!(names[0], "model");
         assert!(names.contains(&"mcp") && !names.contains(&"skills"));
         assert_eq!(matching("", Frontend::Cli).len(), COMMANDS.len());
-        let names: Vec<&str> = matching("ess", Frontend::Cli).iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["sessions"]);
+        let names: Vec<&str> = matching("sum", Frontend::Cli).iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["resume"]);
         assert!(matching("zzz", Frontend::Cli).is_empty());
         // The desktop never suggests CLI-only commands; a leading slash is fine.
         assert!(matching("ex", Frontend::Desktop).is_empty());
         let names: Vec<&str> = matching("/u", Frontend::Desktop).iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["undo", "usage", "build", "auto"]);
+        assert_eq!(names, vec!["undo", "usage", "build", "auto", "resume"]);
         assert_eq!(COMMANDS[0].usage(), "/model [provider/id]");
         assert_eq!(find("PLAN").unwrap().usage(), "/plan");
     }

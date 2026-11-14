@@ -15,6 +15,18 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// Whether a `/models` id can be used for chat: image, video, audio,
+/// embedding and moderation models (e.g. xAI's `grok-imagine-*`) are not
+/// offered as agent models.
+pub(super) fn is_chat_model(id: &str) -> bool {
+    const NON_CHAT: [&str; 12] = [
+        "imagine", "image", "video", "embed", "tts", "whisper", "audio", "dall-e", "moderation", "transcribe",
+        "speech", "rerank",
+    ];
+    let id = id.to_lowercase();
+    !NON_CHAT.iter().any(|marker| id.contains(marker))
+}
+
 impl PiProviderManager {
     fn live_models_path(&self) -> PathBuf {
         self.primary_dir.join("models-live.json")
@@ -29,6 +41,7 @@ impl PiProviderManager {
             .as_array()?
             .iter()
             .filter_map(Value::as_str)
+            .filter(|id| is_chat_model(id))
             .map(str::to_string)
             .collect();
         (!ids.is_empty()).then_some(ids)
@@ -76,9 +89,12 @@ impl PiProviderManager {
     /// Fetches the provider's live model list and caches it. An empty
     /// answer keeps the previous list (it would hide every model).
     pub async fn refresh_model_list(&self, provider_id: &str) -> Result<usize> {
-        let ids = self
+        let ids: Vec<String> = self
             .fetch_remote_model_ids(&FetchModelsInput { provider_id: Some(provider_id.to_string()), ..Default::default() })
-            .await?;
+            .await?
+            .into_iter()
+            .filter(|id| is_chat_model(id))
+            .collect();
         if ids.is_empty() {
             anyhow::bail!("{provider_id} returned no models");
         }
@@ -116,5 +132,20 @@ impl PiProviderManager {
             outcomes.push((id, outcome));
         }
         outcomes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_chat_model;
+
+    #[test]
+    fn media_and_embedding_models_are_not_chat_models() {
+        for id in ["grok-imagine-video-1.5", "grok-imagine-image", "text-embedding-3-small", "whisper-1", "gpt-4o-mini-tts"] {
+            assert!(!is_chat_model(id), "{id}");
+        }
+        for id in ["grok-4.7", "deepseek-v4.1-flash", "gpt-6-luna", "claude-haiku-5-5"] {
+            assert!(is_chat_model(id), "{id}");
+        }
     }
 }

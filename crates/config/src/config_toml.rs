@@ -40,7 +40,7 @@ pub struct SandboxNetwork {
 }
 
 /// `[shell_environment_policy]` as written in the file.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellEnvironmentPolicyToml {
     /// `all` (default), `core` or `none`.
@@ -54,8 +54,47 @@ pub struct ShellEnvironmentPolicyToml {
     pub include_only: Vec<String>,
 }
 
+/// Map keys only: the values of `set`, `env` and `http_headers` are often
+/// credentials, so `Debug` never prints them.
+fn key_names(map: &BTreeMap<String, String>) -> Vec<&str> {
+    map.keys().map(String::as_str).collect()
+}
+
+impl std::fmt::Debug for ShellEnvironmentPolicyToml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellEnvironmentPolicyToml")
+            .field("inherit", &self.inherit)
+            .field("ignore_default_excludes", &self.ignore_default_excludes)
+            .field("exclude", &self.exclude)
+            .field("set_names", &key_names(&self.set))
+            .field("include_only", &self.include_only)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_names", &key_names(&self.env))
+            .field("env_vars", &self.env_vars)
+            .field("cwd", &self.cwd)
+            .field("url", &self.url)
+            .field("bearer_token_env_var", &self.bearer_token_env_var)
+            .field("http_header_names", &key_names(&self.http_headers))
+            .field("env_http_headers", &self.env_http_headers)
+            .field("enabled", &self.enabled)
+            .field("startup_timeout_sec", &self.startup_timeout_sec)
+            .field("tool_timeout_sec", &self.tool_timeout_sec)
+            .field("enabled_tools", &self.enabled_tools)
+            .field("disabled_tools", &self.disabled_tools)
+            .finish()
+    }
+}
+
 /// `[mcp_servers.<name>]` (stdio or streamable-HTTP).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpServerConfig {
     pub command: Option<String>,
@@ -97,6 +136,16 @@ pub struct HistoryConfig {
     pub persistence: Option<String>,
 }
 
+/// `[tui]`: `lcgn` terminal UI look and motion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// `dark` or `light`; unset follows `COLORFGBG`, else dark.
+    pub theme: Option<String>,
+    /// `false` turns off the spinner and shimmer (screen readers).
+    pub animations: Option<bool>,
+}
+
 /// `[projects."<path>"]` (Codex): per-folder settings. Only `trust_level`
 /// (`"trusted"` / `"untrusted"`) is used.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -120,8 +169,40 @@ pub struct ConfigProfile {
     pub sandbox_mode: Option<String>,
 }
 
+/// `Debug` lists `[model_providers.*]` by name only: those raw tables may
+/// hold `experimental_bearer_token` or header values.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("model", &self.model)
+            .field("model_provider", &self.model_provider)
+            .field("model_reasoning_effort", &self.model_reasoning_effort)
+            .field("model_reasoning_summary", &self.model_reasoning_summary)
+            .field("model_verbosity", &self.model_verbosity)
+            .field("model_context_window", &self.model_context_window)
+            .field("model_auto_compact_token_limit", &self.model_auto_compact_token_limit)
+            .field("approval_policy", &self.approval_policy)
+            .field("sandbox_mode", &self.sandbox_mode)
+            .field("sandbox_workspace_write", &self.sandbox_workspace_write)
+            .field("sandbox", &self.sandbox)
+            .field("shell_environment_policy", &self.shell_environment_policy)
+            .field("model_provider_names", &self.model_providers.keys().collect::<Vec<_>>())
+            .field("mcp_servers", &self.mcp_servers)
+            .field("profile", &self.profile)
+            .field("profiles", &self.profiles)
+            .field("project_doc_max_bytes", &self.project_doc_max_bytes)
+            .field("project_doc_fallback_filenames", &self.project_doc_fallback_filenames)
+            .field("notify", &self.notify)
+            .field("hide_agent_reasoning", &self.hide_agent_reasoning)
+            .field("history", &self.history)
+            .field("tui", &self.tui)
+            .field("projects", &self.projects)
+            .finish()
+    }
+}
+
 /// The typed, merged `config.toml`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub model: Option<String>,
@@ -154,6 +235,7 @@ pub struct Config {
     pub notify: Vec<String>,
     pub hide_agent_reasoning: Option<bool>,
     pub history: Option<HistoryConfig>,
+    pub tui: Option<TuiConfig>,
     /// Per-folder trust decisions, keyed by the canonical folder path.
     pub projects: BTreeMap<String, ProjectConfig>,
 }
@@ -178,9 +260,11 @@ pub fn project_trust_levels(files: &[PathBuf]) -> BTreeMap<String, String> {
 
 /// Sets (`Some`) or removes (`None`) `[projects."<key>"] trust_level` in one
 /// `config.toml`, keeping the rest of the file (comments, order) intact.
-/// The file and its directory are created when missing.
+/// The file and its directory are created when missing. The read-modify-write
+/// runs under the file's lock and the result replaces the file atomically.
 pub fn write_project_trust_level(file: &Path, key: &str, level: Option<&str>) -> Result<(), ConfigError> {
     let fail = |message: String| ConfigError { message: format!("{}: {message}", file.display()) };
+    let _lock = crate::oauth::auth_lock::AuthFileLock::acquire_blocking(file).map_err(|err| fail(err.to_string()))?;
     let raw = match std::fs::read_to_string(file) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -216,10 +300,7 @@ pub fn write_project_trust_level(file: &Path, key: &str, level: Option<&str>) ->
             }
         }
     }
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| fail(err.to_string()))?;
-    }
-    std::fs::write(file, doc.to_string()).map_err(|err| fail(err.to_string()))
+    crate::private_file::write_private_atomic(file, doc.to_string().as_bytes()).map_err(|err| fail(err.to_string()))
 }
 
 /// Loads the merged `[mcp_servers.<name>]` tables from the agent-dir chain
@@ -716,7 +797,23 @@ a = 1
 
         let created = tmp.path().join("fresh").join("config.toml");
         write_project_trust_level(&created, "/p", Some("trusted")).unwrap();
-        assert_eq!(project_trust_levels(&[created]).get("/p").map(String::as_str), Some("trusted"));
+        assert_eq!(project_trust_levels(std::slice::from_ref(&created)).get("/p").map(String::as_str), Some("trusted"));
+        // Atomic and locked: no temp file or lock directory is left behind.
+        let names: Vec<_> = std::fs::read_dir(created.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["config.toml"]);
+    }
+
+    #[test]
+    fn debug_output_hides_env_header_and_provider_secrets() {
+        let config = Config::from_toml_str(
+            "[shell_environment_policy.set]\nTOKEN = \"fake-set-secret\"\n\
+             [mcp_servers.x]\ncommand = \"srv\"\nenv = { KEY = \"fake-env-secret\" }\nhttp_headers = { Authorization = \"fake-header-secret\" }\n\
+             [model_providers.p]\nexperimental_bearer_token = \"fake-bearer-secret\"\n",
+        )
+        .unwrap();
+        let text = format!("{config:?}");
+        assert!(!text.contains("fake-"), "{text}");
+        assert!(text.contains("TOKEN") && text.contains("KEY") && text.contains("Authorization"), "{text}");
     }
 
     #[test]

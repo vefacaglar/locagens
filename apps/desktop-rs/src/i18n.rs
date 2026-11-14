@@ -631,7 +631,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("slash.diff", "show the working-tree diff", "çalışma ağacı farkını göster"),
     ("slash.mcp", "list MCP servers and status", "MCP sunucularını ve durumlarını listele"),
     ("slash.skills", "list discovered skills", "bulunan becerileri listele"),
-    ("slash.sessions", "list sessions for this directory", "bu klasörün oturumlarını listele"),
+    ("slash.resume", "pick a session of this folder to continue", "bu klasörün bir oturumunu seçip sürdür"),
     ("slash.usage", "usage and cost of this session", "bu oturumun kullanımı ve maliyeti"),
 ];
 

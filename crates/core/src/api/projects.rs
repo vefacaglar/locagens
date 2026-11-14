@@ -573,6 +573,9 @@ pub async fn undo_last_turn(
     run_id: Option<&str>,
 ) -> ApiResult<GitSnapshot> {
     let canonical = require_registered_project(state, path)?;
+    if run_id.is_some_and(|id| state.orchestrator.handle(id).is_some()) {
+        return Err(ApiError::conflict("The run is still working; wait for it to finish or cancel it before undoing."));
+    }
     undo_last_turn_for_path(&canonical, run_id)
         .await
         .map_err(ApiError::internal)

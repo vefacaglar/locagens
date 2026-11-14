@@ -1,11 +1,12 @@
 //! Markdown -> styled, width-wrapped ratatui lines (pulldown-cmark).
 
+use super::theme;
 use super::highlight::highlight_code;
 use super::wrap::{display_width, sanitize, truncate_to_width, wrap_with_prefix};
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Renders markdown source into lines no wider than `width` columns.
@@ -87,7 +88,7 @@ impl Renderer {
             Event::End(tag) => self.end(tag),
             Event::Text(text) => self.text(&text),
             Event::Code(code) => {
-                let style = self.style().fg(Color::Cyan);
+                let style = self.style().fg(theme::accent());
                 self.inline.push(Span::styled(sanitize(&code), style));
             }
             Event::SoftBreak => self.inline.push(Span::styled(" ", self.style())),
@@ -97,7 +98,7 @@ impl Renderer {
                 let rule = "─".repeat(self.width.min(40));
                 self.lines.push(Line::from(Span::styled(
                     rule,
-                    Style::default().add_modifier(Modifier::DIM),
+                    theme::dim(),
                 )));
                 self.blank_line();
             }
@@ -174,7 +175,7 @@ impl Renderer {
             Tag::Strikethrough => self.push_style(|s| s.add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { dest_url, .. } => {
                 self.link_url = Some(dest_url.to_string());
-                self.push_style(|s| s.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED));
+                self.push_style(|s| s.fg(theme::accent()).add_modifier(Modifier::UNDERLINED));
             }
             _ => {}
         }
@@ -229,7 +230,7 @@ impl Renderer {
             TagEnd::Link => {
                 self.pop_style();
                 if let Some(url) = self.link_url.take() {
-                    let dim = Style::default().add_modifier(Modifier::DIM);
+                    let dim = theme::dim();
                     self.inline.push(Span::styled(format!(" ({url})"), dim));
                 }
             }
@@ -261,7 +262,7 @@ impl Renderer {
     fn take_prefixes(&mut self) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
         let mut first: Vec<Span<'static>> = Vec::new();
         let mut rest: Vec<Span<'static>> = Vec::new();
-        let quote_style = Style::default().fg(Color::Green);
+        let quote_style = Style::default().fg(theme::ok());
         for context in self.contexts.iter_mut() {
             match context {
                 Context::Quote => {
@@ -276,7 +277,7 @@ impl Renderer {
                     if *marker_used {
                         first.push(Span::raw(blank.clone()));
                     } else {
-                        first.push(Span::styled(marker.clone(), Style::default().fg(Color::Cyan)));
+                        first.push(Span::styled(marker.clone(), Style::default().fg(theme::accent())));
                         *marker_used = true;
                     }
                     rest.push(Span::raw(blank));
@@ -304,7 +305,7 @@ impl Renderer {
             return;
         };
         let (first, rest) = self.take_prefixes();
-        let dim = Style::default().add_modifier(Modifier::DIM);
+        let dim = theme::dim();
         let highlighted = highlight_code(code.text.trim_end_matches('\n'), &code.lang);
         let mut first_line = true;
         if !code.lang.is_empty() {
@@ -334,7 +335,7 @@ impl Renderer {
             return;
         }
         let widths = fit_column_widths(&table, columns, self.width.saturating_sub(display_width_of(&first)));
-        let dim = Style::default().add_modifier(Modifier::DIM);
+        let dim = theme::dim();
         let mut rendered: Vec<Line<'static>> = Vec::new();
         rendered.push(table_row(&table.header, &widths, &table.alignments, Some(Modifier::BOLD)));
         let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w + 2)).collect();
@@ -404,7 +405,7 @@ fn table_row(
     alignments: &[Alignment],
     modifier: Option<Modifier>,
 ) -> Line<'static> {
-    let dim = Style::default().add_modifier(Modifier::DIM);
+    let dim = theme::dim();
     let cell_style = modifier.map(|m| Style::default().add_modifier(m)).unwrap_or_default();
     let mut spans = vec![Span::styled("│", dim)];
     for (index, width) in widths.iter().enumerate() {
@@ -461,7 +462,7 @@ mod tests {
         let lines = render_markdown("run `cargo test` now", 40);
         for word in ["cargo", "test"] {
             let span = lines[0].spans.iter().find(|s| s.content == word).unwrap();
-            assert_eq!(span.style.fg, Some(Color::Cyan), "{word}");
+            assert_eq!(span.style.fg, Some(theme::accent()), "{word}");
         }
         let plain = lines[0].spans.iter().find(|s| s.content == "run").unwrap();
         assert_eq!(plain.style.fg, None);
@@ -469,6 +470,7 @@ mod tests {
 
     #[test]
     fn fenced_code_is_highlighted() {
+        use ratatui::style::Color;
         let lines = render_markdown("```rust\nfn main() {}\n```", 40);
         let text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(text.iter().any(|l| l.contains("fn main() {}")), "got {text:?}");

@@ -17,7 +17,6 @@ use locagens_protocol::review::{
 };
 use serde_json::json;
 use std::path::Path;
-use std::process::Command;
 
 /// Reviewer rubric appended to the system prompt of review runs.
 pub const REVIEW_RUBRIC: &str = include_str!("review_prompt.md");
@@ -52,11 +51,7 @@ fn git_output(project: &Path, args: &[&str]) -> Result<(i32, String), String> {
         return Err(format!("git {subcommand}: not allowed in review mode (read-only git only)."));
     }
     crate::services::git::check_sandbox_metadata(project)?;
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
+    let output = crate::services::git::git_command(project, args)
         .output()
         .map_err(|err| format!("Failed to run git: {err}"))?;
     let code = output.status.code().unwrap_or(-1);
@@ -322,6 +317,7 @@ pub(crate) fn finalize_review_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")

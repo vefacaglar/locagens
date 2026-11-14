@@ -170,7 +170,7 @@ file `.usage_seq`); `list_usage` aggregates the `usage` lines of all rollouts.
 |---|---|---|
 | `id` | `integer` | Auto-increment surrogate key |
 | `runId` | `string` | Parent run (the rollout the line lives in) |
-| `agentRole` | `string?` | Agent role: `main` for the main agent, `explorer`, `worker` (legacy rows with `planner` are read as `main`) |
+| `agentRole` | `string?` | Agent role: `main` for the main agent, `explorer`, `worker`, or `title` for the first-turn chat-title call (legacy rows with `planner` are read as `main`) |
 | `providerId` | `string` | Provider identifier |
 | `model` | `string` | Model name used for completion |
 | `inputTokens` / `outputTokens` | `integer` | Prompt / completion token counts |
@@ -281,7 +281,14 @@ auth.json          — provider id → credential
                      ({ "type": "api_key", "key": "..." },
                       "!command", "$ENV_VAR", or OAuth)
 models.json        — custom provider configs & model overrides
+models-live.json   — provider id → { "fetchedAtMs", "models": [ids] }: the
+                     last `GET /models` list (re-fetched after 6 h); once
+                     present it decides which models the provider offers
 ```
+
+Desktop preferences live in the app's `settings.json` (appearance,
+`hiddenModels` — `provider/model` ids switched off in Settings → Providers,
+also honoured by the TUI — and the `layout` column widths).
 
 Secrets never enter the storage files above.
 

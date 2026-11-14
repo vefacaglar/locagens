@@ -72,6 +72,19 @@ pub(super) fn backoff_delay(attempt: usize) -> Duration {
     base.saturating_add(jitter).min(Duration::from_secs(10))
 }
 
+/// Longest server-requested wait honoured before a retry. A 60-second rate
+/// limit window is waited out instead of failing the run (FR-070).
+pub(super) const MAX_RETRY_AFTER: Duration = Duration::from_secs(90);
+
+/// The server's requested wait: `retry-after-ms` (OpenAI) or `Retry-After`
+/// in seconds, capped at [`MAX_RETRY_AFTER`].
+pub(super) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::trim);
+    let millis = header("retry-after-ms").and_then(|raw| raw.parse::<f64>().ok()).map(|ms| ms / 1000.0);
+    let seconds = millis.or_else(|| header("retry-after").and_then(|raw| raw.parse::<f64>().ok()))?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds).min(MAX_RETRY_AFTER))
+}
+
 /// Whether an HTTP status is transient and worth retrying.
 pub(super) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
@@ -100,20 +113,24 @@ pub(super) async fn send_with_retry(
         match sent {
             Ok(response) => {
                 let status = response.status();
+                if status.is_redirection() {
+                    let location = response
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("?");
+                    anyhow::bail!(
+                        "Provider redirected ({status}) to {location}. Redirects are not followed so the API key \
+                         never leaves the configured host; set the provider's baseUrl to the final address."
+                    );
+                }
                 if status.is_success()
                     || attempt + 1 >= MAX_SEND_ATTEMPTS
                     || !is_retryable_status(status)
                 {
                     return Ok(response);
                 }
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|raw| raw.trim().parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| backoff_delay(attempt))
-                    .min(Duration::from_secs(10));
+                let retry_after = retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
                 tracing::warn!("Provider returned {status}; retrying in {retry_after:?}");
                 tokio::time::sleep(retry_after).await;
                 attempt += 1;
@@ -139,6 +156,9 @@ pub fn shared_http_client() -> reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
+            // Requests carry `x-api-key` / `Authorization`: never follow a
+            // redirect to another host with them (FR-035).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default()
     });

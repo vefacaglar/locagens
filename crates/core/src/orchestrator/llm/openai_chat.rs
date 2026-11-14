@@ -102,7 +102,8 @@ pub(super) fn non_streaming_openai(body: &Value) -> Value {
                 .unwrap_or(Value::Null),
         );
         delta.insert("tool_calls".into(), message.get("tool_calls").cloned().unwrap_or(Value::Null));
-        chunk["choices"] = json!([{ "delta": delta }]);
+        let finish_reason = body.pointer("/choices/0/finish_reason").cloned().unwrap_or(Value::Null);
+        chunk["choices"] = json!([{ "delta": delta, "finish_reason": finish_reason }]);
     }
     chunk
 }
