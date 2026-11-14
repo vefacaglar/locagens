@@ -125,17 +125,14 @@ pub fn build_groups(messages: &[RunMessage]) -> Vec<Group> {
 }
 
 /// Whether each top-level group shows the model label (UX-025): only the
-/// first assistant message of a turn, or one whose model differs from the
-/// previous assistant message.
+/// first assistant message of the chat, or one whose model differs from the
+/// previous assistant message (a model switch mid-chat stays visible).
 pub fn model_label_flags(groups: &[Group]) -> Vec<bool> {
     let mut last_model: Option<Option<String>> = None;
     groups
         .iter()
         .map(|group| match group {
-            Group::User(_) => {
-                last_model = None;
-                false
-            }
+            Group::User(_) => false,
             Group::Assistant { message, .. } => {
                 let show = last_model.as_ref() != Some(&message.model);
                 last_model = Some(message.model.clone());
@@ -871,7 +868,7 @@ mod patch_progress_tests {
     }
 
     #[test]
-    fn model_label_only_on_the_first_answer_of_a_turn_or_on_a_change() {
+    fn model_label_only_on_the_first_answer_or_on_a_change() {
         let groups = vec![
             Group::User(message("user", None)),
             Group::Assistant { message: message("assistant", Some("m1")), tool_calls: vec![] },
@@ -880,7 +877,7 @@ mod patch_progress_tests {
             Group::User(message("user", None)),
             Group::Assistant { message: message("assistant", Some("m2")), tool_calls: vec![] },
         ];
-        assert_eq!(model_label_flags(&groups), vec![false, true, false, true, false, true]);
+        assert_eq!(model_label_flags(&groups), vec![false, true, false, true, false, false]);
     }
 
     #[test]

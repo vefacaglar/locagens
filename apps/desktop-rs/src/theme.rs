@@ -444,13 +444,13 @@ label { color: var(--text-2); font-size: 12px; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* ---------------- sidebar ---------------- */
-.sidebar-brand { padding: var(--brand-pad); justify-content: space-between; border-bottom-color: transparent; }
-.brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sidebar-brand { padding: var(--brand-pad); justify-content: space-between; gap: 6px; border-bottom-color: transparent; }
+.brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
 .logo-mark { display: block; flex: none; }
 .logo-mark .lm-bg { fill: #131317; stroke: rgba(255, 255, 255, 0.14); stroke-width: 3; }
 .logo-mark .lm-fg { fill: #e6e6ea; }
 .logo-mark .lm-node { fill: #7f89c8; }
-.brand-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+.brand-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-toolbar { display: flex; align-items: center; gap: 2px; margin-left: auto; flex: none; }
 .sidebar-toolbar button {
   width: 28px; height: 28px; padding: 0;
@@ -893,6 +893,7 @@ button.section-head:hover { color: var(--text-2); }
   color: var(--text-3); display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
 }
 .panel-section-title.grow { flex: 1; }
+.panel-section-title.path { text-transform: none; letter-spacing: 0; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel-actions { display: flex; gap: 8px; }
 .plan-task { display: flex; gap: 10px; align-items: flex-start; padding: 3px 0; }
 .plan-task .task-icon { color: var(--text-3); margin-top: 1px; }
@@ -1067,7 +1068,8 @@ button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex
 .composer-select-btn.mode-plan { color: var(--accent); background: var(--accent-soft); }
 .composer.mode-auto { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
 .composer-context-menu.mode-menu { width: 300px; }
-.mode-item { flex-direction: column; align-items: flex-start !important; gap: 2px; }
+.mode-item { align-items: center; padding-top: 7px; padding-bottom: 7px; }
+.mode-item .ccm-item-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
 .mode-name { font-weight: 500; color: var(--text); }
 .mode-desc { font-size: 12px; color: var(--text-3); white-space: normal; }
 
@@ -1099,7 +1101,8 @@ button.toolbar-btn { width: 28px; height: 28px; padding: 0; display: inline-flex
 }
 
 /* ---------------- models & accounts (UX-001, UX-016) ---------------- */
-.connect-row { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }
+.connect-row { gap: 8px; padding: 10px 8px; border-radius: 0; border-bottom: 1px solid var(--border); }
+.connect-row > button { font-size: 12px; }
 .connect-row .connect-head { display: flex; align-items: center; gap: 10px; }
 .connect-name { font-weight: 500; color: var(--text); flex: 1; min-width: 0; }
 .connect-status { font-size: 12px; color: var(--text-3); }

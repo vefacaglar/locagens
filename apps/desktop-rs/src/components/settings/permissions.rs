@@ -58,7 +58,7 @@ pub(super) fn PermissionsTab() -> Element {
         for (project, list) in group_rules(&shown) {
             div {
                 key: "{project}",
-                class: "panel-section-title",
+                class: if project.is_empty() { "panel-section-title" } else { "panel-section-title path" },
                 title: "{project}",
                 if project.is_empty() { "{store.t(\"perms.everywhere\")}" } else { "{project}" }
             }

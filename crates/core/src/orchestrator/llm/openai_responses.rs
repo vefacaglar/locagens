@@ -197,7 +197,7 @@ pub async fn stream_openai_responses(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Provider returned {status}: {}", summarize_error(&body));
+        return Err(provider_error(status, &body));
     }
 
     consume_response(response, endpoint, on_delta, on_tool_args, should_stop).await

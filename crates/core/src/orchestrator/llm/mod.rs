@@ -97,11 +97,11 @@ pub async fn stream_chat_observed(
             let retry_status = retry.status();
             if !retry_status.is_success() {
                 let retry_body = retry.text().await.unwrap_or_default();
-                anyhow::bail!("Provider returned {retry_status}: {}", summarize_error(&retry_body));
+                return Err(provider_error(retry_status, &retry_body));
             }
             return consume_response(retry, endpoint, on_delta, on_tool_args, should_stop).await;
         }
-        anyhow::bail!("Provider returned {status}: {}", summarize_error(&body));
+        return Err(provider_error(status, &body));
     }
 
     consume_response(response, endpoint, on_delta, on_tool_args, should_stop).await

@@ -493,7 +493,8 @@ impl UiStore {
         }
     }
 
-    /// Loads the provider catalog and, when nothing is selected yet, picks
+    /// Loads the provider catalog and, when nothing is selected yet or the
+    /// selection is no longer offered (a refreshed list dropped it), picks
     /// the remembered model (UX-003) or else the first visible one.
     async fn load_providers(&self) {
         let mut store = *self;
@@ -501,10 +502,14 @@ impl UiStore {
         store.hidden_models.set(api::providers::hidden_models(&core()));
         store.providers_catalog.set(providers);
         store.providers_loaded.set(true);
-        if !store.selected_provider.peek().is_empty() && !store.selected_model.peek().is_empty() {
+        let catalog = store.visible_catalog();
+        let still_offered = {
+            let (provider, model) = (store.selected_provider.peek(), store.selected_model.peek());
+            catalog.iter().any(|p| p.id == *provider && p.models.iter().any(|m| m == &*model))
+        };
+        if still_offered {
             return;
         }
-        let catalog = store.visible_catalog();
         let remembered = api::ui_state::load_ui_state();
         if let Some((provider, model)) = default_model(&catalog, remembered.provider_and_model()) {
             store.selected_provider.set(provider);
@@ -696,9 +701,16 @@ impl UiStore {
 
     /// FR-057: continuing a conversation keeps its model, effort and mode
     /// unless the user picks others. Review runs keep the composer's mode.
+    /// A model the loaded catalog no longer offers is not adopted, so the
+    /// next message does not go to a model the provider dropped.
     fn adopt_run_selection(&self, run: &Run) {
         let mut store = *self;
-        if !run.provider_id.is_empty() && !run.model.is_empty() {
+        let offered = !*store.providers_loaded.peek()
+            || store
+                .visible_catalog()
+                .iter()
+                .any(|p| p.id == run.provider_id && p.models.iter().any(|m| m == &run.model));
+        if !run.provider_id.is_empty() && !run.model.is_empty() && offered {
             store.selected_provider.set(run.provider_id.clone());
             store.selected_model.set(run.model.clone());
         }

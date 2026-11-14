@@ -177,7 +177,7 @@ fn UsageRow(entry: UsageLogEntry) -> Element {
         .find(|run| run.id == entry.run_id)
         .map(|run| run.title.clone())
         .unwrap_or_else(|| entry.run_id.chars().take(14).collect());
-    let when = entry.created_at.chars().take(19).collect::<String>();
+    let when = locagens_core::api::runs::local_timestamp(&entry.created_at);
     let role = store.t(crate::i18n::role_key(entry.role()));
     rsx! {
         tr {

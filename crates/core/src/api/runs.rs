@@ -890,10 +890,18 @@ pub async fn resync_run(state: &AppState, run_id: &str) -> RunResync {
 // ----------------------------------------------------------------------
 
 /// Filtered + paged usage logs with totals.
+/// An RFC 3339 timestamp as local `YYYY-MM-DD HH:MM:SS` (the raw text cut
+/// to 19 characters when it does not parse).
+pub fn local_timestamp(rfc3339: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .map(|at| at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| rfc3339.chars().take(19).collect())
+}
+
 pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<UsageLogsResponse> {
     let all = state.db.list_usage(None);
     let search = query.search.clone().unwrap_or_default().to_lowercase();
-    let filtered: Vec<&UsageLogEntry> = all
+    let mut filtered: Vec<&UsageLogEntry> = all
         .iter()
         .filter(|entry| {
             if let Some(provider) = query.provider_id.as_deref().filter(|p| !p.is_empty()) {
@@ -923,6 +931,8 @@ pub async fn usage_logs(state: &AppState, query: &UsageLogQuery) -> ApiResult<Us
         })
         .collect();
 
+    // Newest first, so the first page shows what just happened.
+    filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     let total = filtered.len();
     let unique_providers: Vec<String> = {
         let mut providers: Vec<String> = filtered.iter().map(|entry| entry.provider_id.clone()).collect();

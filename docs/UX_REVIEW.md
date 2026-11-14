@@ -703,7 +703,7 @@ and keep 11 px for badges and counters only. The light theme's `#6e6e76` on
 
 ### UX-025 · low · S · desktop · Less repetition in the thread
 
-**Status:** done (desktop). The model label only shows when it changes; tool rows read as verb + target.
+**Status:** done (desktop). The model label shows on the chat's first answer and whenever the model changes (not on every turn); tool rows read as verb + target.
 
 **Current.** Every assistant message carries a label with the raw model id
 (`desktop/components/message_thread.rs:179-182`), so a turn with ten tool

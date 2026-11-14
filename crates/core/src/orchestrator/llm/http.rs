@@ -167,6 +167,22 @@ pub fn shared_http_client() -> reqwest::Client {
 
 
 /// Short human-readable error summary from an API error body.
+/// The error for a non-success response: the status, the provider's own
+/// message when it sent one, and a hint for a missing model or endpoint.
+pub(super) fn provider_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let summary = summarize_error(body);
+    let summary = summary.trim();
+    let mut text = format!("Provider returned {status}");
+    if !summary.is_empty() {
+        text.push_str(": ");
+        text.push_str(summary);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        text.push_str(" (the model or endpoint may not be available for this provider or account)");
+    }
+    anyhow::anyhow!(text)
+}
+
 pub(super) fn summarize_error(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
@@ -178,4 +194,23 @@ pub(super) fn summarize_error(body: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| body.chars().take(400).collect())
+}
+
+#[cfg(test)]
+mod provider_error_tests {
+    use super::provider_error;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn empty_body_has_no_dangling_colon() {
+        let text = provider_error(StatusCode::BAD_GATEWAY, "").to_string();
+        assert_eq!(text, "Provider returned 502 Bad Gateway");
+    }
+
+    #[test]
+    fn not_found_gets_a_hint_and_keeps_the_message() {
+        let text = provider_error(StatusCode::NOT_FOUND, r#"{"error":{"message":"no such model"}}"#).to_string();
+        assert!(text.starts_with("Provider returned 404 Not Found: no such model"), "{text}");
+        assert!(text.contains("may not be available"), "{text}");
+    }
 }
