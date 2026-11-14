@@ -3475,6 +3475,7 @@ dependencies = [
 name = "locagens-desktop"
 version = "0.2.0"
 dependencies = [
+ "clipboard-win",
  "dioxus",
  "locagens-core",
  "pulldown-cmark",

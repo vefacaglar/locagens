@@ -15,6 +15,9 @@ pub fn UsageLogsPage() -> Element {
     const PAGE_SIZE: i64 = 50;
     // Epoch when the page opened: that first load is immediate, later ones debounced.
     let opened_at = use_hook(|| *store.usage_epoch.peek());
+    // Newest query generation: older responses are dropped (FR-066).
+    let generation = use_hook(|| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+    let mut last_search = use_signal(String::new);
 
     use_effect(move || {
         // Re-query when the search text or page changes, and (debounced)
@@ -24,7 +27,21 @@ pub fn UsageLogsPage() -> Element {
         let offset_value = *offset.read();
         let epoch = *store.usage_epoch.read();
         let mut data = data;
+        let generation = generation.clone();
+        let mine = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let typed = *last_search.peek() != search_value;
+        if typed {
+            last_search.set(search_value.clone());
+        }
         spawn(async move {
+            let current = || generation.load(std::sync::atomic::Ordering::SeqCst) == mine;
+            if typed {
+                // Debounce typing: one scan after a pause, not per keystroke.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                if !current() {
+                    return;
+                }
+            }
             if epoch != opened_at {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if *store.usage_epoch.peek() != epoch {
@@ -38,7 +55,10 @@ pub fn UsageLogsPage() -> Element {
                 search: if search_value.is_empty() { None } else { Some(search_value) },
                 ..Default::default()
             };
-            data.set(usage_logs(&state, &query).await.ok());
+            let response = usage_logs(&state, &query).await.ok();
+            if current() {
+                data.set(response);
+            }
         });
     });
 

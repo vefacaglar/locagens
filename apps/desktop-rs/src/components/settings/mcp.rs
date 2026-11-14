@@ -1,8 +1,49 @@
 //! MCP tab: servers list, add / save, toggle and delete.
 
 use crate::state_ui::{core, UiStore};
+use crate::components::ConfirmButton;
 use dioxus::prelude::*;
 use locagens_core::services::mcp::McpServerInput;
+
+/// Splits a typed stdio command line into program and arguments (FR-058:
+/// `npx -y @scope/server` is `npx` with two arguments). Double or single
+/// quotes group words; there are no escapes.
+pub fn split_command_line(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for ch in line.chars() {
+        match (quote, ch) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if started || !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// i18n key of an MCP transport label.
+fn transport_key(transport: &str) -> &'static str {
+    match transport {
+        "stdio" => "mcp.transport_stdio",
+        "sse" => "mcp.transport_sse",
+        _ => "mcp.transport_http",
+    }
+}
 
 /// The project whose `.locagens/mcp.json` servers the MCP tab should include.
 fn selected_project(store: &UiStore) -> Option<String> {
@@ -77,7 +118,9 @@ pub(super) fn McpTab() -> Element {
                         let mut servers = servers;
                         let name = new_name.read().trim().to_string();
                         let transport = new_transport.read().clone();
-                        let command = new_command.read().trim().to_string();
+                        let mut words = split_command_line(new_command.read().trim());
+                        let command = if words.is_empty() { String::new() } else { words.remove(0) };
+                        let args = (!words.is_empty()).then_some(words);
                         let url = new_url.read().trim().to_string();
                         spawn(async move {
                             let state = core();
@@ -88,7 +131,7 @@ pub(super) fn McpTab() -> Element {
                                     scope: Some("user".to_string()),
                                     transport: Some(transport),
                                     command: if command.is_empty() { None } else { Some(command) },
-                                    args: None,
+                                    args,
                                     env: None,
                                     url: if url.is_empty() { None } else { Some(url) },
                                     enabled: Some(true),
@@ -126,9 +169,11 @@ pub(super) fn McpTab() -> Element {
                 let enabled = server.config.enabled;
                 let transport = server.config.transport.clone();
                 let scope = server.config.scope.clone();
-                let detail = server.config.command.clone()
-                    .or_else(|| server.config.url.clone())
-                    .unwrap_or_default();
+                let detail = match (&server.config.command, &server.config.args) {
+                    (Some(command), Some(args)) if !args.is_empty() => format!("{command} {}", args.join(" ")),
+                    (Some(command), _) => command.clone(),
+                    _ => server.config.url.clone().unwrap_or_default(),
+                };
                 let tool_count = server.tools.len();
                 let toggle_name = name.clone();
                 let delete_name = name.clone();
@@ -145,7 +190,7 @@ pub(super) fn McpTab() -> Element {
                                 style: "font-weight:600",
                                 "{name} "
                                 span { class: if enabled { "badge ok" } else { "badge" }, if enabled { "{store.t(\"common.enabled\")}" } else { "{store.t(\"common.disabled\")}" } }
-                                span { class: "badge", "{transport} · {scope}" }
+                                span { class: "badge", "{store.t(transport_key(&transport))} · {scope}" }
                             }
                             div { class: "mono", style: "font-size:11px", "{detail} · {tool_count} {store.t(\"mcp.tools\")}" }
                             if let Some(err) = server.error.clone() {
@@ -202,9 +247,9 @@ pub(super) fn McpTab() -> Element {
                             },
                             if enabled { "{store.t(\"common.disable\")}" } else { "{store.t(\"common.enable\")}" }
                         }
-                        button {
-                            class: "danger",
-                            onclick: move |_| {
+                        ConfirmButton {
+                            label: store.t("common.delete").to_string(),
+                            on_confirm: move |_| {
                                 let mut servers = servers;
                                 let delete_name = delete_name.clone();
                                 spawn(async move {
@@ -219,11 +264,23 @@ pub(super) fn McpTab() -> Element {
                                     }
                                 });
                             },
-                            "{store.t(\"common.delete\")}"
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_lines_split_into_program_and_args() {
+        assert_eq!(split_command_line("npx -y @scope/server"), vec!["npx", "-y", "@scope/server"]);
+        assert_eq!(split_command_line(r#""C:/Program Files/x.exe"  --flag 'a b'"#), vec!["C:/Program Files/x.exe", "--flag", "a b"]);
+        assert_eq!(split_command_line("run ''"), vec!["run", ""]);
+        assert!(split_command_line("   ").is_empty());
     }
 }

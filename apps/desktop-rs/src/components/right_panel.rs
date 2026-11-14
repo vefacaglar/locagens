@@ -6,7 +6,7 @@ use crate::components::icons::*;
 use crate::components::message_thread::DiffView;
 use crate::components::start_window_drag;
 use crate::markdown::render_markdown;
-use crate::state_ui::{core, RightPanelTab, UiStore};
+use crate::state_ui::{core, mode_key, RightPanelTab, UiStore};
 use dioxus::prelude::*;
 use locagens_core::api::projects::{GitFileDiff, GitStatus, GitWorktree};
 use locagens_core::api::processes::{list_processes, process_logs, spawn_process, SpawnProcessInput};
@@ -105,6 +105,18 @@ fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
     let initially_open = matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents)
         || *store.right_panel_tab.peek() == tab;
     let mut open = use_signal(|| initially_open);
+    // "Review changes" / `/diff` select a tab: open its section.
+    use_effect(move || {
+        if *store.right_panel_tab.read() == tab && !*open.peek() {
+            open.set(true);
+        }
+    });
+    let section_id = match tab {
+        RightPanelTab::Plan => "inspector-plan",
+        RightPanelTab::Agents => "inspector-agents",
+        RightPanelTab::Git => "inspector-git",
+        RightPanelTab::Terminal => "inspector-terminal",
+    };
     let (name, icon) = match tab {
         RightPanelTab::Plan => (store.t("inspector.plan"), icon_list_checks()),
         RightPanelTab::Agents => (store.t("inspector.agents"), icon_users()),
@@ -114,9 +126,11 @@ fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
     rsx! {
         section {
             class: "inspector-section",
+            id: "{section_id}",
             button {
                 class: "section-head",
                 title: "{name}",
+                "aria-expanded": "{open.read()}",
                 onclick: move |_| {
                     let mut store = store;
                     let next = !*open.read();
@@ -165,11 +179,9 @@ fn EnvironmentSection() -> Element {
         .as_deref()
         .and_then(|path| std::path::Path::new(path).file_name())
         .map(|name| name.to_string_lossy().to_string());
-    let mode = match store.selected_mode.read().as_str() {
-        "plan" => store.t("mode.plan"),
-        "auto" => store.t("mode.auto"),
-        _ => store.t("mode.build"),
-    };
+    let selected_mode = store.selected_mode.read().clone();
+    let mode = store.t(mode_key(&selected_mode));
+    let mode_class = if selected_mode == "auto" { "grow warn-text" } else { "grow" };
     let branch = branch.read().clone().flatten();
     rsx! {
         section {
@@ -195,7 +207,7 @@ fn EnvironmentSection() -> Element {
                 div {
                     class: "info-row",
                     {icon_shield()}
-                    span { class: "grow", "{mode}" }
+                    span { class: "{mode_class}", "{mode}" }
                 }
             }
         }
@@ -322,6 +334,7 @@ fn AgentsTab() -> Element {
     let store: UiStore = use_context();
     let messages = store.messages.read().clone();
     let spawned = store.spawned_agents.read().clone();
+    let run_live = super::run_active(store.active_run.read().as_ref());
     let agents: Vec<(String, String, usize)> = {
         // Group by (role, name).
         let mut map: std::collections::BTreeMap<(String, String), usize> =
@@ -360,15 +373,16 @@ fn AgentsTab() -> Element {
                 let agent_id = agent.get("agentId").and_then(Value::as_str).unwrap_or("").to_string();
                 let name = agent.get("name").and_then(Value::as_str).unwrap_or("").to_string();
                 let role = agent.get("role").and_then(Value::as_str).unwrap_or("explorer").to_string();
-                let status = agent.get("status").and_then(Value::as_str).unwrap_or("running").to_string();
+                // FR-058: no event reports an agent's end, so it is derived.
+                let status = agent_status(&messages, &name, run_live);
                 rsx! {
                     div {
                         key: "spawned-{index}-{agent_id}",
                         class: "list-row",
                         if role == "worker" { {icon_wrench()} } else { {icon_search()} }
                         span { class: "grow", "{name}" }
-                        span { class: "badge", "{role}" }
-                        span { class: "badge", "{status}" }
+                        span { class: "badge", "{role_label(&store, &role)}" }
+                        span { class: "badge", "{store.t(status)}" }
                     }
                 }
             }
@@ -379,22 +393,77 @@ fn AgentsTab() -> Element {
                 class: "list-row",
                 if role == "worker" { {icon_wrench()} } else { {icon_search()} }
                 span { class: "grow", "{name}" }
-                span { class: "badge", "{role}" }
+                span { class: "badge", "{role_label(&store, role)}" }
+                span { class: "badge", "{store.t(agent_status(&messages, name, run_live))}" }
                 span { class: "count-chip", "{count}" }
             }
         }
     }
 }
 
-/// Resolves the project folder the inspector acts on: the selected project,
-/// falling back to the active run's project.
-fn inspector_project_path(store: &UiStore) -> Option<String> {
-    store
-        .selected_project
-        .read()
-        .clone()
-        .or_else(|| store.active_run.read().as_ref().map(|run| run.project_path.clone()))
+/// Translated built-in role, or a custom role's own name.
+fn role_label(store: &UiStore, role: &str) -> String {
+    match role {
+        "explorer" | "worker" => store.t(crate::i18n::role_key(role)).to_string(),
+        other => other.to_string(),
+    }
 }
+
+/// i18n key of an agent's state, derived from its messages: working while
+/// the run is live and its newest message is not a finished answer, else
+/// idle (live run) or finished.
+pub fn agent_status(messages: &[locagens_core::db::RunMessage], name: &str, run_live: bool) -> &'static str {
+    if !run_live {
+        return "agents.finished";
+    }
+    let last = messages
+        .iter()
+        .rev()
+        .find(|message| message.agent_name.as_deref() == Some(name) || (message.agent_name.is_none() && message.agent_role.as_deref() == Some(name)));
+    match last {
+        Some(message) if message.role == "assistant" && !message.content.is_empty() && message.raw_response.as_deref().is_none_or(|raw| raw == "[]") => "agents.idle",
+        _ => "agents.working",
+    }
+}
+
+/// The project folder the inspector acts on (FR-050: the open chat's).
+fn inspector_project_path(store: &UiStore) -> Option<String> {
+    store.current_project()
+}
+
+/// The section of file `path` in a multi-file `git diff` (from its
+/// `diff --git` header to the next one), capped at `max_lines` lines with a
+/// trailing count of what was cut.
+pub fn file_diff_section(diff: &str, path: &str, max_lines: usize) -> Option<String> {
+    let header = format!(" b/{path}");
+    let mut lines = diff.lines();
+    let mut section: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in lines.by_ref() {
+        if line.starts_with("diff --git ") {
+            if inside {
+                break;
+            }
+            inside = line.ends_with(&header);
+            continue;
+        }
+        if inside {
+            section.push(line);
+        }
+    }
+    if section.is_empty() {
+        return None;
+    }
+    let total = section.len();
+    let mut text = section.into_iter().take(max_lines).collect::<Vec<_>>().join("\n");
+    if total > max_lines {
+        text.push_str(&format!("\n… +{}", total - max_lines));
+    }
+    Some(text)
+}
+
+/// Lines shown of one file's diff in the Git tab.
+const DIFF_LINE_CAP: usize = 600;
 
 /// Git workbench: branch status, changed files with stage / unstage, diffs,
 /// commit and push. Data refreshes every few seconds and after each action.
@@ -411,7 +480,8 @@ fn GitTab() -> Element {
     let mut version = use_signal(|| 0u32);
 
     // Load status + changed files, then keep them fresh. Bumping `version`
-    // restarts the poll loop immediately (used after staging actions).
+    // restarts the poll loop immediately (used after staging actions); a
+    // project switch re-runs the effect and the old loop ends (FR-049).
     use_effect(move || {
         let path = inspector_project_path(&store);
         let mut status = status;
@@ -421,7 +491,7 @@ fn GitTab() -> Element {
         spawn(async move {
             let state = core();
             loop {
-                if *version.read() != current_version {
+                if *version.peek() != current_version || store.current_project_peek() != path {
                     break;
                 }
                 if let Some(path) = path.as_deref() {
@@ -436,6 +506,11 @@ fn GitTab() -> Element {
                             .await
                             .unwrap_or_default(),
                     );
+                    // A switch that landed during the calls above must not
+                    // leave the old project's data on screen.
+                    if store.current_project_peek().as_deref() != Some(path) {
+                        break;
+                    }
                 } else {
                     status.set(None);
                     diffs.set(Vec::new());
@@ -452,18 +527,35 @@ fn GitTab() -> Element {
     let current_status = status.read().clone();
     let changed_files = diffs.read().clone();
     let selected = selected_file.read().clone();
+    // FR-059: the selected file's real `git diff` hunks (unstaged, else
+    // staged); a new untracked file shows its content. Capped in length.
+    let git_text = use_resource(move || {
+        let file = selected_file.read().clone();
+        let path = inspector_project_path(&store);
+        let _ = *version.read();
+        async move {
+            let (Some(file), Some(path)) = (file, path) else { return None };
+            let state = core();
+            let unstaged = locagens_core::api::projects::git_diff(&state, &path, false).await.unwrap_or_default();
+            if let Some(section) = file_diff_section(&unstaged, &file, DIFF_LINE_CAP) {
+                return Some(section);
+            }
+            let staged = locagens_core::api::projects::git_diff(&state, &path, true).await.unwrap_or_default();
+            file_diff_section(&staged, &file, DIFF_LINE_CAP)
+        }
+    });
     let selected_diff: Option<(String, String)> = selected
         .as_ref()
         .and_then(|path| changed_files.iter().find(|diff| &diff.path == path))
         .map(|diff| {
-            let text = match diff.kind.as_str() {
-                "created" => crate::markdown::pseudo_diff(None, Some(diff.new_text.as_str())),
-                "deleted" => crate::markdown::pseudo_diff(Some(diff.old_text.as_str()), None),
-                _ => crate::markdown::pseudo_diff(
-                    Some(diff.old_text.as_str()),
-                    Some(diff.new_text.as_str()),
-                ),
-            };
+            let text = git_text.read().clone().flatten().unwrap_or_else(|| {
+                let capped = |text: &str| text.lines().take(DIFF_LINE_CAP).collect::<Vec<_>>().join("\n");
+                match diff.kind.as_str() {
+                    "created" => crate::markdown::pseudo_diff(None, Some(&capped(&diff.new_text))),
+                    "deleted" => crate::markdown::pseudo_diff(Some(&capped(&diff.old_text)), None),
+                    _ => String::new(),
+                }
+            });
             (diff.path.clone(), text)
         });
 
@@ -521,7 +613,7 @@ fn GitTab() -> Element {
                                             let Some(path) = path else { return };
                                             match locagens_core::api::projects::undo_last_turn(&state, &path, run_id.as_deref()).await {
                                                 Ok(snapshot) => {
-                                                    store.toast(store.tf("toast.restored", &[&snapshot.id]));
+                                                    store.toast(super::changes::undo_summary(&store, &snapshot));
                                                 }
                                                 Err(err) => store.toast(store.tf("toast.undo_failed", &[&err.to_string()])),
                                             }
@@ -713,7 +805,7 @@ fn GitTab() -> Element {
                                                 class: "panel-row",
                                                 span { class: "mono grow", "{wt_branch}" }
                                                 if worktree.is_main {
-                                                    span { class: "badge", "main" }
+                                                    span { class: "badge", "{store.t(\"git.main\")}" }
                                                 }
                                             }
                                             div {
@@ -831,6 +923,16 @@ fn GitTab() -> Element {
     }
 }
 
+/// i18n key of a background process state.
+fn process_status_key(status: &str) -> &'static str {
+    match status {
+        "running" => "term.status_running",
+        "exited" => "term.status_exited",
+        "stopped" => "term.status_stopped",
+        _ => "term.status_error",
+    }
+}
+
 /// Terminal / Processes: launch background commands in the selected project,
 /// watch their stdout/stderr logs and stop them.
 #[component]
@@ -845,7 +947,8 @@ fn TerminalTab() -> Element {
 
     let project_path = inspector_project_path(&store);
 
-    // Load + poll the process list; bumping `version` restarts it.
+    // Load + poll the process list; bumping `version` restarts it and a
+    // project switch ends the old loop (FR-049).
     use_effect(move || {
         let path = inspector_project_path(&store);
         let mut processes = processes;
@@ -853,7 +956,7 @@ fn TerminalTab() -> Element {
         spawn(async move {
             let state = core();
             loop {
-                if *version.read() != current_version {
+                if *version.peek() != current_version || store.current_project_peek() != path {
                     break;
                 }
                 processes.set(
@@ -878,11 +981,17 @@ fn TerminalTab() -> Element {
                 return;
             };
             loop {
-                if selected.read().as_deref() != Some(id.as_str()) {
+                if selected.peek().as_deref() != Some(id.as_str()) {
                     break;
                 }
                 match process_logs(&state, &id).await {
-                    Ok(data) => logs.set(Some(data)),
+                    Ok(data) => {
+                        logs.set(Some(data));
+                        // Tail-follow while the reader is at the bottom (FR-066).
+                        dioxus::document::eval(
+                            "requestAnimationFrame(() => { const v = document.querySelector('.log-view'); if (v && v.scrollHeight - v.scrollTop - v.clientHeight < 60) v.scrollTop = v.scrollHeight; });",
+                        );
+                    }
                     Err(_) => {
                         logs.set(None);
                         break;
@@ -904,10 +1013,12 @@ fn TerminalTab() -> Element {
             class: "composer-row-top",
             input {
                 placeholder: store.t("term.command"),
+                "aria-label": store.t("term.command"),
                 value: "{command.read()}",
                 oninput: move |event| command.set(event.value()),
                 onkeydown: move |event: KeyboardEvent| {
-                    if event.key() == Key::Enter && !command.read().trim().is_empty() {
+                    // `busy` guards a double Enter (FR-066).
+                    if event.key() == Key::Enter && !*busy.peek() && !command.read().trim().is_empty() {
                         let mut busy = busy;
                         let cmd = command.read().trim().to_string();
                         let path = path_for_spawn_key.clone();
@@ -988,7 +1099,7 @@ fn TerminalTab() -> Element {
                         div {
                             class: "grow",
                             div { class: "mono proc-command", "{process.command}" }
-                            span { class: "badge", "{process_status} · {id}" }
+                            span { class: "badge", "{store.t(process_status_key(&process_status))} · {id}" }
                         }
                         button {
                             class: "icon-btn danger",
