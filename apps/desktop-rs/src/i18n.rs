@@ -650,6 +650,15 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("slash.skills", "list discovered skills", "bulunan becerileri listele"),
     ("slash.resume", "pick a session of this folder to continue", "bu klasörün bir oturumunu seçip sürdür"),
     ("slash.usage", "usage and cost of this session", "bu oturumun kullanımı ve maliyeti"),
+    // --- interactive terminal ---
+    ("terminal.tabs", "Terminals", "Terminaller"),
+    ("terminal.new", "New terminal", "Yeni terminal"),
+    ("terminal.close", "Close terminal", "Terminali kapat"),
+    ("terminal.input", "Terminal input", "Terminal girişi"),
+    ("terminal.no_project", "Open a project to use the terminal.", "Terminali kullanmak için bir proje aç."),
+    ("terminal.empty", "No terminal is open.", "Açık terminal yok."),
+    ("terminal.exited", "The shell exited. Close this tab or open a new one.", "Kabuk kapandı. Bu sekmeyi kapat ya da yenisini aç."),
+    ("terminal.open_failed", "Could not start the shell: {0}", "Kabuk başlatılamadı: {0}"),
 ];
 
 #[cfg(test)]

@@ -16,6 +16,9 @@ pub mod right_panel;
 pub mod settings;
 pub mod sidebar;
 pub mod slash;
+// Not mounted yet: the right panel will host `TerminalPanel`; drop the allow then.
+#[allow(dead_code)]
+pub mod terminal;
 pub mod trust_banner;
 pub mod usage_logs;
 

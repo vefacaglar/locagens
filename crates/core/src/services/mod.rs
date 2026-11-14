@@ -10,4 +10,5 @@ pub mod project_trust;
 pub mod skills;
 pub mod snapshots;
 pub mod symbols;
+pub mod terminal;
 pub mod ui_state;
