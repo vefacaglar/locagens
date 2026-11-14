@@ -148,6 +148,10 @@ pub struct RunMessage {
     pub reasoning_content: Option<String>,
     pub raw_response: Option<String>,
     pub created_at: String,
+    /// Anthropic thinking blocks (with signatures) of an assistant message,
+    /// replayed to the provider on later rounds and turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_blocks: Option<Value>,
 }
 
 /// The active plan of a run, persisted as `plan` rollout lines.
@@ -347,7 +351,7 @@ impl Db {
                     run.clone()
                 });
                 if let Some(run) = snapshot {
-                    append_event(&root, state, &run_id, &now, "run_update", run_payload(&run));
+                    append_event(&root, state, &run_id, &now, "run_update", run_update_payload(Some(&run), &run));
                     append_session_index(&root, &run);
                 }
                 let message = RunMessage {
@@ -417,6 +421,8 @@ mod permissions;
 mod projects;
 mod rollout;
 mod runs;
+#[cfg(test)]
+mod store_tests;
 mod sync;
 #[cfg(test)]
 mod tests;

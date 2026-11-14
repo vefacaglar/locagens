@@ -62,13 +62,35 @@ impl Db {
         reasoning_content: Option<&str>,
         raw_response: Option<&str>,
     ) -> Option<RunMessage> {
-        self.apply_message_update(run_id, message_id, content, reasoning_content, raw_response, true)
+        self.apply_message_update(
+            run_id,
+            message_id,
+            |message| set_text(message, content, reasoning_content, raw_response),
+            true,
+        )
+    }
+
+    /// Persists the final state of a generated message: content, reasoning,
+    /// `rawResponse` and thinking blocks. Also used when a round is cancelled
+    /// or fails, so the rollout keeps every streamed character (FR-011).
+    pub fn finish_message(&self, message: &RunMessage) -> Option<RunMessage> {
+        self.apply_message_update(
+            &message.run_id,
+            &message.id,
+            |stored| {
+                set_text(stored, &message.content, message.reasoning_content.as_deref(), message.raw_response.as_deref());
+                if message.thinking_blocks.is_some() {
+                    stored.thinking_blocks = message.thinking_blocks.clone();
+                }
+            },
+            true,
+        )
     }
 
     /// A streaming update of a message that is still being generated: the
     /// in-memory copy is always current, but the rollout only gets a
     /// `message_update` checkpoint every [`STREAM_CHECKPOINT_INTERVAL`]. The
-    /// final `update_message_full` always persists, so a 100 KB answer costs a
+    /// final `finish_message` always persists, so a 100 KB answer costs a
     /// handful of lines instead of hundreds (QA-035). A crash loses at most the
     /// last few seconds of streamed text of a run that is failed on restart anyway.
     pub fn stream_message(
@@ -78,16 +100,14 @@ impl Db {
         content: &str,
         reasoning_content: Option<&str>,
     ) -> Option<RunMessage> {
-        self.apply_message_update(run_id, message_id, content, reasoning_content, None, false)
+        self.apply_message_update(run_id, message_id, |message| set_text(message, content, reasoning_content, None), false)
     }
 
     pub(super) fn apply_message_update(
         &self,
         run_id: &str,
         message_id: &str,
-        content: &str,
-        reasoning_content: Option<&str>,
-        raw_response: Option<&str>,
+        update: impl FnOnce(&mut RunMessage),
         force_persist: bool,
     ) -> Option<RunMessage> {
         let mut guard = self.write();
@@ -97,13 +117,7 @@ impl Db {
             .get_mut(run_id)?
             .iter_mut()
             .find(|message| message.id == message_id)?;
-        message.content = content.to_string();
-        if let Some(reasoning) = reasoning_content {
-            message.reasoning_content = Some(reasoning.to_string());
-        }
-        if let Some(raw) = raw_response {
-            message.raw_response = Some(raw.to_string());
-        }
+        update(message);
         let updated = message.clone();
         let now = Instant::now();
         let due = match state.stream_checkpoints.get(message_id) {
@@ -150,6 +164,17 @@ impl Db {
         }
         state.plans.insert(plan.run_id.clone(), plan.clone());
         append_event(&self.root, state, &plan.run_id, &plan.created_at, "plan", plan_payload(&plan));
+    }
+}
+
+/// Sets the text fields of a message; `None` keeps reasoning / `rawResponse`.
+fn set_text(message: &mut RunMessage, content: &str, reasoning_content: Option<&str>, raw_response: Option<&str>) {
+    message.content = content.to_string();
+    if let Some(reasoning) = reasoning_content {
+        message.reasoning_content = Some(reasoning.to_string());
+    }
+    if let Some(raw) = raw_response {
+        message.raw_response = Some(raw.to_string());
     }
 }
 

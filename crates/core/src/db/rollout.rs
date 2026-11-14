@@ -10,6 +10,42 @@ pub(super) fn run_payload(run: &Run) -> Value {
     serde_json::to_value(run).unwrap_or(Value::Null)
 }
 
+/// Large `Run` fields a `run_update` line repeats only when they changed;
+/// replay keeps the previous value when a key is absent (FR-068).
+const HEAVY_RUN_KEYS: [&str; 3] = ["task", "systemPrompt", "appendSystemPrompt"];
+
+/// `run_update` payload: the run without the heavy fields `previous`
+/// already recorded (a field cleared to `None` is written as `null`).
+pub(super) fn run_update_payload(previous: Option<&Run>, run: &Run) -> Value {
+    let mut payload = run_payload(run);
+    let (Some(previous), Some(object)) = (previous.map(run_payload), payload.as_object_mut()) else {
+        return payload;
+    };
+    for key in HEAVY_RUN_KEYS {
+        let before = previous.get(key).cloned().unwrap_or(Value::Null);
+        let now = object.get(key).cloned().unwrap_or(Value::Null);
+        if before == now {
+            object.remove(key);
+        } else {
+            object.insert(key.to_string(), now);
+        }
+    }
+    payload
+}
+
+/// Replays a `run_update` line onto the previously replayed run: keys the
+/// line leaves out keep their earlier value.
+fn merged_run_update(previous: Option<&Run>, payload: Value) -> Option<Run> {
+    let merged = match (previous.map(run_payload), payload) {
+        (Some(Value::Object(mut base)), Value::Object(update)) => {
+            base.extend(update);
+            Value::Object(base)
+        }
+        (_, payload) => payload,
+    };
+    serde_json::from_value::<Run>(merged).ok()
+}
+
 pub(super) fn message_payload(message: &RunMessage) -> Value {
     serde_json::to_value(message).unwrap_or(Value::Null)
 }
@@ -149,7 +185,8 @@ pub(super) fn replay_rollout(path: &Path, state: &mut StorageState) {
         };
         match kind.as_str() {
             "session_meta" | "run_update" => {
-                if let Ok(run) = serde_json::from_value::<Run>(payload) {
+                let id = payload.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                if let Some(run) = merged_run_update(state.runs.get(&id), payload) {
                     if !run.id.is_empty() {
                         state.rollouts.insert(run.id.clone(), path.to_path_buf());
                         state.runs.insert(run.id.clone(), run);
