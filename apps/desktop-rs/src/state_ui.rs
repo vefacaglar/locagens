@@ -85,25 +85,6 @@ pub enum RightPanelTab {
     Terminal,
 }
 
-impl RightPanelTab {
-    pub const ALL: [RightPanelTab; 4] = [
-        RightPanelTab::Plan,
-        RightPanelTab::Agents,
-        RightPanelTab::Git,
-        RightPanelTab::Terminal,
-    ];
-
-    /// i18n key of the tab's label.
-    pub fn label_key(self) -> &'static str {
-        match self {
-            RightPanelTab::Plan => "inspector.plan",
-            RightPanelTab::Agents => "inspector.agents",
-            RightPanelTab::Git => "inspector.git",
-            RightPanelTab::Terminal => "inspector.terminal",
-        }
-    }
-}
-
 /// `catalog` minus hidden `provider/model` ids; providers with no model left
 /// are dropped.
 pub fn visible_catalog(
@@ -418,7 +399,7 @@ pub fn use_ui_store() -> UiStore {
         selected_effort: use_signal(|| effort),
         selected_mode: use_signal(|| mode),
         right_panel_open: use_signal(|| prefs::load_layout().right_panel_open),
-        right_panel_tab: use_signal(|| RightPanelTab::Plan),
+        right_panel_tab: use_signal(|| RightPanelTab::Terminal),
         toasts: use_signal(Vec::new),
         prompt: use_signal(String::new),
         pending_images: use_signal(Vec::new),

@@ -582,7 +582,7 @@ button.icon-btn.on { color: var(--text); background: var(--active); }
 }
 
 /* ---------------- chat thread ---------------- */
-.chat-area { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-chat); }
+.chat-area { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-chat); container: chat / inline-size; }
 #chat-scroll {
   flex: 1; overflow-y: auto; padding: 24px 28px calc(var(--dock-h, 160px) + 16px);
  
@@ -910,7 +910,36 @@ button.summary-row:hover { background: var(--hover); color: var(--text); }
 .agent-dot .icon { width: 11px; height: 11px; }
 .agent-dot.live { color: var(--accent-hover); border-color: var(--accent-ring); }
 .summary-meter { width: 72px; flex: none; }
-.summary-sources { display: flex; flex-direction: column; gap: 1px; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+.summary-row .chev { flex: none; color: var(--text-3); }
+/* The card floats at the chat's top right. A wide chat keeps it open and
+   moves the thread and composer out of its way; a narrow one shows only
+   its head, which opens the rest over the thread. */
+.summary-float {
+  position: absolute; top: 12px; right: 16px; z-index: 6; margin: 0;
+  width: 280px; max-height: calc(100% - var(--dock-h, 160px) - 36px); overflow-y: auto;
+}
+button.summary-head { width: 100%; text-align: left; border-radius: 8px; }
+button.summary-head:hover { background: var(--hover); }
+.summary-body { display: flex; flex-direction: column; gap: 1px; }
+@container chat (min-width: 1180px) {
+  #chat-scroll { padding-right: 324px; }
+  .chat-dock { right: 324px; }
+}
+@container chat (max-width: 1179px) {
+  .summary-float:not(.open) { width: auto; max-width: 260px; padding: 2px; }
+  .summary-float:not(.open) .summary-body { display: none; }
+  .summary-float:not(.open) .summary-head { padding: 5px 8px; }
+}
+.panel-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.panel-tab {
+  height: 28px; padding: 0 10px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text-3);
+}
+.panel-tab .icon { width: 14px; height: 14px; }
+.panel-tab:hover { background: var(--hover); color: var(--text-2); }
+.panel-tab.active { background: var(--active); color: var(--text); }
+.summary-detail { padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.summary-sources { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
 .summary-hint { padding: 0 8px 6px; font-size: 12px; color: var(--text-3); }
 .source-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 3px 8px; font-size: 12.5px; }
 .source-name { flex: none; max-width: 60%; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -918,7 +947,7 @@ button.summary-row:hover { background: var(--hover); color: var(--text); }
 .summary-more { align-self: flex-start; margin: 2px 4px 4px; padding: 3px 6px; border-radius: 6px; font-size: 12px; color: var(--text-3); }
 .summary-more:hover { background: var(--hover); color: var(--text-2); }
 .inspector-section { display: flex; flex-direction: column; padding: 4px 0; }
-.inspector-section + .inspector-section { border-top: 1px solid var(--border); }
+
 .section-label, .section-head {
   height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 8px;
   font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3);

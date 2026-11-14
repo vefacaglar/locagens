@@ -200,6 +200,7 @@ fn App() -> Element {
                             div {
                                 class: "chat-area",
                                 components::message_thread::MessageThread {}
+                                components::right_panel::SummaryCard {}
                                 // Floats over the thread's bottom, so the thread
                                 // (and its scrollbar) runs to the window edge.
                                 div {

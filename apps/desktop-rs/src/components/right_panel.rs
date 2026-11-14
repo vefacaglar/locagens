@@ -1,6 +1,5 @@
-//! Right inspector: a flat column of collapsible sections (Environment,
-//! Context, Plan, Agents, Changes, Terminal), all wired in-process to
-//! `locagens_core::api`.
+//! Right tool panel (Terminal, Changes review) and the conversation summary
+//! card that floats in the chat, all wired in-process to `locagens_core::api`.
 
 use crate::components::icons::*;
 use crate::components::message_thread::DiffView;
@@ -26,57 +25,47 @@ fn file_kind_key(kind: &str, badge: bool) -> &'static str {
     }
 }
 
+/// Tool panel beside the chat: a tab strip in the titlebar row and the
+/// active tool below it.
 #[component]
 pub fn RightPanel() -> Element {
     let store: UiStore = use_context();
-    let changed_files = store
-        .turn_diff
-        .read()
-        .as_ref()
-        .map(|(_, files)| *files)
-        .filter(|files| *files > 0);
-    let task_count = store
-        .plan
-        .read()
-        .as_ref()
-        .and_then(|plan| plan.tasks.as_array().map(|tasks| tasks.len()))
-        .filter(|count| *count > 0);
-    let agent_count = {
-        let messages = store.messages.read();
-        let mut names: std::collections::HashSet<String> = messages
-            .iter()
-            .filter(|message| message.agent_role.is_some())
-            .map(|message| message.agent_name.clone().or(message.agent_role.clone()).unwrap_or_default())
-            .collect();
-        for agent in store.spawned_agents.read().iter() {
-            if let Some(name) = agent.get("name").and_then(Value::as_str) {
-                names.insert(name.to_string());
-            }
-        }
-        names.len()
-    };
-
+    let tab = *store.right_panel_tab.read();
+    let tabs = [
+        (RightPanelTab::Terminal, store.t("inspector.terminal"), icon_terminal()),
+        (RightPanelTab::Git, store.t("inspector.changes"), icon_git_branch()),
+    ];
     rsx! {
         div {
             class: "right-panel-head",
             // Draggable window titlebar strip (double-click maximizes, see start_window_drag).
             onmousedown: start_window_drag,
-            span { class: "head-title", "{store.t(\"inspector.title\")}" }
+            div {
+                class: "panel-tabs",
+                role: "tablist",
+                for (item, label, icon) in tabs {
+                    button {
+                        key: "{label}",
+                        class: if item == tab { "panel-tab active" } else { "panel-tab" },
+                        role: "tab",
+                        "aria-selected": "{item == tab}",
+                        onmousedown: move |event| event.stop_propagation(),
+                        onclick: move |_| {
+                            let mut store = store;
+                            store.right_panel_tab.set(item);
+                        },
+                        {icon}
+                        span { "{label}" }
+                    }
+                }
+            }
         }
         div {
             class: "right-panel-body",
-            SummaryCard {}
-            for tab in RightPanelTab::ALL {
-                InspectorSection {
-                    key: "{tab.label_key()}",
-                    tab,
-                    count: match tab {
-                        RightPanelTab::Plan => task_count,
-                        RightPanelTab::Agents => Some(agent_count).filter(|count| *count > 0),
-                        RightPanelTab::Git => changed_files,
-                        RightPanelTab::Terminal => None,
-                    },
-                }
+            id: if tab == RightPanelTab::Git { "inspector-git" } else { "inspector-terminal" },
+            match tab {
+                RightPanelTab::Git => rsx! { GitTab {} },
+                _ => rsx! { TerminalTab {} },
             }
         }
     }
@@ -92,85 +81,6 @@ fn EmptyState(icon: Element, title: String, hint: Option<String>) -> Element {
             div { class: "empty-title", "{title}" }
             if let Some(hint) = hint {
                 div { class: "empty-hint", "{hint}" }
-            }
-        }
-    }
-}
-
-/// One collapsible section: icon, name, optional count chip and the tab body.
-#[component]
-fn InspectorSection(tab: RightPanelTab, count: Option<usize>) -> Element {
-    let store: UiStore = use_context();
-    // Plan and Agents start open only when they have something to show.
-    let initially_open = match tab {
-        RightPanelTab::Plan | RightPanelTab::Agents => count.is_some(),
-        RightPanelTab::Git | RightPanelTab::Terminal => *store.right_panel_tab.peek() == tab,
-    };
-    let mut open = use_signal(|| initially_open);
-    // Plan/Agents content often arrives after mount: open once it appears.
-    let has_content = count.is_some();
-    use_effect(use_reactive!(|has_content| {
-        if has_content && matches!(tab, RightPanelTab::Plan | RightPanelTab::Agents) && !*open.peek() {
-            open.set(true);
-        }
-    }));
-    // "Review changes" / `/diff` / summary rows select a tab: open its
-    // section. The first run is the mount, where the default tab is not a
-    // request to open anything.
-    let mut mounted = use_signal(|| false);
-    use_effect(move || {
-        let selected = *store.right_panel_tab.read() == tab;
-        if !*mounted.peek() {
-            mounted.set(true);
-        } else if selected && !*open.peek() {
-            open.set(true);
-        }
-    });
-    let section_id = match tab {
-        RightPanelTab::Plan => "inspector-plan",
-        RightPanelTab::Agents => "inspector-agents",
-        RightPanelTab::Git => "inspector-git",
-        RightPanelTab::Terminal => "inspector-terminal",
-    };
-    let (name, icon) = match tab {
-        RightPanelTab::Plan => (store.t("inspector.plan"), icon_list_checks()),
-        RightPanelTab::Agents => (store.t("inspector.agents"), icon_users()),
-        RightPanelTab::Git => (store.t("inspector.changes"), icon_git_branch()),
-        RightPanelTab::Terminal => (store.t("inspector.terminal"), icon_terminal()),
-    };
-    rsx! {
-        section {
-            class: "inspector-section",
-            id: "{section_id}",
-            button {
-                class: "section-head",
-                title: "{name}",
-                "aria-expanded": "{open.read()}",
-                onclick: move |_| {
-                    let mut store = store;
-                    let next = !*open.read();
-                    open.set(next);
-                    if next {
-                        store.right_panel_tab.set(tab);
-                    }
-                },
-                span { class: if *open.read() { "chev open" } else { "chev" }, {icon_chevron_right()} }
-                {icon}
-                span { class: "section-name", "{name}" }
-                if let Some(count) = count {
-                    span { class: "count-chip", "{count}" }
-                }
-            }
-            if *open.read() {
-                div {
-                    class: "section-body",
-                    match tab {
-                        RightPanelTab::Plan => rsx! { PlanTab {} },
-                        RightPanelTab::Agents => rsx! { AgentsTab {} },
-                        RightPanelTab::Git => rsx! { GitTab {} },
-                        RightPanelTab::Terminal => rsx! { TerminalTab {} },
-                    }
-                }
             }
         }
     }
@@ -242,13 +152,27 @@ fn agent_states(store: &UiStore) -> Vec<(String, &'static str)> {
 
 const SOURCES_PREVIEW: usize = 4;
 
-/// Codex-style summary card at the top of the inspector: project, branch
-/// and mode; changed lines; sub-agents; context fill; files used. Rows open
-/// the matching section below.
+/// Codex-style summary card floating at the top right of the chat: project,
+/// branch and mode; changed lines (opens the review tab); sub-agents and
+/// plan (expand in place); context fill; files used. In a narrow chat only
+/// the head shows until it is clicked.
 #[component]
-fn SummaryCard() -> Element {
+pub fn SummaryCard() -> Element {
     let store: UiStore = use_context();
     let mut show_all_sources = use_signal(|| false);
+    let mut expanded = use_signal(|| None::<RightPanelTab>);
+    let mut card_open = use_signal(|| false);
+    let mut toggle = move |tab: RightPanelTab| {
+        let next = if *expanded.peek() == Some(tab) { None } else { Some(tab) };
+        expanded.set(next);
+    };
+    let is_open = |tab: RightPanelTab| *expanded.read() == Some(tab);
+    let plan_progress = store.plan.read().as_ref().and_then(|plan| {
+        let tasks = plan.tasks.as_array()?;
+        let done = tasks.iter().filter(|task| task.get("status").and_then(Value::as_str) == Some("completed")).count();
+        (!tasks.is_empty()).then(|| format!("{done}/{}", tasks.len()))
+    });
+    let has_plan = store.plan.read().is_some();
     let project_path = inspector_project_path(&store);
     let branch = use_resource(move || async move {
         let path = inspector_project_path(&store)?;
@@ -258,6 +182,10 @@ fn SummaryCard() -> Element {
             .filter(|status| status.is_git)
             .and_then(|status| status.branch)
     });
+    // After every hook: a brand-new chat with no project shows no card.
+    if project_path.is_none() && store.active_run_id.read().is_none() {
+        return rsx! {};
+    }
     let branch = branch.read().clone().flatten();
     let folder = project_path
         .as_deref()
@@ -286,17 +214,18 @@ fn SummaryCard() -> Element {
         .filter(|context| context.used_tokens > 0);
     let sources = source_files(&store.messages.read());
     let shown: Vec<String> = if *show_all_sources.read() { sources.clone() } else { sources.iter().take(SOURCES_PREVIEW).cloned().collect() };
-    let open_tab = move |tab: RightPanelTab| {
-        let mut store = store;
-        store.right_panel_tab.set(tab);
-    };
 
     rsx! {
         div {
-            class: "summary-card",
-            div {
+            class: if *card_open.read() { "summary-card summary-float open" } else { "summary-card summary-float" },
+            button {
                 class: "summary-head",
                 title: "{project_path.clone().unwrap_or_default()}",
+                "aria-expanded": "{card_open.read()}",
+                onclick: move |_| {
+                    let next = !*card_open.read();
+                    card_open.set(next);
+                },
                 span { class: "summary-project", "{folder}" }
                 if let Some(branch) = branch {
                     span { class: "summary-branch", {icon_git_branch()} "{branch}" }
@@ -305,20 +234,24 @@ fn SummaryCard() -> Element {
                 }
                 span { class: "{mode_class}", "{mode}" }
             }
-            button {
-                class: "summary-row",
-                onclick: move |_| open_tab(RightPanelTab::Git),
-                span { class: "summary-label", "{store.t(\"inspector.changes\")}" }
-                if added + removed == 0 {
-                    span { class: "summary-muted", "{store.t(\"inspector.none\")}" }
-                } else {
-                    span { class: "summary-add", "+{added}" }
-                    span { class: "summary-del", "−{removed}" }
+            div {
+                class: "summary-body",
+                button {
+                    class: "summary-row",
+                    onclick: move |_| crate::components::changes::open_changes(store),
+                    span { class: "summary-label", "{store.t(\"inspector.changes\")}" }
+                    if added + removed == 0 {
+                        span { class: "summary-muted", "{store.t(\"inspector.none\")}" }
+                    } else {
+                        span { class: "summary-add", "+{added}" }
+                        span { class: "summary-del", "−{removed}" }
+                    }
+                    span { class: "chev", {icon_chevron_right()} }
                 }
-            }
             button {
                 class: "summary-row",
-                onclick: move |_| open_tab(RightPanelTab::Agents),
+                "aria-expanded": "{is_open(RightPanelTab::Agents)}",
+                onclick: move |_| toggle(RightPanelTab::Agents),
                 span { class: "summary-label", "{store.t(\"inspector.subagents\")}" }
                 span {
                     class: "summary-agents",
@@ -332,6 +265,25 @@ fn SummaryCard() -> Element {
                     }
                 }
                 span { class: "summary-muted", "{agent_text}" }
+                span { class: if is_open(RightPanelTab::Agents) { "chev open" } else { "chev" }, {icon_chevron_right()} }
+            }
+            if is_open(RightPanelTab::Agents) {
+                div { class: "summary-detail", AgentsTab {} }
+            }
+            button {
+                class: "summary-row",
+                "aria-expanded": "{is_open(RightPanelTab::Plan)}",
+                onclick: move |_| toggle(RightPanelTab::Plan),
+                span { class: "summary-label", "{store.t(\"inspector.plan\")}" }
+                match (plan_progress.clone(), has_plan) {
+                    (Some(progress), _) => rsx! { span { class: "summary-muted", "{progress}" } },
+                    (None, true) => rsx! {},
+                    (None, false) => rsx! { span { class: "summary-muted", "{store.t(\"inspector.none\")}" } },
+                }
+                span { class: if is_open(RightPanelTab::Plan) { "chev open" } else { "chev" }, {icon_chevron_right()} }
+            }
+            if is_open(RightPanelTab::Plan) {
+                div { class: "summary-detail", PlanTab {} }
             }
             if let Some(context) = context {
                 div {
@@ -392,6 +344,7 @@ fn SummaryCard() -> Element {
                         if *show_all_sources.read() { "{store.t(\"inspector.show_less\")}" } else { "{store.t(\"inspector.show_all\")}" }
                     }
                 }
+            }
             }
         }
     }
