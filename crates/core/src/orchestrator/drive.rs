@@ -208,7 +208,19 @@ pub(super) fn provider_display_name(providers: &[crate::pi_providers::ProviderMe
 
 /// Whether the model accepts an OpenAI `reasoning_effort` parameter.
 pub(super) fn reasoning_supported(model_id: &str, info: Option<&crate::pi_providers::ModelInfo>) -> bool {
+    if info.and_then(|i| i.reasoning) == Some(false) {
+        return false;
+    }
     if let Some(true) = info.and_then(|info| info.reasoning) {
+        return true;
+    }
+    if !crate::pi_providers::model_reasoning_efforts(
+        model_id,
+        info.and_then(|i| i.reasoning),
+        info.and_then(|i| i.reasoning_efforts.as_deref()),
+    )
+    .is_empty()
+    {
         return true;
     }
     // The model name without a router prefix (`openai/o3-mini` -> `o3-mini`).

@@ -55,6 +55,8 @@ pub const CHATGPT_MODELS: &[CatalogModel] = &[
     model("gpt-6-sol", RESPONSES, 272_000),
     model("gpt-6.1-sol", RESPONSES, 272_000),
     model("gpt-6.1-terra", RESPONSES, 272_000),
+    model("gpt-6.2-astra", RESPONSES, 1_050_000),
+    model("gpt-6.2-sol", RESPONSES, 1_050_000),
     model("gpt-daybreak-blue-latest", RESPONSES, 1_050_000),
     model("gpt-daybreak-red-latest", RESPONSES, 400_000),
     model("o1", RESPONSES, 200_000),
@@ -70,6 +72,7 @@ pub const CHATGPT_MODELS: &[CatalogModel] = &[
 pub const COPILOT_MODELS: &[CatalogModel] = &[
     model("claude-fable-5", MESSAGES, 1_000_000),
     model("claude-fable-5.1", MESSAGES, 1_000_000),
+    model("claude-fable-5.2", MESSAGES, 1_000_000),
     model("claude-haiku-4.5", MESSAGES, 200_000),
     model("claude-haiku-5.5", MESSAGES, 1_000_000),
     model("claude-opus-4.8", MESSAGES, 1_000_000),
@@ -80,6 +83,8 @@ pub const COPILOT_MODELS: &[CatalogModel] = &[
     model("claude-sonnet-5.5", MESSAGES, 1_000_000),
     model("gemini-3.8-flash", COMPLETIONS, 1_000_000),
     model("gemini-4-argon", COMPLETIONS, 1_048_576),
+    model("gemini-4-carbon", COMPLETIONS, 1_048_576),
+    model("gemini-4-hydrogen", COMPLETIONS, 1_048_576),
     model("kimi-k3", COMPLETIONS, 1_048_576),
     model("gpt-5.3-codex", RESPONSES, 1_000_000),
     model("gpt-5.4-nano", RESPONSES, 400_000),
@@ -91,6 +96,8 @@ pub const COPILOT_MODELS: &[CatalogModel] = &[
     model("gpt-6-sol", RESPONSES, 1_000_000),
     model("gpt-6.1-sol", RESPONSES, 1_050_000),
     model("gpt-6.1-terra", RESPONSES, 1_050_000),
+    model("gpt-6.2-astra", RESPONSES, 1_050_000),
+    model("gpt-6.2-sol", RESPONSES, 1_050_000),
     model("grok-4.5", RESPONSES, 500_000),
     model("grok-4.6", RESPONSES, 500_000),
     model("grok-4.7", RESPONSES, 500_000),
@@ -113,10 +120,10 @@ mod tests {
 
     #[test]
     fn catalogs_match_the_spec_counts() {
-        assert_eq!(CHATGPT_MODELS.len(), 44);
-        assert_eq!(COPILOT_MODELS.len(), 27);
+        assert_eq!(CHATGPT_MODELS.len(), 46);
+        assert_eq!(COPILOT_MODELS.len(), 32);
         assert_eq!(KIMI_MODELS.len(), 6);
-        assert_eq!(COPILOT_MODELS.iter().filter(|m| m.api == MESSAGES).count(), 10);
-        assert_eq!(COPILOT_MODELS.iter().filter(|m| m.api == COMPLETIONS).count(), 3);
+        assert_eq!(COPILOT_MODELS.iter().filter(|m| m.api == MESSAGES).count(), 11);
+        assert_eq!(COPILOT_MODELS.iter().filter(|m| m.api == COMPLETIONS).count(), 5);
     }
 }

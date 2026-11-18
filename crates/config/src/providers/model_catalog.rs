@@ -41,45 +41,81 @@ pub fn model_reasoning_efforts(
         return Vec::new();
     }
     let id = model_id.to_lowercase();
+    let bare = id.rsplit('/').next().unwrap_or(&id);
     // Models with no reasoning-effort control at all.
-    if id.contains("gpt-4")
-        || id.contains("haiku-4")
-        || id == "deepseek-chat"
-        || id == "deepseek-reasoner"
-        || id.contains("deepseek-r")
-        || id.contains("qwen3-coder")
-        || id.contains("qwen3.5")
-        || id.contains("qwen3.7")
-        || id.contains("qwen3.8")
-        || id.contains("gemma")
-        || id.contains("kimi-k2")
-        || id.contains("mimo-")
-        || id.contains("longcat")
-        || id.contains("iceman")
-        || id.contains("embed")
-        || (id.contains("minimax-m3") && !id.contains("minimax-m3.1"))
+    if bare.contains("gpt-4")
+        || bare.contains("haiku-4")
+        || bare == "deepseek-chat"
+        || bare == "deepseek-reasoner"
+        || bare.contains("deepseek-r")
+        || bare.contains("qwen3-coder")
+        || bare.contains("qwen3.5")
+        || bare.contains("qwen3.7")
+        || bare.contains("qwen3.8")
+        || bare.contains("gemma")
+        || bare.contains("kimi-k2")
+        || bare.contains("mimo-")
+        || bare.contains("longcat")
+        || bare.contains("iceman")
+        || bare.contains("embed")
+        || (bare.contains("minimax-m3") && !bare.contains("minimax-m3.1"))
     {
         return Vec::new();
     }
     const MODEL_SETS: [(&[&str], &[&str]); 6] = [
         (
-            &["gpt-5.6", "gpt-6", "beam-free", "minimax-m3.1"],
+            &[
+                "gpt-5.6",
+                "gpt-6",
+                "beam-free",
+                "minimax-m3.1",
+                "claude-fable",
+                "claude-mythos",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-haiku-5",
+                "claude-opus-4-6",
+                "claude-opus-4.6",
+                "claude-opus-4-7",
+                "claude-opus-4.7",
+                "claude-opus-4-8",
+                "claude-opus-4.8",
+                "claude-sonnet-4-6",
+                "claude-sonnet-4.6",
+            ],
             &["low", "medium", "high", "xhigh", "max"],
         ),
-        (&["gpt-5", "grok-4", "codex"], &["low", "medium", "high", "xhigh"]),
+        (
+            &["gpt-5", "grok-4", "codex", "gemini-4"],
+            &["low", "medium", "high", "xhigh"],
+        ),
         (
             &["muse-spark", "muse-wonder"],
             &["minimal", "low", "medium", "high", "xhigh"],
         ),
-        (&["glm-5.3", "deepseek-v4.1", "kimi-k3.1"], &["low", "high", "max"]),
-        (&["glm-5.2", "deepseek-v4-pro", "claude-haiku-5"], &["high", "max"]),
         (
-            &["gemini-2.5", "gemini-3", "gemini-4", "claude-sonnet", "claude-opus", "o1", "o3", "o4", "step-5"],
+            &["glm-5.3", "deepseek-v4.1", "deepseek-flash", "kimi-k3.1", "k3.1"],
+            &["low", "high", "max"],
+        ),
+        (&["glm-5.2", "deepseek-v4-pro"], &["high", "max"]),
+        (
+            &[
+                "gemini-2.5",
+                "gemini-3",
+                "claude-sonnet",
+                "claude-opus",
+                "o1",
+                "o3",
+                "o4",
+                "step-5",
+                "gpt-oss",
+                "qwen4",
+            ],
             &["low", "medium", "high"],
         ),
     ];
     for (prefixes, efforts) in MODEL_SETS {
-        if prefixes.iter().any(|prefix| id.starts_with(prefix)) {
+        if prefixes.iter().any(|prefix| bare.starts_with(prefix)) {
             return efforts.iter().map(|e| e.to_string()).collect();
         }
     }
@@ -115,11 +151,16 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
             "gemini-4-argon",
             "claude-haiku-5-5",
             "deepseek-v4.1-flash",
+            "deepseek-v4-pro",
             "kimi-k3.1-pro",
+            "kimi-k3",
             "minimax-m3.1-flash",
+            "mimo-v2.6-pro",
+            "mimo-v2.6-flash",
             "qwen3.8-flash",
             "gpt-5.6-luna",
             "gpt-6-luna",
+            "grok-4.7",
         ],
         env_var: "OPENCODE_API_KEY",
     },
@@ -128,7 +169,12 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         name: "Anthropic",
         base_url: "https://api.anthropic.com/v1",
         api: "anthropic",
-        models: &["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"],
+        models: &[
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-haiku-5-5",
+        ],
         env_var: "ANTHROPIC_API_KEY",
     },
     BuiltinProvider {
@@ -136,7 +182,14 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         name: "OpenAI",
         base_url: "https://api.openai.com/v1",
         api: "openai-compatible",
-        models: &["gpt-5", "gpt-4.1", "o4-mini"],
+        models: &[
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+            "gpt-5.3-codex",
+        ],
         env_var: "OPENAI_API_KEY",
     },
     BuiltinProvider {
@@ -144,7 +197,12 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         name: "Google",
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         api: "openai-compatible",
-        models: &["gemini-2.5-pro", "gemini-2.5-flash"],
+        models: &[
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+        ],
         env_var: "GEMINI_API_KEY",
     },
     BuiltinProvider {
@@ -160,7 +218,7 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         name: "DeepSeek",
         base_url: "https://api.deepseek.com/v1",
         api: "openai-compatible",
-        models: &["deepseek-chat", "deepseek-reasoner"],
+        models: &["deepseek-flash", "deepseek-v4-pro"],
         env_var: "DEEPSEEK_API_KEY",
     },
     BuiltinProvider {
@@ -176,7 +234,7 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         name: "xAI",
         base_url: "https://api.x.ai/v1",
         api: "openai-responses",
-        models: &["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3"],
+        models: &["grok-4.7", "grok-4.20-reasoning", "grok-4.6", "grok-4.5", "grok-4.3"],
         env_var: "XAI_API_KEY",
     },
     BuiltinProvider {

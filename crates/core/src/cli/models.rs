@@ -35,7 +35,7 @@ pub async fn resolve_model(
     };
 
     // An explicit provider owns the whole string when it offers that id
-    // (e.g. `--provider openrouter --model openai/gpt-4o`).
+    // (e.g. `--provider openrouter --model openai/gpt-6.2-astra`).
     if let Some(explicit) = provider_flag {
         if providers.iter().any(|p| p.id == explicit && p.models.iter().any(|m| m == raw)) {
             return Ok(ResolvedModel { provider_id: explicit.to_string(), model: raw.to_string() });
@@ -250,16 +250,16 @@ mod tests {
         let (manager, agent, support) = temp_manager("slash");
         let doc = serde_json::json!({
             "providers": {
-                "router": { "baseUrl": "http://127.0.0.1:1/v1", "api": "openai-compatible", "models": [ { "id": "openai/gpt-4o" } ] }
+                "router": { "baseUrl": "http://127.0.0.1:1/v1", "api": "openai-compatible", "models": [ { "id": "openai/gpt-6.2-astra" } ] }
             }
         });
         std::fs::write(agent.join("models.json"), doc.to_string()).unwrap();
 
-        let resolved = resolve_model(&manager, Some("openai/gpt-4o"), Some("router")).await.unwrap();
-        assert_eq!((resolved.provider_id.as_str(), resolved.model.as_str()), ("router", "openai/gpt-4o"));
+        let resolved = resolve_model(&manager, Some("openai/gpt-6.2-astra"), Some("router")).await.unwrap();
+        assert_eq!((resolved.provider_id.as_str(), resolved.model.as_str()), ("router", "openai/gpt-6.2-astra"));
         // The provider/id form still works and still conflicts with a different --provider.
-        let resolved = resolve_model(&manager, Some("router/openai/gpt-4o"), None).await.unwrap();
-        assert_eq!(resolved.model, "openai/gpt-4o");
+        let resolved = resolve_model(&manager, Some("router/openai/gpt-6.2-astra"), None).await.unwrap();
+        assert_eq!(resolved.model, "openai/gpt-6.2-astra");
         assert!(resolve_model(&manager, Some("other/x"), Some("router")).await.is_err());
 
         let _ = std::fs::remove_dir_all(agent);

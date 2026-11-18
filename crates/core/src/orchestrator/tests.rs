@@ -303,6 +303,13 @@ fn local_base_urls_are_recognized() {
 fn reasoning_support_heuristic() {
     assert!(reasoning_supported("glm-5.3-flash", None));
     assert!(reasoning_supported("gpt-5-mini", None));
+    assert!(reasoning_supported("gpt-6.2-astra", None));
+    assert!(reasoning_supported("gemini-4-hydrogen", None));
+    assert!(reasoning_supported("grok-4.7", None));
+    assert!(reasoning_supported("deepseek-flash", None));
+    assert!(reasoning_supported("kimi-k3.1-pro", None));
+    assert!(reasoning_supported("openai/gpt-oss-120b", None));
+    assert!(reasoning_supported("anthropic/claude-sonnet-5-5", None));
     assert!(!reasoning_supported("text-embedding-3", None));
     // FR-076: the o-series markers only match as the leading name segment.
     assert!(reasoning_supported("o3-mini", None));
@@ -318,4 +325,11 @@ fn reasoning_support_heuristic() {
         ..Default::default()
     };
     assert!(reasoning_supported("whatever", Some(&info)));
+    let disabled = crate::pi_providers::ModelInfo {
+        id: "gpt-6.2-astra".into(),
+        name: "gpt-6.2-astra".into(),
+        reasoning: Some(false),
+        ..Default::default()
+    };
+    assert!(!reasoning_supported("gpt-6.2-astra", Some(&disabled)));
 }

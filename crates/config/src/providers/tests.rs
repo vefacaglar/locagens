@@ -226,7 +226,7 @@ fn builtin_catalog_and_configs_mask_keys() {
             provider_type: Some("anthropic".into()),
             api_key: Some("sk-ant-live-key".into()),
             display_name: Some("Anthropic (work)".into()),
-            model_settings: Some(json!({ "claude-sonnet-4-5": { "contextLimit": 200000 } })),
+            model_settings: Some(json!({ "claude-sonnet-5-5": { "contextLimit": 200000 } })),
             ..Default::default()
         },
     );
@@ -239,7 +239,7 @@ fn builtin_catalog_and_configs_mask_keys() {
     assert!(anthropic.has_api_key);
     assert_eq!(anthropic.display_name.as_deref(), Some("Anthropic (work)"));
     assert_eq!(anthropic.base_url, "https://api.anthropic.com/v1");
-    assert!(anthropic.models.contains(&"claude-sonnet-4-5".to_string()));
+    assert!(anthropic.models.contains(&"claude-sonnet-5-5".to_string()));
 
     let providers = tokio::runtime::Runtime::new()
         .unwrap()
@@ -247,10 +247,10 @@ fn builtin_catalog_and_configs_mask_keys() {
     let anthropic_meta = providers.iter().find(|p| p.id == "anthropic").unwrap();
     assert_eq!(anthropic_meta.display_name, "Anthropic (work)");
     assert_eq!(anthropic_meta.kind, "anthropic");
-    assert!(anthropic_meta.models.contains(&"claude-sonnet-4-5".to_string()));
+    assert!(anthropic_meta.models.contains(&"claude-sonnet-5-5".to_string()));
     assert!(anthropic_meta.models.iter().all(|model| !model.is_empty()));
     assert_eq!(
-        anthropic_meta.model_settings.as_ref().unwrap()["claude-sonnet-4-5"]["contextLimit"],
+        anthropic_meta.model_settings.as_ref().unwrap()["claude-sonnet-5-5"]["contextLimit"],
         200000
     );
 
@@ -293,7 +293,7 @@ fn provider_metadata_contract_shape() {
         support.join("locagens-providers-meta.json"),
         json!({
             "providers": {
-                "anthropic": { "displayName": "Anthropic", "modelSettings": { "claude-opus-4-5": { "contextLimit": 200000 } } }
+                "anthropic": { "displayName": "Anthropic", "modelSettings": { "claude-opus-5-5": { "contextLimit": 200000 } } }
             }
         })
         .to_string(),
@@ -324,7 +324,7 @@ fn provider_metadata_contract_shape() {
     assert_eq!(anthropic.kind, "anthropic");
     assert_eq!(anthropic.display_name, "Anthropic");
     assert_eq!(
-        anthropic.model_settings.as_ref().unwrap()["claude-opus-4-5"]["contextLimit"],
+        anthropic.model_settings.as_ref().unwrap()["claude-opus-5-5"]["contextLimit"],
         200000
     );
 
@@ -1084,7 +1084,7 @@ async fn chatgpt_login_over_loopback_unlocks_the_responses_models() {
     assert_eq!(model.api.as_deref(), Some("openai-responses"));
     assert_eq!(model.context_window, Some(272_000));
     assert!(manager.model_info("openai", "o4-mini").is_some());
-    assert_eq!(manager.merged_models("openai").len(), 44);
+    assert_eq!(manager.merged_models("openai").len(), 46);
 }
 
 #[tokio::test]
@@ -1198,7 +1198,7 @@ async fn copilot_credential_narrows_models_and_picks_the_base_url() {
     let tmp = tempfile::tempdir().unwrap();
     let (agent, support) = (tmp.path().join("agent"), tmp.path().join("support"));
     let manager = PiProviderManager::with_dirs(agent.clone(), support);
-    assert_eq!(manager.merged_models("github-copilot").len(), 27, "everything before sign-in");
+    assert_eq!(manager.merged_models("github-copilot").len(), 32, "everything before sign-in");
 
     let mut entry = oauth_entry("tid=1;proxy-ep=proxy.business.githubcopilot.com", "gho-ref", oauth::now_ms() + 600_000);
     entry["availableModelIds"] = json!(["claude-sonnet-5", "gpt-6-sol", "gemini-4-argon"]);
@@ -1377,4 +1377,122 @@ async fn web_search_keys_are_login_entries_but_never_model_providers() {
     assert!(manager.has_api_key("tavily"));
     std::env::remove_var("EXA_API_KEY");
     std::env::remove_var("LCGN_TEST_BRAVE");
+}
+
+#[test]
+fn builtin_catalog_lists_current_production_models() {
+    let (agent, support) = temp_dirs("builtin-models");
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    let models_of = |id: &str| -> Vec<String> {
+        manager
+            .merged_models(id)
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    };
+
+    assert_eq!(
+        models_of("anthropic"),
+        vec![
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-haiku-5-5",
+        ]
+    );
+    assert_eq!(
+        models_of("openai"),
+        vec![
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+            "gpt-5.3-codex",
+        ]
+    );
+    assert_eq!(
+        models_of("google"),
+        vec![
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+        ]
+    );
+    assert_eq!(
+        models_of("deepseek"),
+        vec!["deepseek-flash", "deepseek-v4-pro"]
+    );
+    assert_eq!(
+        models_of("xai"),
+        vec![
+            "grok-4.7",
+            "grok-4.20-reasoning",
+            "grok-4.6",
+            "grok-4.5",
+            "grok-4.3",
+        ]
+    );
+    let opencode = models_of("opencode-go");
+    assert_eq!(opencode.first().map(String::as_str), Some("glm-5.3-flash"));
+    for required in [
+        "deepseek-v4-pro",
+        "grok-4.7",
+        "kimi-k3",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-flash",
+    ] {
+        assert!(opencode.contains(&required.to_string()), "missing {required}");
+    }
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
+#[test]
+fn reasoning_efforts_match_current_model_families() {
+    let all_five = vec!["low", "medium", "high", "xhigh", "max"];
+    let four = vec!["low", "medium", "high", "xhigh"];
+    let three = vec!["low", "medium", "high"];
+
+    for id in [
+        "claude-sonnet-5-5",
+        "anthropic/claude-opus-5-5",
+        "claude-fable-5-2",
+        "claude-haiku-5-5",
+        "claude-opus-4-6",
+        "claude-sonnet-4.6",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+    ] {
+        assert_eq!(model_reasoning_efforts(id, None, None), all_five, "{id}");
+    }
+
+    for id in ["gemini-4-hydrogen", "gemini-4-carbon", "grok-4.7"] {
+        assert_eq!(model_reasoning_efforts(id, None, None), four, "{id}");
+    }
+
+    for id in [
+        "gemini-3.8-flash",
+        "claude-sonnet-4-5",
+        "openai/gpt-oss-120b",
+        "qwen4-max",
+    ] {
+        assert_eq!(model_reasoning_efforts(id, None, None), three, "{id}");
+    }
+
+    assert_eq!(
+        model_reasoning_efforts("deepseek-flash", None, None),
+        vec!["low", "high", "max"]
+    );
+    assert_eq!(
+        model_reasoning_efforts("k3.1-pro", None, None),
+        vec!["low", "high", "max"]
+    );
+    assert_eq!(
+        model_reasoning_efforts("deepseek-v4-pro", None, None),
+        vec!["high", "max"]
+    );
+    assert!(model_reasoning_efforts("claude-haiku-4-5", None, None).is_empty());
 }
