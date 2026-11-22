@@ -393,7 +393,46 @@ impl Driver {
     pub async fn load_model_choices(&mut self) {
         self.reload_model_choices().await;
         self.app.no_providers = self.app.model_choices.is_empty();
+        if let Some(popup) = self.app.popup.as_mut() {
+            if popup.kind == super::popup::PopupKind::Model {
+                popup.items = super::popup::argument_items(&self.app.model_choices, &popup.query);
+                popup.selected = popup.selected.min(popup.items.len().saturating_sub(1));
+            }
+        } else if self.app.overlay.is_none() {
+            if let Some(trigger) =
+                super::popup::detect_trigger(self.app.composer.text(), self.app.composer.cursor())
+            {
+                if trigger.kind == super::popup::PopupKind::Model {
+                    let items =
+                        super::popup::argument_items(&self.app.model_choices, &trigger.query);
+                    self.app.popup = (!items.is_empty()).then_some(super::popup::Popup {
+                        kind: super::popup::PopupKind::Model,
+                        items,
+                        selected: 0,
+                        query: trigger.query,
+                        token_start: trigger.start,
+                    });
+                }
+            }
+        }
+        if let Some(Overlay::ModelPicker(picker)) = self.app.overlay.as_mut() {
+            picker.all = self.app.model_choices.clone();
+            let count = picker.visible().len();
+            picker.selected = picker.selected.min(count.saturating_sub(1));
+        }
         self.app.dirty = true;
+    }
+
+    pub(super) fn refresh_ollama_in_background(&self) {
+        let state = self.state.clone();
+        let tx = self.models_tx.clone();
+        tokio::spawn(async move {
+            if provider_api::refresh_ollama_models(&state, true).await {
+                if let Some(tx) = tx {
+                    let _ = tx.send(()).await;
+                }
+            }
+        });
     }
 
     async fn reload_model_choices(&mut self) {
@@ -455,6 +494,7 @@ impl Driver {
         }
         if command == SlashCommand::Model(None) {
             // Like pi: a searchable picker instead of printing the table.
+            let _ = self.state.pi.refresh_ollama_models(true).await;
             self.load_model_choices().await;
             if self.app.model_choices.is_empty() {
                 return self.app.push_error("No models available. Type /login to connect a provider.");
@@ -477,6 +517,10 @@ impl Driver {
                 | SlashCommand::Model(Some(_))
         );
         let switching_model = matches!(command, SlashCommand::Model(Some(_)));
+        if switching_model {
+            let _ = self.state.pi.refresh_ollama_models(true).await;
+            self.load_model_choices().await;
+        }
         let previous_model = self.app.model.as_ref().map(|model| model.label());
         let mut session = CommandSession {
             model: self.app.model.clone(),
@@ -813,5 +857,94 @@ impl Driver {
             }
             Err(err) => self.app.push_error(err.message),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{routing::{get, post}, Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn slash_model_refreshes_newly_pulled_ollama_models_without_restart() {
+        let pulled_second = Arc::new(AtomicBool::new(false));
+        let pulled_flag = pulled_second.clone();
+        let app_router = Router::new()
+            .route(
+                "/api/tags",
+                get(move || {
+                    let pulled = pulled_flag.clone();
+                    async move {
+                        let mut models = vec![json!({ "name": "gemma4:12b" })];
+                        if pulled.load(Ordering::SeqCst) {
+                            models.push(json!({ "name": "mimo-v2.6:latest" }));
+                        }
+                        Json(json!({ "models": models }))
+                    }
+                }),
+            )
+            .route(
+                "/api/show",
+                post(|| async {
+                    Json(json!({
+                        "model_info": { "gemma4_unified.context_length": 262144 },
+                        "capabilities": ["completion", "thinking"]
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app_router).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!("lcgn-tui-ollama-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.json"),
+            json!({ "providers": { "ollama": { "baseUrl": format!("http://{addr}/v1") } } }).to_string(),
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            db: Arc::new(crate::db::Db::open(&dir).unwrap()),
+            pi: Arc::new(crate::pi_providers::PiProviderManager::with_dirs(dir.clone(), dir.clone())),
+            orchestrator: Arc::new(crate::orchestrator::Orchestrator::new()),
+            settings_path: dir.join("settings.json"),
+            default_project_path: dir.clone(),
+            processes: Arc::new(crate::services::processes::ProcessManager::new()),
+        });
+        let app = App::new(dir.clone(), None, None, "accept_edits".into(), false, None);
+        let (files_tx, _files_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (login_tx, _login_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut driver = Driver::new(
+            state,
+            app,
+            DriverConfig { no_session: true, system_prompt: None, append_system_prompt: None },
+            files_tx,
+            login_tx,
+        );
+
+        driver.perform(Action::Slash("/model".into())).await;
+        let Overlay::ModelPicker(picker) = driver.app.overlay.as_ref().expect("picker open") else {
+            panic!("expected model picker");
+        };
+        assert_eq!(
+            picker.all.iter().map(|i| i.value.as_str()).collect::<Vec<_>>(),
+            vec!["ollama/gemma4:12b"]
+        );
+
+        // Simulate pulling a second Ollama model while the TUI session stays open.
+        pulled_second.store(true, Ordering::SeqCst);
+        driver.app.overlay = None;
+        driver.perform(Action::Slash("/model".into())).await;
+        let Overlay::ModelPicker(picker) = driver.app.overlay.as_ref().expect("picker open") else {
+            panic!("expected model picker");
+        };
+        assert_eq!(
+            picker.all.iter().map(|i| i.value.as_str()).collect::<Vec<_>>(),
+            vec!["ollama/gemma4:12b", "ollama/mimo-v2.6:latest"]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

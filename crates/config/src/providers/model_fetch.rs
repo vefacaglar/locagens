@@ -1,6 +1,8 @@
 use super::*;
 use super::auth_store::literal_ui_key;
 use super::model_catalog::is_anthropic;
+use super::model_refresh::CachedModelMetadata;
+use super::ollama::is_keyless_provider;
 
 /// Short human-readable error summary from an API error body.
 fn summarize_error(body: &Value) -> String {
@@ -79,6 +81,21 @@ impl PiProviderManager {
                 _ => None,
             },
         };
+
+        if provider_id.as_deref() == Some("ollama") {
+            let discovered = self
+                .discover_ollama_models(&base_url, api_key.as_deref())
+                .await?;
+            let ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+            if self.is_configured_base_url("ollama", &base_url) {
+                let details: HashMap<String, CachedModelMetadata> = discovered
+                    .into_iter()
+                    .map(|m| (m.id, m.metadata))
+                    .collect();
+                self.store_live_list_with_details("ollama", &ids, &details)?;
+            }
+            return Ok(ids);
+        }
 
         let mut models: Vec<String> = Vec::new();
 
@@ -164,12 +181,21 @@ impl PiProviderManager {
             }
             None => None,
         }
-        .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No API key available for provider \"{}\"",
-                    input.provider_id
-                )
-            })?;
+        .filter(|k| !k.is_empty());
+        if api_key.is_none() && !is_keyless_provider(&input.provider_id, base_url) {
+            anyhow::bail!(
+                "No API key available for provider \"{}\"",
+                input.provider_id
+            );
+        }
+        let api_key = api_key.unwrap_or_default();
+
+        if input.provider_id == "ollama"
+            && input.model.as_deref().map(str::trim).is_none_or(str::is_empty)
+            && self.merged_models("ollama").is_empty()
+        {
+            let _ = self.refresh_ollama_models(false).await;
+        }
 
         let model = input
             .model
@@ -185,18 +211,19 @@ impl PiProviderManager {
             });
 
         let (content, usage) = if is_anthropic(&input.provider_id, &api, base_url) {
-                let response = self
+                let mut request = self
                     .http
                     .post(format!("{base_url}/messages"))
-                    .header("x-api-key", &api_key)
                     .header("anthropic-version", "2023-06-01")
                     .json(&json!({
                         "model": model,
                         "max_tokens": 32,
                         "messages": [{ "role": "user", "content": "Reply with the single word: pong" }]
-                    }))
-                    .send()
-                    .await?;
+                    }));
+                if !api_key.is_empty() {
+                    request = request.header("x-api-key", &api_key);
+                }
+                let response = request.send().await?;
                 let status = response.status();
                 let body: Value = response.json().await.unwrap_or(Value::Null);
                 if !status.is_success() {
@@ -216,12 +243,14 @@ impl PiProviderManager {
                 let mut request = self
                     .http
                     .post(format!("{base_url}/chat/completions"))
-                    .bearer_auth(&api_key)
                     .json(&json!({
                         "model": model,
                         "max_tokens": 32,
                         "messages": [{ "role": "user", "content": "Reply with the single word: pong" }]
                     }));
+                if !api_key.is_empty() {
+                    request = request.bearer_auth(&api_key);
+                }
                 // OpenRouter etiquette.
                 if base_url.contains("openrouter") {
                     request = request.header("X-Title", "Locagens");

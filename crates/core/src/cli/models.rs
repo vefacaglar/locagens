@@ -21,6 +21,7 @@ pub async fn resolve_model(
     model: Option<&str>,
     provider: Option<&str>,
 ) -> Result<ResolvedModel, String> {
+    let _ = pi.refresh_ollama_models(false).await;
     let providers = pi.list_providers().await;
     let provider_flag = provider.map(str::trim).filter(|p| !p.is_empty());
 
@@ -37,33 +38,41 @@ pub async fn resolve_model(
     // An explicit provider owns the whole string when it offers that id
     // (e.g. `--provider openrouter --model openai/gpt-6.2-astra`).
     if let Some(explicit) = provider_flag {
-        if providers.iter().any(|p| p.id == explicit && p.models.iter().any(|m| m == raw)) {
-            return Ok(ResolvedModel { provider_id: explicit.to_string(), model: raw.to_string() });
+        if let Some(entry) = providers.iter().find(|p| p.id == explicit) {
+            if entry.models.iter().any(|m| m == raw) {
+                return Ok(ResolvedModel { provider_id: explicit.to_string(), model: raw.to_string() });
+            }
+            if explicit == "ollama" {
+                if let Ok(resolved) = resolve_ollama_model_id(entry, raw) {
+                    return Ok(ResolvedModel { provider_id: explicit.to_string(), model: resolved });
+                }
+            }
         }
     }
 
     // provider/id form.
     if let Some((flagged_provider, model_id)) = raw.split_once('/') {
+        let flagged_provider = flagged_provider.trim();
         if let Some(explicit) = provider_flag {
-            if explicit != flagged_provider.trim() {
+            if explicit != flagged_provider {
                 return Err(format!(
                     "--provider \"{explicit}\" conflicts with --model \"{raw}\"."
                 ));
             }
         }
-        validate(&providers, flagged_provider.trim(), model_id)?;
+        let resolved_model = validate(&providers, flagged_provider, model_id)?;
         return Ok(ResolvedModel {
-            provider_id: flagged_provider.trim().to_string(),
-            model: model_id.to_string(),
+            provider_id: flagged_provider.to_string(),
+            model: resolved_model,
         });
     }
 
     // Bare model id with an explicit provider.
     if let Some(explicit) = provider_flag {
-        validate(&providers, explicit, raw)?;
+        let resolved_model = validate(&providers, explicit, raw)?;
         return Ok(ResolvedModel {
             provider_id: explicit.to_string(),
-            model: raw.to_string(),
+            model: resolved_model,
         });
     }
 
@@ -73,9 +82,31 @@ pub async fn resolve_model(
         .filter(|candidate| candidate.models.iter().any(|m| m == raw))
         .collect();
     match matching.len() {
-        0 => Err(format!(
-            "Model \"{raw}\" is not offered by any authenticated provider. Run `lcgn --list-models` to see available models."
-        )),
+        0 => {
+            if let Some(ollama) = providers.iter().find(|p| p.id == "ollama") {
+                if !raw.contains(':') {
+                    let tagless = ollama_tagless_matches(ollama, raw);
+                    match tagless.len() {
+                        1 => {
+                            return Ok(ResolvedModel {
+                                provider_id: "ollama".to_string(),
+                                model: tagless[0].clone(),
+                            });
+                        }
+                        n if n > 1 => {
+                            return Err(format!(
+                                "Model \"{raw}\" for provider \"ollama\" is ambiguous ({}). Use --model ollama/model:tag to pick one.",
+                                tagless.join(", ")
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(format!(
+                "Model \"{raw}\" is not offered by any authenticated provider. Run `lcgn --list-models` to see available models."
+            ))
+        }
         1 => Ok(ResolvedModel {
             provider_id: matching[0].id.clone(),
             model: raw.to_string(),
@@ -93,14 +124,50 @@ pub async fn resolve_model(
     }
 }
 
-fn validate(providers: &[ProviderMetadata], provider_id: &str, model: &str) -> Result<(), String> {
+fn ollama_tagless_matches(entry: &ProviderMetadata, raw: &str) -> Vec<String> {
+    entry
+        .models
+        .iter()
+        .filter(|m| m.split(':').next() == Some(raw))
+        .cloned()
+        .collect()
+}
+
+fn resolve_ollama_model_id(entry: &ProviderMetadata, model: &str) -> Result<String, String> {
+    if entry.models.iter().any(|m| m == model) {
+        return Ok(model.to_string());
+    }
+    if !model.contains(':') {
+        let matches = ollama_tagless_matches(entry, model);
+        if matches.len() == 1 {
+            return Ok(matches[0].clone());
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "Model \"{model}\" for provider \"{}\" is ambiguous ({}). Specify the tag explicitly.",
+                entry.id,
+                matches.join(", ")
+            ));
+        }
+    }
+    Err(format!(
+        "Provider \"{}\" has no model \"{model}\". Available: {}.",
+        entry.id,
+        entry.models.join(", ")
+    ))
+}
+
+fn validate(providers: &[ProviderMetadata], provider_id: &str, model: &str) -> Result<String, String> {
     let Some(entry) = providers.iter().find(|p| p.id == provider_id) else {
         return Err(format!(
             "Provider \"{provider_id}\" is not configured. Run `lcgn auth login {provider_id}` or `lcgn --list-models`."
         ));
     };
+    if provider_id == "ollama" {
+        return resolve_ollama_model_id(entry, model);
+    }
     if entry.models.iter().any(|m| m == model) {
-        Ok(())
+        Ok(model.to_string())
     } else {
         Err(format!(
             "Provider \"{provider_id}\" has no model \"{model}\". Available: {}.",
@@ -119,6 +186,7 @@ fn cell(value: Option<i64>) -> String {
 /// Builds the `--list-models` table (provider, model, context, max-out,
 /// thinking, images).
 pub async fn list_models_table(pi: &PiProviderManager, search: &str) -> String {
+    let _ = pi.refresh_ollama_models(true).await;
     let providers = pi.list_providers().await;
     let needle = search.trim().to_lowercase();
     let mut rows: Vec<[String; 6]> = Vec::new();
@@ -322,6 +390,65 @@ mod tests {
         assert!(filtered.contains("mock-1"));
         let empty = list_models_table(&manager, "zzz-nope").await;
         assert!(empty.contains("No models match"));
+
+        let _ = std::fs::remove_dir_all(agent);
+        let _ = std::fs::remove_dir_all(support);
+    }
+
+    #[tokio::test]
+    async fn resolves_ollama_models_with_tagless_matching() {
+        let (manager, agent, support) = temp_manager("ollama-tagless");
+        std::fs::write(
+            agent.join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "ollama": { "baseUrl": "http://127.0.0.1:1/v1" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        std::fs::write(
+            agent.join("models-live.json"),
+            serde_json::json!({
+                "ollama": {
+                    "fetchedAtMs": now,
+                    "models": ["mimo-v2.6:latest", "gemma4:12b", "gemma4:26b"]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Bare tagless match resolves uniquely to `mimo-v2.6:latest`.
+        let resolved = resolve_model(&manager, Some("mimo-v2.6"), None).await.unwrap();
+        assert_eq!(resolved.provider_id, "ollama");
+        assert_eq!(resolved.model, "mimo-v2.6:latest");
+
+        // `ollama/mimo-v2.6` resolves to `mimo-v2.6:latest`.
+        let resolved = resolve_model(&manager, Some("ollama/mimo-v2.6"), None).await.unwrap();
+        assert_eq!(resolved.provider_id, "ollama");
+        assert_eq!(resolved.model, "mimo-v2.6:latest");
+
+        // `--provider ollama --model mimo-v2.6` resolves to `mimo-v2.6:latest`.
+        let resolved = resolve_model(&manager, Some("mimo-v2.6"), Some("ollama")).await.unwrap();
+        assert_eq!(resolved.provider_id, "ollama");
+        assert_eq!(resolved.model, "mimo-v2.6:latest");
+
+        // Exact tag still works even when multiple tags exist.
+        let resolved = resolve_model(&manager, Some("ollama/gemma4:12b"), None).await.unwrap();
+        assert_eq!(resolved.provider_id, "ollama");
+        assert_eq!(resolved.model, "gemma4:12b");
+
+        // Ambiguous tagless match errors cleanly.
+        let err = resolve_model(&manager, Some("gemma4"), None).await.unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        let err = resolve_model(&manager, Some("ollama/gemma4"), None).await.unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
 
         let _ = std::fs::remove_dir_all(agent);
         let _ = std::fs::remove_dir_all(support);

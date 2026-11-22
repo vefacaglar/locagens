@@ -107,6 +107,12 @@ pub async fn refresh_model_lists(state: &AppState) -> usize {
     outcomes.iter().filter(|(_, outcome)| outcome.is_ok()).count()
 }
 
+/// Discovers installed Ollama models (respecting the short Ollama TTL unless
+/// `force` is true). Returns `true` when Ollama answered cleanly.
+pub async fn refresh_ollama_models(state: &AppState, force: bool) -> bool {
+    state.pi.refresh_ollama_models(force).await.is_ok()
+}
+
 /// `provider/model` ids the user switched off in Settings → Providers.
 pub fn hidden_models(state: &AppState) -> HashSet<String> {
     crate::services::hidden_models::load(&state.settings_path).into_iter().collect()

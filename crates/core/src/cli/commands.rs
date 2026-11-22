@@ -89,7 +89,8 @@ pub fn help_text() -> String {
 /// comes only from the environment passes.
 pub async fn ensure_authenticated(state: &AppState, model: &ResolvedModel) -> Result<(), String> {
     let has_key = state.pi.resolve_api_key(&model.provider_id, None).await.is_some();
-    if has_key || model.provider_id == "ollama" {
+    let (base_url, _) = state.pi.resolve_endpoint(&model.provider_id);
+    if has_key || crate::pi_providers::is_keyless_provider(&model.provider_id, &base_url) {
         Ok(())
     } else {
         Err(format!(

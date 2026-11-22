@@ -465,7 +465,11 @@ impl UiStore {
         let store = *self;
         spawn(async move {
             store.load_providers().await;
-            store.refresh_model_lists().await;
+            let ollama_ok = api::providers::refresh_ollama_models(&core(), true).await;
+            let others = api::providers::refresh_model_lists(&core()).await;
+            if ollama_ok || others > 0 {
+                store.load_providers().await;
+            }
         });
     }
 

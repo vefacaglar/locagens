@@ -1496,3 +1496,274 @@ fn reasoning_efforts_match_current_model_families() {
     );
     assert!(model_reasoning_efforts("claude-haiku-4-5", None, None).is_empty());
 }
+
+#[tokio::test]
+async fn ollama_base_url_respects_priority_order() {
+    let _guard = ENV_VAR_TEST_LOCK.lock().await;
+    let (agent, support) = temp_dirs("ollama-url");
+    std::env::remove_var("OLLAMA_BASE_URL");
+    std::env::remove_var("OLLAMA_HOST");
+
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    assert_eq!(manager.resolve_base_url("ollama"), "http://localhost:11434/v1");
+    assert!(!manager.provider_ids().contains(&"ollama".to_string()));
+
+    std::env::set_var("OLLAMA_HOST", "mac-studio.local");
+    assert_eq!(manager.resolve_base_url("ollama"), "http://mac-studio.local:11434/v1");
+    assert!(manager.provider_ids().contains(&"ollama".to_string()));
+
+    std::env::set_var("OLLAMA_BASE_URL", "http://127.0.0.1:22434");
+    assert_eq!(manager.resolve_base_url("ollama"), "http://127.0.0.1:22434/v1");
+
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "ollama": { "baseUrl": "http://10.0.0.5:11434/v1" } } }).to_string(),
+    )
+    .unwrap();
+    assert_eq!(manager.resolve_base_url("ollama"), "http://10.0.0.5:11434/v1");
+
+    std::env::remove_var("OLLAMA_BASE_URL");
+    std::env::remove_var("OLLAMA_HOST");
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
+#[tokio::test]
+async fn ollama_ignores_fallback_models_json_for_url_and_models() {
+    let _guard = ENV_VAR_TEST_LOCK.lock().await;
+    std::env::remove_var("OLLAMA_BASE_URL");
+    std::env::remove_var("OLLAMA_HOST");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("primary");
+    let fallback = tmp.path().join("fallback");
+    let support = tmp.path().join("support");
+    std::fs::create_dir_all(&primary).unwrap();
+    std::fs::create_dir_all(&fallback).unwrap();
+    std::fs::create_dir_all(&support).unwrap();
+
+    // Legacy fallback `~/.pi/agent/models.json` with a stale host + static models.
+    std::fs::write(
+        fallback.join("models.json"),
+        json!({
+            "providers": {
+                "ollama": {
+                    "baseUrl": "http://mac-studio.local:11434/v1",
+                    "models": [{ "id": "stale-fallback-model" }]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let manager = PiProviderManager::with_chain(primary.clone(), support.clone(), vec![fallback]);
+    assert_eq!(manager.resolve_base_url("ollama"), "http://localhost:11434/v1");
+    assert!(manager.merged_models("ollama").is_empty());
+
+    std::env::set_var("OLLAMA_HOST", "127.0.0.1:22434");
+    assert_eq!(manager.resolve_base_url("ollama"), "http://127.0.0.1:22434/v1");
+    std::env::remove_var("OLLAMA_HOST");
+
+    // Primary models.json still overrides env & default.
+    std::fs::write(
+        primary.join("models.json"),
+        json!({ "providers": { "ollama": { "baseUrl": "http://10.0.0.9:11434/v1" } } }).to_string(),
+    )
+    .unwrap();
+    assert_eq!(manager.resolve_base_url("ollama"), "http://10.0.0.9:11434/v1");
+}
+
+#[test]
+fn models_live_json_backward_compat_and_model_details() {
+    let (agent, support) = temp_dirs("live-details");
+    // Legacy models-live.json without `modelDetails` still loads cleanly.
+    std::fs::write(
+        agent.join("models-live.json"),
+        json!({
+            "legacy": { "fetchedAtMs": 9_999_999_999_999_u64, "models": ["legacy-a"] },
+            "ollama": {
+                "fetchedAtMs": 9_999_999_999_999_u64,
+                "models": ["gemma4:12b", "mimo-v2.6:latest"],
+                "modelDetails": {
+                    "gemma4:12b": { "name": "gemma4:12b", "contextWindow": 262144, "reasoning": true },
+                    "mimo-v2.6:latest": { "name": "mimo-v2.6", "contextWindow": 262144, "maxTokens": 8192, "reasoning": true }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "legacy": { "baseUrl": "http://127.0.0.1:1/v1" } } }).to_string(),
+    )
+    .unwrap();
+
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    assert!(manager.provider_ids().contains(&"ollama".to_string()));
+    assert_eq!(
+        manager.merged_models("legacy").into_iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec!["legacy-a"]
+    );
+    let gemma = manager.model_info("ollama", "gemma4:12b").unwrap();
+    assert_eq!(gemma.context_window, Some(262_144));
+    assert_eq!(gemma.reasoning, Some(true));
+    let mimo = manager.model_info("ollama", "mimo-v2.6:latest").unwrap();
+    assert_eq!(mimo.name, "mimo-v2.6");
+    assert_eq!(mimo.max_tokens, Some(8192));
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
+#[tokio::test]
+async fn ollama_discovery_show_filtering_empty_clear_and_keyless_flows() {
+    use axum::{routing::{get, post}, Json, Router};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct MockState {
+        empty_mode: Arc<AtomicBool>,
+        proxy_404_mode: Arc<AtomicBool>,
+        tags_hits: Arc<AtomicUsize>,
+    }
+
+    let state = MockState {
+        empty_mode: Arc::new(AtomicBool::new(false)),
+        proxy_404_mode: Arc::new(AtomicBool::new(false)),
+        tags_hits: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let s1 = state.clone();
+    let app = Router::new()
+        .route(
+            "/api/tags",
+            get(move || {
+                let st = s1.clone();
+                async move {
+                    st.tags_hits.fetch_add(1, Ordering::SeqCst);
+                    if st.proxy_404_mode.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::NOT_FOUND, Json(json!({ "error": "not found" })));
+                    }
+                    if st.empty_mode.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::OK, Json(json!({ "models": [] })));
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({
+                            "models": [
+                                { "name": "gemma4:12b", "capabilities": ["completion", "vision"] },
+                                { "name": "bge-m3:latest", "capabilities": ["embedding"] },
+                                { "name": "mimo-v2.6:latest" }
+                            ]
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/show",
+            post(|Json(body): Json<Value>| async move {
+                match body.get("name").and_then(Value::as_str) {
+                    Some("gemma4:12b") => Json(json!({
+                        "model_info": { "gemma4_unified.context_length": 262144 },
+                        "capabilities": ["completion", "thinking"],
+                        "thinking": { "values": [false, true], "default": true }
+                    })),
+                    Some("bge-m3:latest") => Json(json!({
+                        "model_info": { "bert.context_length": 8192 },
+                        "capabilities": ["embedding"]
+                    })),
+                    _ => Json(json!({
+                        "model_info": { "qwen3_5.context_length": 262144 },
+                        "capabilities": ["completion", "thinking"]
+                    })),
+                }
+            }),
+        )
+        .route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({ "data": [ { "id": "llama3.3:70b" }, { "id": "nomic-embed-text:latest" } ] }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "choices": [{ "message": { "content": "pong" } }],
+                    "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+                }))
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{addr}/v1");
+
+    let (agent, support) = temp_dirs("ollama-live");
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "ollama": { "baseUrl": base_url } } }).to_string(),
+    )
+    .unwrap();
+
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    // Discovered via refresh_stale_model_lists (keyless).
+    let outcomes = manager.refresh_stale_model_lists(MODEL_LIST_MAX_AGE).await;
+    assert!(outcomes.iter().any(|(id, res)| id == "ollama" && res == &Ok(2)), "{outcomes:?}");
+
+    let ids: Vec<String> = manager.merged_models("ollama").into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec!["gemma4:12b", "mimo-v2.6:latest"]);
+    assert_eq!(manager.model_info("ollama", "gemma4:12b").unwrap().context_window, Some(262_144));
+    assert_eq!(manager.model_info("ollama", "gemma4:12b").unwrap().reasoning, Some(true));
+
+    // TTL prevents refetch on `force = false`.
+    let hits_before = state.tags_hits.load(Ordering::SeqCst);
+    assert_eq!(manager.refresh_ollama_models(false).await.unwrap(), 2);
+    assert_eq!(state.tags_hits.load(Ordering::SeqCst), hits_before);
+
+    // Keyless test_provider succeeds without an API key.
+    let (pong, _) = manager
+        .test_provider(&TestProviderInput {
+            provider_id: "ollama".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(pong, "pong");
+
+    // 404 on /api/tags falls back to OpenAI /v1/models + fallback metadata.
+    state.proxy_404_mode.store(true, Ordering::SeqCst);
+    let fetched = manager
+        .fetch_remote_model_ids(&FetchModelsInput {
+            provider_id: Some("ollama".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(fetched, vec!["llama3.3:70b"]);
+    assert_eq!(manager.model_info("ollama", "llama3.3:70b").unwrap().context_window, Some(131_072));
+
+    // 0 chat models updates cache to empty so deleted models disappear.
+    state.proxy_404_mode.store(false, Ordering::SeqCst);
+    state.empty_mode.store(true, Ordering::SeqCst);
+    assert_eq!(manager.refresh_ollama_models(true).await.unwrap(), 0);
+    assert!(manager.merged_models("ollama").is_empty());
+
+    // Unreachable Ollama leaves existing cached list intact and is non-fatal.
+    state.empty_mode.store(false, Ordering::SeqCst);
+    assert_eq!(manager.refresh_ollama_models(true).await.unwrap(), 2);
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "ollama": { "baseUrl": "http://127.0.0.1:1/v1" } } }).to_string(),
+    )
+    .unwrap();
+    assert!(manager.refresh_ollama_models(true).await.is_err());
+    assert_eq!(manager.merged_models("ollama").len(), 2);
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}

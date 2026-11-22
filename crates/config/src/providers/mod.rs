@@ -35,9 +35,11 @@ mod auth_store;
 mod model_catalog;
 mod model_fetch;
 mod model_refresh;
+mod ollama;
 pub mod search_providers;
 
-pub use model_refresh::MODEL_LIST_MAX_AGE;
+pub use model_refresh::{CachedModelMetadata, MODEL_LIST_MAX_AGE, OLLAMA_MODEL_LIST_MAX_AGE};
+pub use ollama::is_keyless_provider;
 pub use search_providers::{is_search_provider, search_provider, SearchProvider, SEARCH_PROVIDERS};
 
 pub use model_catalog::model_reasoning_efforts;

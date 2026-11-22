@@ -219,6 +219,8 @@ async fn event_loop(terminal: &mut Tui, state: Arc<AppState>, config: ReplConfig
 }
 
 async fn handle_terminal_event(driver: &mut Driver, event: Event, last_char_at: &mut Option<Instant>) {
+    let was_model_trigger = driver.app.popup.as_ref().is_some_and(|p| p.kind == popup::PopupKind::Model)
+        || driver.app.composer.text().starts_with("/model ");
     let actions = match event {
         Event::Key(key) => driver.app.on_key(normalize_key(key, last_char_at)),
         Event::Paste(text) => driver.app.on_paste(&text),
@@ -232,6 +234,11 @@ async fn handle_terminal_event(driver: &mut Driver, event: Event, last_char_at: 
         }
         _ => Vec::new(),
     };
+    let is_model_trigger = driver.app.popup.as_ref().is_some_and(|p| p.kind == popup::PopupKind::Model)
+        || driver.app.composer.text().starts_with("/model ");
+    if !was_model_trigger && is_model_trigger {
+        driver.refresh_ollama_in_background();
+    }
     for action in actions {
         driver.perform(action).await;
     }

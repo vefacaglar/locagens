@@ -20,6 +20,9 @@ pub(super) fn ProvidersTab() -> Element {
     let login_task: Signal<Option<dioxus::core::Task>> = use_signal(|| None);
     let refresh = use_signal(|| 0u32);
     use_effect(move || {
+        store.refresh_providers();
+    });
+    use_effect(move || {
         let _ = refresh.read();
         reload_accounts(accounts);
     });

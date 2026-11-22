@@ -133,7 +133,7 @@ pub(super) struct BuiltinProvider {
     name: &'static str,
     base_url: &'static str,
     api: &'static str,
-    models: &'static [&'static str],
+    pub(super) models: &'static [&'static str],
     pub(super) env_var: &'static str,
 }
 
@@ -327,15 +327,17 @@ impl PiProviderManager {
         {
             return Some(entry);
         }
-        for directory in &self.fallback_dirs {
-            let models = Self::read_json(&directory.join("models.json"));
-            if let Some(entry) = models
-                .get("providers")
-                .and_then(|providers| providers.get(provider_id))
-                .and_then(Value::as_object)
-                .cloned()
-            {
-                return Some(entry);
+        if provider_id != "ollama" {
+            for directory in &self.fallback_dirs {
+                let models = Self::read_json(&directory.join("models.json"));
+                if let Some(entry) = models
+                    .get("providers")
+                    .and_then(|providers| providers.get(provider_id))
+                    .and_then(Value::as_object)
+                    .cloned()
+                {
+                    return Some(entry);
+                }
             }
         }
         self.codex_config_providers()
@@ -415,15 +417,17 @@ impl PiProviderManager {
     /// entries win for matching model ids.
     pub(super) fn models_store_models(&self, provider_id: &str) -> Vec<ModelInfo> {
         let mut models: Vec<ModelInfo> = Vec::new();
-        for directory in self.fallback_dirs.iter().rev() {
-            for model in Self::parse_models_store_file(
-                &directory.join("models-store.json"),
-                provider_id,
-            ) {
-                if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
-                    *existing = model;
-                } else {
-                    models.push(model);
+        if provider_id != "ollama" {
+            for directory in self.fallback_dirs.iter().rev() {
+                for model in Self::parse_models_store_file(
+                    &directory.join("models-store.json"),
+                    provider_id,
+                ) {
+                    if let Some(existing) = models.iter_mut().find(|m| m.id == model.id) {
+                        *existing = model;
+                    } else {
+                        models.push(model);
+                    }
                 }
             }
         }
@@ -620,6 +624,13 @@ impl PiProviderManager {
                 ids.push(provider.id.to_string());
             }
         }
+        if super::ollama::ollama_env_configured()
+            || self
+                .live_model_ids("ollama")
+                .is_some_and(|models| !models.is_empty())
+        {
+            ids.push("ollama".to_string());
+        }
         let mut unique: Vec<String> = Vec::new();
         for id in ids {
             if !unique.contains(&id) {
@@ -651,7 +662,8 @@ impl PiProviderManager {
             .cloned()
     }
 
-    /// Base URL for a provider: `models.json` override → built-in →
+    /// Base URL for a provider: `models.json` override → env override
+    /// (for Ollama: `OLLAMA_BASE_URL`, then `OLLAMA_HOST`) → built-in →
     /// first `models-store.json` model baseUrl.
     pub(super) fn resolve_base_url(&self, provider_id: &str) -> String {
         if let Some(url) = self
@@ -662,6 +674,20 @@ impl PiProviderManager {
             .filter(|url| !url.is_empty())
         {
             return url.to_string();
+        }
+        if provider_id == "ollama" {
+            if let Some(url) = std::env::var("OLLAMA_BASE_URL")
+                .ok()
+                .and_then(|raw| super::ollama::normalize_ollama_base_url(&raw, false))
+            {
+                return url;
+            }
+            if let Some(url) = std::env::var("OLLAMA_HOST")
+                .ok()
+                .and_then(|raw| super::ollama::normalize_ollama_base_url(&raw, true))
+            {
+                return url;
+            }
         }
         if let Some(builtin) = builtin(provider_id) {
             return builtin.base_url.to_string();

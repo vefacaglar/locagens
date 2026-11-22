@@ -80,6 +80,12 @@ pub fn ModelPicker() -> Element {
     let mut query = use_signal(String::new);
     let mut highlighted = use_signal(|| 0usize);
     let open = *store.model_picker_open.read();
+    use_effect(move || {
+        if *store.model_picker_open.read() {
+            // Pick up newly pulled/removed Ollama models and credentials added elsewhere.
+            store.refresh_providers();
+        }
+    });
     let catalog = store.visible_catalog();
     let selected_provider = store.selected_provider.read().clone();
     let selected_model = store.selected_model.read().clone();
@@ -136,8 +142,6 @@ pub fn ModelPicker() -> Element {
                     if open {
                         close();
                     } else {
-                        // Pick up credentials added elsewhere (CLI, pi, Settings).
-                        store.refresh_providers();
                         store.model_picker_open.set(true);
                     }
                 },
