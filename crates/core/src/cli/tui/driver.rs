@@ -423,11 +423,15 @@ impl Driver {
         self.app.dirty = true;
     }
 
-    pub(super) fn refresh_ollama_in_background(&self) {
+    pub(super) fn refresh_local_in_background(&self) {
         let state = self.state.clone();
         let tx = self.models_tx.clone();
         tokio::spawn(async move {
-            if provider_api::refresh_ollama_models(&state, true).await {
+            let (ollama_ok, apple_fm_ok) = tokio::join!(
+                provider_api::refresh_ollama_models(&state, true),
+                provider_api::refresh_apple_fm_models(&state, true),
+            );
+            if ollama_ok || apple_fm_ok {
                 if let Some(tx) = tx {
                     let _ = tx.send(()).await;
                 }
@@ -494,7 +498,10 @@ impl Driver {
         }
         if command == SlashCommand::Model(None) {
             // Like pi: a searchable picker instead of printing the table.
-            let _ = self.state.pi.refresh_ollama_models(true).await;
+            let _ = tokio::join!(
+                self.state.pi.refresh_ollama_models(true),
+                self.state.pi.refresh_apple_fm_models(true),
+            );
             self.load_model_choices().await;
             if self.app.model_choices.is_empty() {
                 return self.app.push_error("No models available. Type /login to connect a provider.");
@@ -518,7 +525,10 @@ impl Driver {
         );
         let switching_model = matches!(command, SlashCommand::Model(Some(_)));
         if switching_model {
-            let _ = self.state.pi.refresh_ollama_models(true).await;
+            let _ = tokio::join!(
+                self.state.pi.refresh_ollama_models(true),
+                self.state.pi.refresh_apple_fm_models(true),
+            );
             self.load_model_choices().await;
         }
         let previous_model = self.app.model.as_ref().map(|model| model.label());
@@ -929,7 +939,12 @@ mod tests {
             panic!("expected model picker");
         };
         assert_eq!(
-            picker.all.iter().map(|i| i.value.as_str()).collect::<Vec<_>>(),
+            picker
+                .all
+                .iter()
+                .map(|i| i.value.as_str())
+                .filter(|v| v.starts_with("ollama/"))
+                .collect::<Vec<_>>(),
             vec!["ollama/gemma4:12b"]
         );
 
@@ -941,7 +956,12 @@ mod tests {
             panic!("expected model picker");
         };
         assert_eq!(
-            picker.all.iter().map(|i| i.value.as_str()).collect::<Vec<_>>(),
+            picker
+                .all
+                .iter()
+                .map(|i| i.value.as_str())
+                .filter(|v| v.starts_with("ollama/"))
+                .collect::<Vec<_>>(),
             vec!["ollama/gemma4:12b", "ollama/mimo-v2.6:latest"]
         );
 

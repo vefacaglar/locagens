@@ -97,6 +97,50 @@ pub fn all_tool_defs() -> Vec<Value> {
     defs
 }
 
+/// Minimal tool definitions for small-context models (`<= 8192` tokens).
+/// Chat mode sends 0 tools; Plan sends read-only tools; write modes send core
+/// read/write/command tools with concise descriptions.
+pub fn compact_tool_defs(mode: &str) -> Vec<Value> {
+    if mode == "chat" {
+        return Vec::new();
+    }
+    let mut defs = vec![
+        def("read_file", "Read a workspace file.",
+            json!({
+                "path": path_prop("Relative path."),
+                "offset": json!({ "type": "integer" }),
+                "limit": json!({ "type": "integer" })
+            }), &["path"]),
+        def("list_directory", "List workspace directory entries.",
+            json!({ "path": path_prop("Relative dir (default root).") }), &[]),
+        def("search_files", "Search file text across the workspace.",
+            json!({
+                "query": json!({ "type": "string" }),
+                "path": path_prop("Optional subdir."),
+                "file_pattern": json!({ "type": "string" })
+            }), &["query"]),
+    ];
+    if mode == "plan" {
+        return defs;
+    }
+    defs.extend([
+        def("write_file", "Create or overwrite a workspace file.",
+            json!({
+                "path": path_prop("Relative path."),
+                "content": json!({ "type": "string" })
+            }), &["path", "content"]),
+        def("edit_file", "Replace exact unique old_text in a workspace file.",
+            json!({
+                "path": path_prop("Relative path."),
+                "old_text": json!({ "type": "string" }),
+                "new_text": json!({ "type": "string" })
+            }), &["path", "old_text", "new_text"]),
+        def("run_command", "Run a shell command in the project folder.",
+            json!({ "command": json!({ "type": "string" }) }), &["command"]),
+    ]);
+    defs
+}
+
 fn base_tool_defs() -> Vec<Value> {
     vec![
         def("read_file", "Read a text file from the workspace. Returns numbered lines (at most ~24k characters per call) and the file's total line count. For a large file read it in pieces with offset/limit.",

@@ -194,6 +194,7 @@ fn request_bodies_match_protocols() {
         model: "m".into(),
         reasoning_effort: Some("high".into()),
         max_tokens: None,
+        context_window: None,
         reasoning_supported: true,
         quirk: ProviderQuirk::None,
     };
@@ -251,6 +252,7 @@ fn responses_request_body_matches_wire_api() {
         model: "gpt-5".into(),
         reasoning_effort: Some("high".into()),
         max_tokens: Some(1024),
+        context_window: None,
         reasoning_supported: true,
         quirk: ProviderQuirk::None,
     };
@@ -620,6 +622,7 @@ fn image_endpoint(api: &str) -> Endpoint {
         model: "m".into(),
         reasoning_effort: None,
         max_tokens: None,
+        context_window: None,
         reasoning_supported: false,
         quirk: ProviderQuirk::None,
     }
@@ -667,4 +670,29 @@ fn anthropic_user_image_becomes_base64_block() {
     assert_eq!(content[1]["text"], "look");
     let image_only = anthropic_body(&image_endpoint("anthropic"), "", &[user_with_image("")], &[]);
     assert_eq!(image_only["messages"][0]["content"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn openai_body_clamps_max_tokens_to_remaining_context_budget() {
+    let endpoint = Endpoint {
+        base_url: "http://127.0.0.1:1976/v1".into(),
+        api: "openai-compatible".into(),
+        model: "system".into(),
+        max_tokens: Some(1024),
+        context_window: Some(4096),
+        ..Default::default()
+    };
+    let short_msg = vec![LlmMessage { role: "user".into(), content: "hi".into(), ..Default::default() }];
+    let short_body = openai_body(&endpoint, "You are helpful.", &short_msg, &[]);
+    assert_eq!(short_body["max_tokens"], 1024);
+
+    // ~3,600 tokens of input in a 4,096 window clamps max_tokens below 1024.
+    let long_msg = vec![LlmMessage {
+        role: "user".into(),
+        content: "x".repeat(10_800),
+        ..Default::default()
+    }];
+    let long_body = openai_body(&endpoint, "You are helpful.", &long_msg, &[]);
+    let max_tok = long_body["max_tokens"].as_i64().unwrap();
+    assert!((64..1024).contains(&max_tok), "unexpected clamped max_tokens: {max_tok}");
 }

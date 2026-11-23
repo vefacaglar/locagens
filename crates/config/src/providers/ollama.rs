@@ -24,10 +24,13 @@ pub(super) struct DiscoveredOllamaModel {
     pub metadata: CachedModelMetadata,
 }
 
-/// True when a provider requires no API key: `"ollama"` or loopback URLs
-/// (`localhost`, `*.localhost`, `127.0.0.1`, `::1`, `0.0.0.0`).
+/// True when a provider requires no API key: `"ollama"`, `"apple-fm"`, or
+/// loopback URLs (`localhost`, `*.localhost`, `127.0.0.1`, `::1`, `0.0.0.0`).
 pub fn is_keyless_provider(provider_id: &str, base_url: &str) -> bool {
-    if provider_id.trim().eq_ignore_ascii_case("ollama") {
+    let provider_id = provider_id.trim();
+    if provider_id.eq_ignore_ascii_case("ollama")
+        || provider_id.eq_ignore_ascii_case(super::APPLE_FM_PROVIDER_ID)
+    {
         return true;
     }
     let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
@@ -567,6 +570,7 @@ mod tests {
     #[test]
     fn keyless_provider_matches_ollama_and_loopback_urls() {
         assert!(is_keyless_provider("ollama", "https://remote.example.com/v1"));
+        assert!(is_keyless_provider("apple-fm", "https://remote.example.com/v1"));
         for url in [
             "http://localhost:11434/v1",
             "http://sub.localhost:8080/v1",

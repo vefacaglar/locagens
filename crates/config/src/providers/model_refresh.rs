@@ -4,6 +4,7 @@
 //! the user declared in `models.json`), so stale catalog entries — the
 //! built-in defaults or an old `pi` `models-store.json` — drop out.
 
+use super::apple_fm::{discover_apple_fm_models, APPLE_FM_MODEL_LIST_MAX_AGE, APPLE_FM_PROVIDER_ID};
 use super::ollama::is_keyless_provider;
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -73,7 +74,7 @@ impl PiProviderManager {
             .into_iter()
             .filter(|id| is_chat_model(id))
             .collect();
-        if provider_id == "ollama" {
+        if provider_id == "ollama" || provider_id == APPLE_FM_PROVIDER_ID {
             Some(ids)
         } else {
             (!ids.is_empty()).then_some(ids)
@@ -94,7 +95,7 @@ impl PiProviderManager {
             .into_iter()
             .filter(|id| is_chat_model(id))
             .collect();
-        if live.is_empty() && provider_id != "ollama" {
+        if live.is_empty() && provider_id != "ollama" && provider_id != APPLE_FM_PROVIDER_ID {
             return;
         }
         let live_set: HashSet<&str> = live.iter().map(String::as_str).collect();
@@ -182,11 +183,42 @@ impl PiProviderManager {
         Ok(ids.len())
     }
 
+    /// Discovers available Apple Foundation Models and updates
+    /// `models-live.json`. When `force` is false, reuses cached models younger
+    /// than [`APPLE_FM_MODEL_LIST_MAX_AGE`].
+    pub async fn refresh_apple_fm_models(&self, force: bool) -> Result<usize> {
+        if !force
+            && self
+                .live_list_age(APPLE_FM_PROVIDER_ID)
+                .is_some_and(|age| age < APPLE_FM_MODEL_LIST_MAX_AGE)
+        {
+            return Ok(self
+                .live_model_ids(APPLE_FM_PROVIDER_ID)
+                .map(|ids| ids.len())
+                .unwrap_or(0));
+        }
+        let base_url = self.resolve_base_url(APPLE_FM_PROVIDER_ID);
+        if base_url.trim().is_empty() {
+            anyhow::bail!("No baseUrl configured for {APPLE_FM_PROVIDER_ID}");
+        }
+        let discovered = discover_apple_fm_models(&base_url).await?;
+        let ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+        let details: HashMap<String, CachedModelMetadata> = discovered
+            .into_iter()
+            .map(|m| (m.id, m.metadata))
+            .collect();
+        self.store_live_list_with_details(APPLE_FM_PROVIDER_ID, &ids, &details)?;
+        Ok(ids.len())
+    }
+
     /// Fetches the provider's live model list and caches it. An empty
     /// answer keeps the previous list (it would hide every model).
     pub async fn refresh_model_list(&self, provider_id: &str) -> Result<usize> {
         if provider_id == "ollama" {
             return self.refresh_ollama_models(true).await;
+        }
+        if provider_id == APPLE_FM_PROVIDER_ID {
+            return self.refresh_apple_fm_models(true).await;
         }
         let ids: Vec<String> = self
             .fetch_remote_model_ids(&FetchModelsInput { provider_id: Some(provider_id.to_string()), ..Default::default() })
@@ -222,17 +254,25 @@ impl PiProviderManager {
         {
             refreshable.push("ollama".to_string());
         }
+        if !refreshable.iter().any(|id| id == APPLE_FM_PROVIDER_ID)
+            && !self.resolve_base_url(APPLE_FM_PROVIDER_ID).trim().is_empty()
+        {
+            refreshable.push(APPLE_FM_PROVIDER_ID.to_string());
+        }
         refreshable
     }
 
     /// Refreshes every provider whose live list is missing or older than
-    /// `max_age` (capped at [`OLLAMA_MODEL_LIST_MAX_AGE`] for `"ollama"`).
+    /// `max_age` (capped at [`OLLAMA_MODEL_LIST_MAX_AGE`] for `"ollama"` and
+    /// [`APPLE_FM_MODEL_LIST_MAX_AGE`] for `"apple-fm"`).
     /// Failures keep the old list; returns `(provider, outcome)`.
     pub async fn refresh_stale_model_lists(&self, max_age: Duration) -> Vec<(String, Result<usize, String>)> {
         let mut outcomes = Vec::new();
         for id in self.refreshable_providers().await {
             let effective_max_age = if id == "ollama" {
                 max_age.min(OLLAMA_MODEL_LIST_MAX_AGE)
+            } else if id == APPLE_FM_PROVIDER_ID {
+                max_age.min(APPLE_FM_MODEL_LIST_MAX_AGE)
             } else {
                 max_age
             };
@@ -241,6 +281,8 @@ impl PiProviderManager {
             }
             let outcome = if id == "ollama" {
                 self.refresh_ollama_models(true).await
+            } else if id == APPLE_FM_PROVIDER_ID {
+                self.refresh_apple_fm_models(true).await
             } else {
                 self.refresh_model_list(&id).await
             }

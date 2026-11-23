@@ -91,6 +91,16 @@ pub(super) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
 }
 
+/// Whether an HTTP 500 body indicates a deterministic context/transcript
+/// overflow rather than a transient server error.
+pub(super) fn is_non_retryable_server_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("exceeded the model's context size")
+        || lower.contains("context length")
+        || lower.contains("context size")
+        || lower.contains("context window")
+}
+
 /// Whether a transport error is transient (timeout / connect / request).
 pub(super) fn is_retryable_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect() || err.is_request()
@@ -131,9 +141,15 @@ pub(super) async fn send_with_retry(
                 {
                     return Ok(response);
                 }
-                let retry_after = retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
-                tracing::warn!("Provider returned {status}; retrying in {retry_after:?}");
-                tokio::time::sleep(retry_after).await;
+                let retry_delay = retry_after(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR {
+                    let body = response.text().await.unwrap_or_default();
+                    if is_non_retryable_server_error(&body) {
+                        return Err(provider_error(status, &body));
+                    }
+                }
+                tracing::warn!("Provider returned {status}; retrying in {retry_delay:?}");
+                tokio::time::sleep(retry_delay).await;
                 attempt += 1;
             }
             Err(err) => {
@@ -240,5 +256,51 @@ mod provider_error_tests {
         let text = provider_error(StatusCode::NOT_FOUND, r#"{"error":{"message":"no such model"}}"#).to_string();
         assert!(text.starts_with("Provider returned 404 Not Found: no such model"), "{text}");
         assert!(text.contains("may not be available"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod send_with_retry_tests {
+    use super::send_with_retry;
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn context_size_500_does_not_retry() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/chat",
+            axum::routing::post({
+                let hits = hits.clone();
+                move || async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({
+                            "error": {
+                                "message": "The session's transcript exceeded the model's context size.",
+                                "type": "server_error",
+                                "code": "500"
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/chat");
+        let err = send_with_retry(|| client.post(&url).json(&json!({})))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(err.contains("exceeded the model's context size"), "{err}");
     }
 }

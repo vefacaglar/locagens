@@ -162,6 +162,26 @@ async fn incomplete_or_failed_streams_are_errors() {
     let endpoint = Endpoint { base_url: base, api: "anthropic".into(), model: "m".into(), ..Default::default() };
     let err = call(&endpoint).await.unwrap_err();
     assert!(err.to_string().contains("Overloaded"), "{err}");
+
+    let openai_sse_err =
+        "event: error\ndata: {\"error\":{\"type\":\"server_error\",\"message\":\"Provided 8.768 tokens, but the maximum allowed is 4.096.\",\"code\":\"500\"}}\n\n".to_string();
+    let base = serve_once("text/event-stream", openai_sse_err).await;
+    let endpoint = Endpoint { base_url: base, api: "openai-compatible".into(), model: "system".into(), ..Default::default() };
+    let err = call(&endpoint).await.unwrap_err();
+    assert!(err.to_string().contains("maximum allowed is 4.096"), "{err}");
+
+    // Usage/metadata chunks with `"error": null` must not fail the stream.
+    let null_error_usage = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"error\":null,\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_string();
+    let base = serve_once("text/event-stream", null_error_usage).await;
+    let endpoint = Endpoint { base_url: base, api: "openai-compatible".into(), model: "m".into(), ..Default::default() };
+    let outcome = call(&endpoint).await.unwrap();
+    assert_eq!(outcome.content, "ok");
+    assert_eq!(outcome.usage.unwrap().input_tokens, 3);
 }
 
 /// FR-015: a non-streaming OpenAI body keeps its output token count.

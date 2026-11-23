@@ -262,6 +262,14 @@ pub(super) const BUILTINS: &[BuiltinProvider] = &[
         models: &[],
         env_var: "",
     },
+    BuiltinProvider {
+        id: "apple-fm",
+        name: "Apple Foundation Models",
+        base_url: "http://127.0.0.1:1976/v1",
+        api: "openai-compatible",
+        models: &[],
+        env_var: "",
+    },
 ];
 
 pub(super) fn builtin(id: &str) -> Option<&'static BuiltinProvider> {
@@ -327,7 +335,7 @@ impl PiProviderManager {
         {
             return Some(entry);
         }
-        if provider_id != "ollama" {
+        if provider_id != "ollama" && provider_id != "apple-fm" {
             for directory in &self.fallback_dirs {
                 let models = Self::read_json(&directory.join("models.json"));
                 if let Some(entry) = models
@@ -417,7 +425,7 @@ impl PiProviderManager {
     /// entries win for matching model ids.
     pub(super) fn models_store_models(&self, provider_id: &str) -> Vec<ModelInfo> {
         let mut models: Vec<ModelInfo> = Vec::new();
-        if provider_id != "ollama" {
+        if provider_id != "ollama" && provider_id != "apple-fm" {
             for directory in self.fallback_dirs.iter().rev() {
                 for model in Self::parse_models_store_file(
                     &directory.join("models-store.json"),
@@ -631,6 +639,13 @@ impl PiProviderManager {
         {
             ids.push("ollama".to_string());
         }
+        if super::apple_fm::apple_fm_env_configured()
+            || self
+                .live_model_ids(super::APPLE_FM_PROVIDER_ID)
+                .is_some_and(|models| !models.is_empty())
+        {
+            ids.push(super::APPLE_FM_PROVIDER_ID.to_string());
+        }
         let mut unique: Vec<String> = Vec::new();
         for id in ids {
             if !unique.contains(&id) {
@@ -686,6 +701,11 @@ impl PiProviderManager {
                 .ok()
                 .and_then(|raw| super::ollama::normalize_ollama_base_url(&raw, true))
             {
+                return url;
+            }
+        }
+        if provider_id == super::APPLE_FM_PROVIDER_ID {
+            if let Some(url) = super::apple_fm::apple_fm_env_base_url() {
                 return url;
             }
         }

@@ -73,6 +73,7 @@ pub struct Endpoint {
     pub model: String,
     pub reasoning_effort: Option<String>,
     pub max_tokens: Option<i64>,
+    pub context_window: Option<i64>,
     /// Whether the model accepts a `reasoning_effort` parameter.
     pub reasoning_supported: bool,
     /// Provider-specific request differences (headers, URLs, body fields).

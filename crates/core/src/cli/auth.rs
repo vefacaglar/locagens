@@ -132,7 +132,7 @@ fn resolve_choice(providers: &[LoginProvider], choice: &str) -> Option<String> {
 }
 
 fn sign_in_methods(provider: &LoginProvider) -> String {
-    if provider.id == "ollama" {
+    if provider.id == "ollama" || provider.id == crate::pi_providers::APPLE_FM_PROVIDER_ID {
         return "none (local)".to_string();
     }
     match &provider.oauth_label {

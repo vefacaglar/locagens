@@ -333,3 +333,66 @@ fn reasoning_support_heuristic() {
     };
     assert!(!reasoning_supported("gpt-6.2-astra", Some(&disabled)));
 }
+
+#[test]
+fn compact_prompt_and_tools_fit_small_context_models_and_leave_large_unchanged() {
+    use super::drive::{effective_context_window, is_compact_context};
+    use super::prompts::compact_system_prompt;
+    use super::tools::{compact_tool_defs, filter_tool_defs};
+    use crate::pi_providers::ModelInfo;
+
+    // Small context (4096) and apple-fm/system fallback enable compact budget;
+    // large models (> 8192) and unknown windows stay on the full budget.
+    let small = ModelInfo {
+        id: "system".into(),
+        context_window: Some(4096),
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+    let large = ModelInfo {
+        id: "gpt-6".into(),
+        context_window: Some(131_072),
+        ..Default::default()
+    };
+    assert!(is_compact_context(effective_context_window(Some(&small), "apple-fm", "system")));
+    assert!(is_compact_context(effective_context_window(None, "apple-fm", "system")));
+    assert!(!is_compact_context(effective_context_window(Some(&large), "openai", "gpt-6")));
+    assert!(!is_compact_context(effective_context_window(None, "openai", "gpt-6")));
+
+    let run = crate::db::Run {
+        mode: "accept_edits".into(),
+        project_path: "/tmp/example-project".into(),
+        ..Default::default()
+    };
+    let sys = compact_system_prompt(&run);
+    assert!(sys.contains("/tmp/example-project"), "{sys}");
+    assert!(sys.len() < 500, "compact system prompt too large: {} bytes", sys.len());
+
+    // Chat mode sends 0 tools; Plan sends 3 read-only tools; write modes send 6 core tools.
+    assert!(compact_tool_defs("chat").is_empty());
+    let plan_tools = compact_tool_defs("plan");
+    let plan_names: Vec<&str> = plan_tools
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(plan_names, ["read_file", "list_directory", "search_files"]);
+
+    let build_tools = compact_tool_defs("accept_edits");
+    let build_names: Vec<&str> = build_tools
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        build_names,
+        ["read_file", "list_directory", "search_files", "write_file", "edit_file", "run_command"]
+    );
+
+    let total_chars = sys.len() + serde_json::to_string(&build_tools).unwrap().len();
+    assert!(
+        total_chars < 3_600,
+        "compact prompt + tools ({total_chars} chars) should stay well under ~1,200 tokens"
+    );
+
+    // Full toolset for large models remains intact.
+    assert!(filter_tool_defs(&tool_names_for_mode("accept_edits")).len() > 20);
+}

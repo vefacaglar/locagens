@@ -998,10 +998,10 @@ fn login_providers_report_status_without_secrets() {
 
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(
-        &ids[..11],
-        ["opencode-go", "anthropic", "openai", "google", "openrouter", "deepseek", "groq", "xai", "github-copilot", "kimi-coding", "ollama"]
+        &ids[..12],
+        ["opencode-go", "anthropic", "openai", "google", "openrouter", "deepseek", "groq", "xai", "github-copilot", "kimi-coding", "ollama", "apple-fm"]
     );
-    assert_eq!(ids[11], "acme");
+    assert_eq!(ids[12], "acme");
     let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap();
     assert_eq!(row("anthropic").status, LoginStatus::ApiKey);
     assert_eq!(row("xai").status, LoginStatus::OAuth);
@@ -1012,6 +1012,7 @@ fn login_providers_report_status_without_secrets() {
     assert_eq!(row("openai").oauth_flow, Some(oauth::OAuthFlow::AuthUrl));
     assert_eq!(row("github-copilot").oauth_flow, Some(oauth::OAuthFlow::DeviceCode));
     assert_eq!(row("ollama").api_key_env, None);
+    assert_eq!(row("apple-fm").api_key_env, None);
 
     let raw = serde_json::to_string(&rows).unwrap();
     assert!(!raw.contains("secret"), "{raw}");
@@ -1763,6 +1764,116 @@ async fn ollama_discovery_show_filtering_empty_clear_and_keyless_flows() {
     .unwrap();
     assert!(manager.refresh_ollama_models(true).await.is_err());
     assert_eq!(manager.merged_models("ollama").len(), 2);
+
+    let _ = std::fs::remove_dir_all(agent);
+    let _ = std::fs::remove_dir_all(support);
+}
+
+#[tokio::test]
+async fn apple_fm_discovers_health_and_falls_back_to_openai_models() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct MockAppleFmState {
+        health_hits: AtomicUsize,
+        proxy_404_mode: AtomicBool,
+    }
+
+    let state = Arc::new(MockAppleFmState::default());
+    let app = axum::Router::new()
+        .route(
+            "/health",
+            axum::routing::get({
+                let state = state.clone();
+                move || async move {
+                    state.health_hits.fetch_add(1, Ordering::SeqCst);
+                    if state.proxy_404_mode.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({})));
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({
+                            "status": "fm serve is running",
+                            "models": [
+                                { "name": "system", "available": true },
+                                { "name": "pcc", "available": false, "reason": "Not in Terminal" }
+                            ]
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "object": "list",
+                    "data": [
+                        { "id": "system" },
+                        { "id": "pcc" }
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(json!({
+                    "choices": [{ "message": { "content": "pong" } }],
+                    "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
+                }))
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base_url = format!("http://{addr}/v1");
+
+    let (agent, support) = temp_dirs("apple-fm-live");
+    std::fs::write(
+        agent.join("models.json"),
+        json!({ "providers": { "apple-fm": { "baseUrl": base_url } } }).to_string(),
+    )
+    .unwrap();
+
+    let manager = PiProviderManager::with_dirs(agent.clone(), support.clone());
+    assert_eq!(manager.refresh_apple_fm_models(true).await.unwrap(), 1);
+
+    let models = manager.merged_models("apple-fm");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "system");
+    assert_eq!(models[0].name, "Apple Intelligence (AFM 3 Core)");
+    assert_eq!(models[0].context_window, Some(4096));
+    assert_eq!(models[0].max_tokens, Some(1024));
+    assert_eq!(models[0].reasoning, Some(false));
+
+    // TTL prevents refetch on `force = false`.
+    let hits_before = state.health_hits.load(Ordering::SeqCst);
+    assert_eq!(manager.refresh_apple_fm_models(false).await.unwrap(), 1);
+    assert_eq!(state.health_hits.load(Ordering::SeqCst), hits_before);
+
+    // Keyless test_provider succeeds against healthy server without an API key.
+    let (pong, _) = manager
+        .test_provider(&TestProviderInput {
+            provider_id: "apple-fm".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(pong, "pong");
+
+    // 404 on /health falls back to OpenAI /v1/models.
+    state.proxy_404_mode.store(true, Ordering::SeqCst);
+    let fetched = manager
+        .fetch_remote_model_ids(&FetchModelsInput {
+            provider_id: Some("apple-fm".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(fetched, vec!["system", "pcc"]);
 
     let _ = std::fs::remove_dir_all(agent);
     let _ = std::fs::remove_dir_all(support);

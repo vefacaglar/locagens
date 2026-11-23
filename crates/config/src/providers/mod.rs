@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+mod apple_fm;
 mod auth_store;
 mod model_catalog;
 mod model_fetch;
@@ -38,6 +39,10 @@ mod model_refresh;
 mod ollama;
 pub mod search_providers;
 
+pub use apple_fm::{
+    ensure_apple_fm_server, APPLE_FM_DEFAULT_BASE_URL, APPLE_FM_MODEL_LIST_MAX_AGE,
+    APPLE_FM_PROVIDER_ID,
+};
 pub use model_refresh::{CachedModelMetadata, MODEL_LIST_MAX_AGE, OLLAMA_MODEL_LIST_MAX_AGE};
 pub use ollama::is_keyless_provider;
 pub use search_providers::{is_search_provider, search_provider, SearchProvider, SEARCH_PROVIDERS};

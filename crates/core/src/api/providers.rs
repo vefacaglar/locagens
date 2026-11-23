@@ -113,6 +113,12 @@ pub async fn refresh_ollama_models(state: &AppState, force: bool) -> bool {
     state.pi.refresh_ollama_models(force).await.is_ok()
 }
 
+/// Discovers available Apple Foundation Models (respecting its TTL unless
+/// `force` is true). Returns `true` when discovery succeeded.
+pub async fn refresh_apple_fm_models(state: &AppState, force: bool) -> bool {
+    state.pi.refresh_apple_fm_models(force).await.is_ok()
+}
+
 /// `provider/model` ids the user switched off in Settings → Providers.
 pub fn hidden_models(state: &AppState) -> HashSet<String> {
     crate::services::hidden_models::load(&state.settings_path).into_iter().collect()

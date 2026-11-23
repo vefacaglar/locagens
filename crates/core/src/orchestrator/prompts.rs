@@ -33,6 +33,40 @@ pub(super) fn mode_rules(mode: &str) -> String {
     }
 }
 
+/// Compact system prompt (~100 tokens) for small-context models (`<= 8192`
+/// tokens, e.g. Apple Foundation Models `system` at 4,096 tokens).
+pub(super) fn compact_system_prompt(run: &crate::db::Run) -> String {
+    if let Some(custom) = run.system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let mut prompt = custom.to_string();
+        if let Some(append) = run.append_system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            prompt.push_str("\n\n");
+            prompt.push_str(append);
+        }
+        return prompt;
+    }
+
+    let workspace = if run.project_path.is_empty() {
+        "No project folder selected.".to_string()
+    } else {
+        format!("Workspace root (relative paths): {}", run.project_path)
+    };
+    let mode_line = match run.mode.as_str() {
+        "chat" => "Mode: chat. Answer directly; do not modify files or run commands.",
+        "plan" => "Mode: plan (read-only). Inspect files if needed; do not modify files or run commands.",
+        "ask_permissions" => "Mode: ask permissions. Explain actions clearly before editing or running commands.",
+        "auto" => "Mode: full access. Work autonomously while avoiding destructive actions.",
+        _ => "Mode: build. Inspect relevant files before editing.",
+    };
+    let mut prompt = format!(
+        "You are the Locagens coding assistant.\n{workspace}\n{mode_line}\nKeep answers concise and accurate."
+    );
+    if let Some(append) = run.append_system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prompt.push_str("\n\n");
+        prompt.push_str(append);
+    }
+    prompt
+}
+
 pub(super) fn system_prompt(state: &AppState, run: &crate::db::Run) -> String {
     // `--system-prompt` replaces the base prompt; `--append-system-prompt`
     // appends to whatever base ends up being used.

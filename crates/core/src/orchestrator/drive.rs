@@ -2,7 +2,7 @@
 //! endpoint/cost resolution and sub-agent loop construction.
 
 use super::*;
-use super::prompts::{sub_agent_system_prompt, system_prompt};
+use super::prompts::{compact_system_prompt, sub_agent_system_prompt, system_prompt};
 
 impl Orchestrator {
     pub fn new() -> Self {
@@ -249,6 +249,26 @@ pub(super) fn is_local_base_url(base_url: &str) -> bool {
     }
 }
 
+/// Context-window ceiling below which the orchestrator switches to a compact
+/// system prompt and minimal core toolset so models like `apple-fm/system`
+/// (4,096 tokens) do not overflow on the first turn.
+pub(super) const COMPACT_CONTEXT_WINDOW_THRESHOLD: i64 = 8_192;
+
+pub(super) fn effective_context_window(
+    info: Option<&crate::pi_providers::ModelInfo>,
+    provider_id: &str,
+    model: &str,
+) -> Option<i64> {
+    info.and_then(|info| info.context_window).or_else(|| {
+        (provider_id == crate::pi_providers::APPLE_FM_PROVIDER_ID && model == "system")
+            .then_some(4096)
+    })
+}
+
+pub(super) fn is_compact_context(context_window: Option<i64>) -> bool {
+    context_window.is_some_and(|w| w <= COMPACT_CONTEXT_WINDOW_THRESHOLD)
+}
+
 /// Builds a resolved streaming endpoint from the `pi` provider engine.
 pub(super) async fn resolve_endpoint(
     pm: &PiProviderManager,
@@ -262,8 +282,11 @@ pub(super) async fn resolve_endpoint(
         return Err(format!("No baseUrl configured for provider \"{provider_id}\"."));
     }
     let api_key = pm.resolve_api_key(provider_id, None).await.unwrap_or_default();
-    // Local servers (Ollama, LM Studio, llama.cpp, vLLM) need no key (FR-041).
-    if api_key.is_empty() && provider_id != "ollama" && !is_local_base_url(&base_url) {
+    // Local servers (Ollama, Apple FM, LM Studio, llama.cpp, vLLM) need no key (FR-041).
+    if api_key.is_empty()
+        && !crate::pi_providers::is_keyless_provider(provider_id, &base_url)
+        && !is_local_base_url(&base_url)
+    {
         return Err(format!(
             "No API key available for provider \"{provider_id}\". Add one in Settings → Providers."
         ));
@@ -278,11 +301,24 @@ pub(super) async fn resolve_endpoint(
     if let Some(model_api) = info.as_ref().and_then(|info| info.api.clone()).filter(|api| !api.is_empty()) {
         api = model_api;
     }
+    if provider_id == crate::pi_providers::APPLE_FM_PROVIDER_ID {
+        crate::pi_providers::ensure_apple_fm_server(&base_url)
+            .await
+            .map_err(|err| err.to_string())?;
+    }
     let quirk = llm::ProviderQuirk::detect(provider_id, &base_url, &api_key);
     if quirk == llm::ProviderQuirk::GithubCopilot {
         // The chat endpoint depends on the account: it is part of the token.
         base_url = pm.copilot_base_url(&api_key);
     }
+    let context_window = effective_context_window(info.as_ref(), provider_id, model);
+    let max_tokens = info
+        .as_ref()
+        .and_then(|info| info.max_tokens)
+        .or_else(|| {
+            (provider_id == crate::pi_providers::APPLE_FM_PROVIDER_ID && model == "system")
+                .then_some(1024)
+        });
     Ok(llm::Endpoint {
         base_url,
         api,
@@ -290,7 +326,8 @@ pub(super) async fn resolve_endpoint(
         session_id: session_id.to_string(),
         model: model.to_string(),
         reasoning_effort: reasoning_effort.filter(|e| !e.is_empty()).map(str::to_string),
-        max_tokens: info.as_ref().and_then(|info| info.max_tokens),
+        max_tokens,
+        context_window,
         reasoning_supported: reasoning_supported(model, info.as_ref()),
         quirk,
     })
@@ -404,51 +441,68 @@ pub(super) async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
     let mut session_start_context: Option<String> = None;
 
     let run_full = state.db.get_run_full(&run_id).unwrap_or_else(|| run.clone());
-    let tool_names = tool_names_for_mode(&run_full.mode);
+    let model_info = state.pi.model_info(&run_full.provider_id, &run_full.model);
+    let compact_budget = is_compact_context(effective_context_window(
+        model_info.as_ref(),
+        &run_full.provider_id,
+        &run_full.model,
+    ));
 
-    // Live MCP tools (qualified `mcp__<server>__<tool>` defs) are exposed in
-    // every non-readonly mode.
-    let mut tools = tools::filter_tool_defs(&tool_names);
-    if run_full.mode != "chat" && run_full.mode != "plan" && !run_full.project_path.is_empty() {
-        tools.extend(crate::services::mcp::discover_tool_defs(Some(&run_full.project_path)).await);
-    }
-    // Large MCP tool sets are loaded on demand through `tool_search`.
-    let (mut tools, deferred_tools) = tool_search::split_deferred(tools);
-    agents::apply_project_roles(&mut tools, Path::new(&run_full.project_path));
-
-    // SessionStart lifecycle hook: additional context is appended to the
-    // system prompt after the agent is constructed.
-    if !run_full.project_path.is_empty() {
-        let session_start = crate::services::hooks::run_hook_event(
-            "SessionStart",
-            Path::new(&run_full.project_path),
-            &json!({
-                "session_id": run_id,
-                "cwd": run_full.project_path,
-                "hook_event_name": "SessionStart",
-                "source": if history.len() > 1 { "resume" } else { "startup" },
-                "model": run_full.model,
-                "permission_mode": run_full.mode,
-            }),
+    let (tools, deferred_tools, system) = if compact_budget {
+        (
+            tools::compact_tool_defs(&run_full.mode),
+            Vec::new(),
+            compact_system_prompt(&run_full),
         )
-        .await;
-        if let Some(context) = session_start.context_joined() {
-            session_start_context = Some(context);
-        }
-    }
+    } else {
+        let tool_names = tool_names_for_mode(&run_full.mode);
 
-    // Codex-style <environment_context> block as the leading user message.
-    if !run_full.project_path.is_empty() && !history.is_empty() {
-        let context = env_context::environment_context_for_run(&run_full.mode, &run_full.project_path);
-        history.insert(
-            0,
-            llm::LlmMessage {
-                role: "user".into(),
-                content: context,
-                ..Default::default()
-            },
-        );
-    }
+        // Live MCP tools (qualified `mcp__<server>__<tool>` defs) are exposed in
+        // every non-readonly mode.
+        let mut tools = tools::filter_tool_defs(&tool_names);
+        if run_full.mode != "chat" && run_full.mode != "plan" && !run_full.project_path.is_empty() {
+            tools.extend(crate::services::mcp::discover_tool_defs(Some(&run_full.project_path)).await);
+        }
+        // Large MCP tool sets are loaded on demand through `tool_search`.
+        let (mut tools, deferred_tools) = tool_search::split_deferred(tools);
+        agents::apply_project_roles(&mut tools, Path::new(&run_full.project_path));
+
+        // SessionStart lifecycle hook: additional context is appended to the
+        // system prompt after the agent is constructed.
+        if !run_full.project_path.is_empty() {
+            let session_start = crate::services::hooks::run_hook_event(
+                "SessionStart",
+                Path::new(&run_full.project_path),
+                &json!({
+                    "session_id": run_id,
+                    "cwd": run_full.project_path,
+                    "hook_event_name": "SessionStart",
+                    "source": if history.len() > 1 { "resume" } else { "startup" },
+                    "model": run_full.model,
+                    "permission_mode": run_full.mode,
+                }),
+            )
+            .await;
+            if let Some(context) = session_start.context_joined() {
+                session_start_context = Some(context);
+            }
+        }
+
+        // Codex-style <environment_context> block as the leading user message.
+        if !run_full.project_path.is_empty() && !history.is_empty() {
+            let context = env_context::environment_context_for_run(&run_full.mode, &run_full.project_path);
+            history.insert(
+                0,
+                llm::LlmMessage {
+                    role: "user".into(),
+                    content: context,
+                    ..Default::default()
+                },
+            );
+        }
+
+        (tools, deferred_tools, system_prompt(&state, &run_full))
+    };
 
     let mut agent = AgentLoop {
         handle: handle.clone(),
@@ -463,7 +517,7 @@ pub(super) async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
         agent_name: None,
         history,
         tools,
-        system: system_prompt(&state, &run_full),
+        system,
         depth_left: 1,
         state: state.clone(),
         turn_diff: Arc::new(TurnDiffTracker::new()),
@@ -486,35 +540,37 @@ pub(super) async fn drive_run(state: Arc<AppState>, handle: Arc<RunHandle>) {
         .map(|message| message.content)
         .unwrap_or_else(|| run_full.task.clone());
     let prompt_block = agent.user_prompt_hook(&latest_user_prompt).await;
-    let mentioned =
-        crate::services::skills::resolve_mentioned_skills(&run_full.project_path, &latest_user_prompt);
-    let mut skill_budget: usize = 16 * 1024;
-    let mut skill_context = String::new();
-    for skill in mentioned {
-        let Some(body) = skill.body.as_deref().filter(|body| !body.trim().is_empty()) else {
-            continue;
-        };
-        let take = locagens_protocol::text::floor_char_boundary(body, skill_budget);
-        if take == 0 {
-            break;
+    if !compact_budget {
+        let mentioned =
+            crate::services::skills::resolve_mentioned_skills(&run_full.project_path, &latest_user_prompt);
+        let mut skill_budget: usize = 16 * 1024;
+        let mut skill_context = String::new();
+        for skill in mentioned {
+            let Some(body) = skill.body.as_deref().filter(|body| !body.trim().is_empty()) else {
+                continue;
+            };
+            let take = locagens_protocol::text::floor_char_boundary(body, skill_budget);
+            if take == 0 {
+                break;
+            }
+            skill_context.push_str(&format!(
+                "\n<skill_context name=\"{}\">\n",
+                skill.name
+            ));
+            skill_context.push_str(&body[..take]);
+            if take < body.len() {
+                skill_context.push_str("\n[skill body truncated]");
+            }
+            skill_context.push_str("\n</skill_context>");
+            skill_budget -= take;
+            if skill_budget == 0 {
+                break;
+            }
         }
-        skill_context.push_str(&format!(
-            "\n<skill_context name=\"{}\">\n",
-            skill.name
-        ));
-        skill_context.push_str(&body[..take]);
-        if take < body.len() {
-            skill_context.push_str("\n[skill body truncated]");
+        if !skill_context.is_empty() {
+            agent.system.push_str("\n\n## Mentioned skills\n");
+            agent.system.push_str(&skill_context);
         }
-        skill_context.push_str("\n</skill_context>");
-        skill_budget -= take;
-        if skill_budget == 0 {
-            break;
-        }
-    }
-    if !skill_context.is_empty() {
-        agent.system.push_str("\n\n## Mentioned skills\n");
-        agent.system.push_str(&skill_context);
     }
 
     // Pre-turn git baseline (best-effort): lets `/undo` restore the exact

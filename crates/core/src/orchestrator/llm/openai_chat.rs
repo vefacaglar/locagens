@@ -80,10 +80,30 @@ pub(super) fn openai_body(endpoint: &Endpoint, system: &str, messages: &[LlmMess
             body.insert("reasoning_effort".into(), json!(effort));
         }
     }
-    if let Some(max_tokens) = endpoint.max_tokens.filter(|t| *t > 0) {
+    if let Some(mut max_tokens) = endpoint.max_tokens.filter(|t| *t > 0) {
+        if let Some(window) = endpoint.context_window.filter(|w| *w > 0) {
+            let est_input = estimate_request_tokens(system, messages, tools);
+            let remaining = (window - est_input).max(64);
+            max_tokens = max_tokens.min(remaining);
+        }
         body.insert("max_tokens".into(), json!(max_tokens));
     }
     Value::Object(body)
+}
+
+fn estimate_request_tokens(system: &str, messages: &[LlmMessage], tools: &[Value]) -> i64 {
+    let mut chars = system.len();
+    for message in messages {
+        chars += message.content.len() + 16;
+        if let Some(calls) = &message.tool_calls {
+            chars += calls.iter().map(|c| c.to_string().len()).sum::<usize>();
+        }
+    }
+    if !tools.is_empty() {
+        chars += json!(tools).to_string().len();
+    }
+    // Conservative ~3 chars/token estimate for clamping max_tokens safely.
+    ((chars / 3) + 32) as i64
 }
 
 

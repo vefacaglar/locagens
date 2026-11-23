@@ -1,4 +1,5 @@
 use super::*;
+use super::apple_fm::{discover_apple_fm_models, ensure_apple_fm_server, APPLE_FM_PROVIDER_ID};
 use super::auth_store::literal_ui_key;
 use super::model_catalog::is_anthropic;
 use super::model_refresh::CachedModelMetadata;
@@ -93,6 +94,19 @@ impl PiProviderManager {
                     .map(|m| (m.id, m.metadata))
                     .collect();
                 self.store_live_list_with_details("ollama", &ids, &details)?;
+            }
+            return Ok(ids);
+        }
+
+        if provider_id.as_deref() == Some(APPLE_FM_PROVIDER_ID) {
+            let discovered = discover_apple_fm_models(&base_url).await?;
+            let ids: Vec<String> = discovered.iter().map(|m| m.id.clone()).collect();
+            if self.is_configured_base_url(APPLE_FM_PROVIDER_ID, &base_url) {
+                let details: HashMap<String, CachedModelMetadata> = discovered
+                    .into_iter()
+                    .map(|m| (m.id, m.metadata))
+                    .collect();
+                self.store_live_list_with_details(APPLE_FM_PROVIDER_ID, &ids, &details)?;
             }
             return Ok(ids);
         }
@@ -195,6 +209,14 @@ impl PiProviderManager {
             && self.merged_models("ollama").is_empty()
         {
             let _ = self.refresh_ollama_models(false).await;
+        }
+        if input.provider_id == APPLE_FM_PROVIDER_ID {
+            ensure_apple_fm_server(base_url).await?;
+            if input.model.as_deref().map(str::trim).is_none_or(str::is_empty)
+                && self.merged_models(APPLE_FM_PROVIDER_ID).is_empty()
+            {
+                let _ = self.refresh_apple_fm_models(false).await;
+            }
         }
 
         let model = input

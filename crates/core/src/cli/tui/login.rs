@@ -24,7 +24,7 @@ pub struct LoginRow {
 
 impl LoginRow {
     pub fn from_provider(provider: &LoginProvider) -> Self {
-        let keyless = provider.id == "ollama";
+        let keyless = provider.id == "ollama" || provider.id == crate::pi_providers::APPLE_FM_PROVIDER_ID;
         let has_oauth = provider.oauth_label.is_some();
         let method = match (&provider.oauth_label, keyless) {
             (_, true) => "no sign-in needed (local)".to_string(),

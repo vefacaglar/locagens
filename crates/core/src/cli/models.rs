@@ -21,7 +21,7 @@ pub async fn resolve_model(
     model: Option<&str>,
     provider: Option<&str>,
 ) -> Result<ResolvedModel, String> {
-    let _ = pi.refresh_ollama_models(false).await;
+    let _ = tokio::join!(pi.refresh_ollama_models(false), pi.refresh_apple_fm_models(false));
     let providers = pi.list_providers().await;
     let provider_flag = provider.map(str::trim).filter(|p| !p.is_empty());
 
@@ -186,7 +186,7 @@ fn cell(value: Option<i64>) -> String {
 /// Builds the `--list-models` table (provider, model, context, max-out,
 /// thinking, images).
 pub async fn list_models_table(pi: &PiProviderManager, search: &str) -> String {
-    let _ = pi.refresh_ollama_models(true).await;
+    let _ = tokio::join!(pi.refresh_ollama_models(true), pi.refresh_apple_fm_models(true));
     let providers = pi.list_providers().await;
     let needle = search.trim().to_lowercase();
     let mut rows: Vec<[String; 6]> = Vec::new();

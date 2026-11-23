@@ -237,7 +237,7 @@ async fn handle_terminal_event(driver: &mut Driver, event: Event, last_char_at: 
     let is_model_trigger = driver.app.popup.as_ref().is_some_and(|p| p.kind == popup::PopupKind::Model)
         || driver.app.composer.text().starts_with("/model ");
     if !was_model_trigger && is_model_trigger {
-        driver.refresh_ollama_in_background();
+        driver.refresh_local_in_background();
     }
     for action in actions {
         driver.perform(action).await;

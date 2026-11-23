@@ -210,9 +210,12 @@ async fn consume_response(
             let Ok(event) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
-            if event.get("type").and_then(Value::as_str) == Some("error") {
+            if event.get("type").and_then(Value::as_str) == Some("error")
+                || (event.get("error").is_some_and(|e| !e.is_null()) && event.get("choices").is_none())
+            {
                 let message = event
                     .pointer("/error/message")
+                    .or_else(|| event.get("error"))
                     .and_then(Value::as_str)
                     .unwrap_or("stream error");
                 anyhow::bail!("Provider stream error: {message}");
