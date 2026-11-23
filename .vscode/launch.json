@@ -38,6 +38,28 @@
         "command": "rustup run stable-x86_64-pc-windows-gnu cargo run -p locagens-cli --bin lcgn",
         "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
       }
+    },
+    {
+      "name": "Install lcgn CLI",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "bash scripts/install-cli.sh",
+      "cwd": "${workspaceFolder}",
+      "windows": {
+        "command": "rustup run stable-x86_64-pc-windows-gnu cargo install --path apps/cli --locked --force",
+        "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
+      }
+    },
+    {
+      "name": "Install Locagens Desktop",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "bash scripts/install-desktop.sh",
+      "cwd": "${workspaceFolder}",
+      "windows": {
+        "command": "rustup run stable-x86_64-pc-windows-gnu cargo install --path apps/desktop-rs --locked --force",
+        "env": { "PATH": "${env:USERPROFILE}\\w64devkit\\w64devkit\\bin;${env:PATH}" }
+      }
     }
   ]
 }

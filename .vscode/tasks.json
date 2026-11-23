@@ -186,6 +186,42 @@
       },
       "group": { "kind": "build", "isDefault": false },
       "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "install: lcgn CLI",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "install", "--path", "apps/cli", "--locked", "--force"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["scripts/install-cli.sh"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["scripts/install-cli.sh"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "install: locagens desktop",
+      "type": "shell",
+      "windows": {
+        "command": "rustup",
+        "args": ["run", "stable-x86_64-pc-windows-gnu", "cargo", "install", "--path", "apps/desktop-rs", "--locked", "--force"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["scripts/install-desktop.sh"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["scripts/install-desktop.sh"]
+      },
+      "group": { "kind": "build", "isDefault": false },
+      "problemMatcher": ["$rustc"]
     }
   ]
 }
